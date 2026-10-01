@@ -81,7 +81,12 @@ export default function ScheduleEditor({ value, onChange }: { value: Schedule; o
 
       {value.kind === "once" && (
         <Field label="תאריך ושעה" className="max-w-64">
-          <TextInput type="datetime-local" dir="ltr" value={value.at} onChange={(e) => onChange({ ...value, at: e.target.value })} />
+          <TextInput
+            type="datetime-local"
+            dir="ltr"
+            value={value.at}
+            onChange={(e) => onChange({ ...value, at: e.target.value })}
+          />
         </Field>
       )}
 

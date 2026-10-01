@@ -18,11 +18,15 @@ const collator = new Intl.Collator("he", { numeric: true, sensitivity: "base" })
 /** Paths compare case-insensitively and ignore a trailing backslash. */
 const pathKey = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 
+/** The folder a task is sorted/grouped by. With several sources, the first one. */
+const folderOf = (t: Task, key: "source" | "destination") => (key === "destination" ? t.destination : (t.sources[0]?.path ?? ""));
+
 export function sortTasks(tasks: Task[], { key, desc }: SortState): Task[] {
   const dir = desc ? -1 : 1;
   if (key === "order") return desc ? [...tasks].reverse() : tasks;
   return [...tasks].sort((a, b) => {
-    const primary = key === "name" ? collator.compare(a.name, b.name) : collator.compare(pathKey(a[key]), pathKey(b[key]));
+    const primary =
+      key === "name" ? collator.compare(a.name, b.name) : collator.compare(pathKey(folderOf(a, key)), pathKey(folderOf(b, key)));
     return dir * (primary || collator.compare(a.name, b.name));
   });
 }
@@ -39,8 +43,9 @@ export function groupTasks(sorted: Task[], key: SortKey): TaskGroup[] {
   const groups: TaskGroup[] = [];
   for (const t of sorted) {
     const last = groups[groups.length - 1];
-    if (last && pathKey(last.folder!) === pathKey(t[key])) last.tasks.push(t);
-    else groups.push({ folder: t[key], tasks: [t] });
+    const folder = folderOf(t, key);
+    if (last && pathKey(last.folder!) === pathKey(folder)) last.tasks.push(t);
+    else groups.push({ folder, tasks: [t] });
   }
   return groups.length < sorted.length ? groups : [{ folder: null, tasks: sorted }];
 }

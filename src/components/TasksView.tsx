@@ -69,7 +69,9 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const tasks = useMemo(() => {
     const q = query.trim().toLowerCase();
     const found = q
-      ? snap.tasks.filter((t) => [t.name, t.source, t.destination].some((s) => s.toLowerCase().includes(q)))
+      ? snap.tasks.filter((t) =>
+          [t.name, t.destination, ...t.sources.map((s) => s.path)].some((s) => s.toLowerCase().includes(q)),
+        )
       : snap.tasks;
     return sortTasks(found, sort);
   }, [snap.tasks, query, sort]);
@@ -142,7 +144,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     });
   };
 
-  const duplicate = (t: Task) => setEditing({ ...t, id: "", name: `${t.name} (עותק)`, folderName: `${t.folderName} (עותק)` });
+  // Copies get their own folder names, so they don't share (and delete) the original's backups.
+  const duplicate = (t: Task) =>
+    setEditing({
+      ...t,
+      id: "",
+      name: `${t.name} (עותק)`,
+      sources: t.sources.map((s) => ({ ...s, folderName: `${s.folderName} (עותק)` })),
+    });
 
   const queuedIds = new Set(snap.queue.map((j) => j.taskId));
   const runningId = snap.current?.taskId;
@@ -322,7 +331,16 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               {!t.enabled && <Badge>מושבת</Badge>}
                             </button>
                             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted">
-                              <PathText path={t.source} className="min-w-0 truncate" />
+                              {t.sources.length === 1 ? (
+                                <PathText path={t.sources[0].path} className="min-w-0 truncate" />
+                              ) : (
+                                <span
+                                  className="shrink-0 cursor-help underline decoration-dotted"
+                                  title={t.sources.map((s) => s.path).join("\n")}
+                                >
+                                  {t.sources.length} תיקיות מקור
+                                </span>
+                              )}
                               <ArrowLeft size={12} className="shrink-0" />
                               <PathText path={t.destination} className="min-w-0 truncate" />
                             </div>
@@ -398,11 +416,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                     icon: <FolderOpen size={14} />,
                                     onClick: () => openPath(t.destination),
                                   },
-                                  {
-                                    label: "פתיחת תיקיית המקור",
+                                  ...t.sources.map((s) => ({
+                                    label: t.sources.length === 1 ? "פתיחת תיקיית המקור" : `פתיחת מקור: ${s.folderName}`,
                                     icon: <FolderOpen size={14} />,
-                                    onClick: () => openPath(t.source),
-                                  },
+                                    onClick: () => openPath(s.path),
+                                  })),
                                   "separator",
                                   { label: "מחיקה", icon: <Trash2 size={14} />, danger: true, onClick: () => remove([t]) },
                                 ]}

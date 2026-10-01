@@ -14,6 +14,7 @@ type Key =
   | "schedule"
   | "catchUp"
   | "keepCount"
+  | "deleteBefore"
   | "fullEveryDays"
   | "reusePrevious"
   | "copyEmptyDirs"
@@ -30,6 +31,7 @@ const FIELDS: { key: Key; label: string; show: (v: Values[Key]) => ReactNode }[]
   { key: "schedule", label: "תזמון", show: (v) => describeSchedule(v as Schedule) },
   { key: "catchUp", label: "השלמת גיבוי שהוחמץ", show: (v) => yesNo(v as boolean) },
   { key: "keepCount", label: "גיבויים לשמירה", show: (v) => String(v) },
+  { key: "deleteBefore", label: "מחיקת גיבויים לפני גיבוי מלא", show: (v) => yesNo(v as boolean) },
   { key: "fullEveryDays", label: "גיבוי מלא כל X ימים", show: (v) => ((v as number) === 0 ? "אף פעם" : `${v} ימים`) },
   { key: "reusePrevious", label: "גיבוי מלא מהיר", show: (v) => yesNo(v as boolean) },
   { key: "copyEmptyDirs", label: "העתקת תיקיות ריקות", show: (v) => yesNo(v as boolean) },
@@ -60,6 +62,7 @@ export default function BulkEditDialog({
     schedule: first.schedule,
     catchUp: first.catchUp,
     keepCount: first.keepCount,
+    deleteBefore: first.deleteBefore,
     fullEveryDays: first.fullEveryDays,
     reusePrevious: first.reusePrevious,
     copyEmptyDirs: first.copyEmptyDirs,
@@ -105,6 +108,7 @@ export default function BulkEditDialog({
       case "reusePrevious":
       case "copyEmptyDirs":
       case "useGlobalFilters":
+      case "deleteBefore":
         return <Toggle checked={values[k]} onChange={(v) => set(k, v)} />;
       case "mode":
         return (

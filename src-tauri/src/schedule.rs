@@ -136,19 +136,27 @@ mod tests {
     #[test]
     fn weekly_picks_next_selected_day() {
         // 2026-10-01 is a Thursday (4)
-        let s = Schedule::Weekly { days: vec![0, 2], time: "10:00".into() };
+        let s = Schedule::Weekly {
+            days: vec![0, 2],
+            time: "10:00".into(),
+        };
         assert_eq!(next_after(&s, at("2026-10-01T12:00")), Some(at("2026-10-04T10:00")));
     }
 
     #[test]
     fn monthly_clamps_to_month_end() {
-        let s = Schedule::Monthly { day: 31, time: "01:00".into() };
+        let s = Schedule::Monthly {
+            day: 31,
+            time: "01:00".into(),
+        };
         assert_eq!(next_after(&s, at("2026-11-01T00:00")), Some(at("2026-11-30T01:00")));
     }
 
     #[test]
     fn once_fires_once() {
-        let s = Schedule::Once { at: "2026-10-05T08:30".into() };
+        let s = Schedule::Once {
+            at: "2026-10-05T08:30".into(),
+        };
         assert_eq!(next_after(&s, at("2026-10-01T00:00")), Some(at("2026-10-05T08:30")));
         assert_eq!(next_after(&s, at("2026-10-05T08:30")), None);
     }

@@ -3,7 +3,7 @@
 
 use crate::backup;
 use crate::engine::{robocopy::Robocopy, CopyEngine, EngineEvent};
-use crate::model::{BackupMode, Progress, RunRecord, RunStatus, Schedule, Trigger};
+use crate::model::{BackupMode, Progress, RunRecord, RunStatus, Schedule, SourceRun, Task, Trigger};
 use crate::schedule;
 use crate::store::Store;
 use chrono::{Duration as ChronoDuration, Local};
@@ -14,6 +14,55 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
+
+/// One record for the whole run; status is the worst of its sources.
+fn summarize(
+    id: String,
+    task: &Task,
+    trigger: Trigger,
+    mode: BackupMode,
+    started_at: chrono::DateTime<Local>,
+    sources: Vec<SourceRun>,
+) -> RunRecord {
+    let status = sources.iter().filter_map(|s| s.status).max().unwrap_or(RunStatus::Failed);
+    let message = match sources.as_slice() {
+        [] => "אין תיקיות מקור במשימה".to_string(),
+        [one] => one.message.clone(),
+        many => {
+            let count = |st: RunStatus| many.iter().filter(|s| s.status == Some(st)).count();
+            let mut parts = vec![format!("{} תיקיות", many.len())];
+            for (st, label) in [
+                (RunStatus::Success, "הצליחו"),
+                (RunStatus::Warning, "עם אזהרות"),
+                (RunStatus::Failed, "נכשלו"),
+                (RunStatus::Cancelled, "בוטלו"),
+            ] {
+                let n = count(st);
+                if n > 0 {
+                    parts.push(format!("{n} {label}"));
+                }
+            }
+            let copied: u64 = many.iter().map(|s| s.files_copied).sum();
+            format!("{}. הועתקו {copied} קבצים", parts.join(", "))
+        }
+    };
+    RunRecord {
+        id,
+        task_id: task.id.clone(),
+        task_name: task.name.clone(),
+        trigger,
+        mode,
+        started_at,
+        finished_at: Local::now(),
+        status,
+        message,
+        files_copied: sources.iter().map(|s| s.files_copied).sum(),
+        bytes_copied: sources.iter().map(|s| s.bytes_copied).sum(),
+        files_deleted: sources.iter().map(|s| s.files_deleted).sum(),
+        files_failed: sources.iter().map(|s| s.files_failed).sum(),
+        sources,
+    }
+}
 
 /// A scheduled time this late is treated as missed (computer was off or asleep).
 const MISSED_GRACE_MINUTES: i64 = 2;
@@ -110,7 +159,6 @@ impl Core {
             };
             let Some(task) = task else { continue };
             let run_id = uuid::Uuid::new_v4().to_string();
-            let log_file = logs_dir.join(format!("{run_id}.log"));
             let requested = job.mode.unwrap_or(task.mode);
             let started_at = Local::now();
             let mut progress = Progress {
@@ -120,6 +168,9 @@ impl Core {
                 mode: requested,
                 phase: "scanning".into(),
                 started_at,
+                source_index: 1,
+                source_count: task.sources.len(),
+                source_path: task.sources.first().map(|s| s.path.clone()).unwrap_or_default(),
                 files_done: 0,
                 files_total: 0,
                 bytes_done: 0,
@@ -130,48 +181,67 @@ impl Core {
             *self.current.lock().unwrap() = Some(progress.clone());
             self.changed();
 
+            let filters = crate::filters::compile(
+                task.filters
+                    .iter()
+                    .chain(global_filters.iter().filter(|_| task.use_global_filters)),
+            );
+            let ctx = backup::RunContext {
+                engine: self.engine.as_ref(),
+                filters: &filters,
+                now: started_at,
+                cancel: &self.cancel,
+            };
             let mut pending_size = 0u64;
             let mut last_emit = Instant::now();
-            let out = backup::run_backup(self.engine.as_ref(), &task, requested, &global_filters, log_file.clone(), &self.cancel, &mut |ev| {
-                match ev {
-                    EngineEvent::Totals { files, bytes } => {
-                        progress.files_total = files;
-                        progress.bytes_total = bytes;
-                        progress.phase = "copying".into();
+            let sources = backup::run_task(
+                &ctx,
+                &task,
+                requested,
+                &|i| logs_dir.join(format!("{run_id}-{i}.log")),
+                &mut |i, ev| {
+                    let mut force = false;
+                    match ev {
+                        EngineEvent::SourceStarted => {
+                            progress.source_index = i + 1;
+                            progress.source_path = task.sources[i].path.clone();
+                            progress.phase = "scanning".into();
+                            (
+                                progress.files_done,
+                                progress.files_total,
+                                progress.bytes_done,
+                                progress.bytes_total,
+                            ) = (0, 0, 0, 0);
+                            progress.current_file.clear();
+                            pending_size = 0;
+                            force = true;
+                        }
+                        EngineEvent::Phase(p) => {
+                            progress.phase = p.into();
+                            force = true;
+                        }
+                        EngineEvent::Totals { files, bytes } => {
+                            progress.files_total = files;
+                            progress.bytes_total = bytes;
+                            progress.phase = "copying".into();
+                            force = true;
+                        }
+                        EngineEvent::File { path, size } => {
+                            progress.bytes_done += pending_size;
+                            pending_size = size;
+                            progress.files_done += 1;
+                            progress.current_file = path;
+                        }
                     }
-                    EngineEvent::File { path, size } => {
-                        progress.bytes_done += pending_size;
-                        pending_size = size;
-                        progress.files_done += 1;
-                        progress.current_file = path;
+                    if force || last_emit.elapsed() >= Duration::from_millis(200) {
+                        last_emit = Instant::now();
+                        *self.current.lock().unwrap() = Some(progress.clone());
+                        let _ = self.app.emit("progress", &progress);
                     }
-                }
-                if last_emit.elapsed() >= Duration::from_millis(200) {
-                    last_emit = Instant::now();
-                    *self.current.lock().unwrap() = Some(progress.clone());
-                    let _ = self.app.emit("progress", &progress);
-                }
-            });
+                },
+            );
 
-            let record = RunRecord {
-                id: run_id,
-                task_id: task.id.clone(),
-                task_name: task.name.clone(),
-                trigger: job.trigger,
-                mode: out.mode,
-                started_at,
-                finished_at: Local::now(),
-                status: out.status,
-                message: out.message.clone(),
-                target_folder: out.target_folder,
-                files_copied: out.stats.files_copied,
-                bytes_copied: out.stats.bytes_copied,
-                files_deleted: out.stats.files_deleted,
-                files_failed: out.stats.files_failed,
-                errors: out.stats.errors,
-                exit_code: out.stats.exit_code,
-                log_file: log_file.exists().then(|| log_file.to_string_lossy().to_string()),
-            };
+            let record = summarize(run_id, &task, job.trigger, requested, started_at, sources);
             let settings = {
                 let mut s = self.store.lock().unwrap();
                 let st = s.states.entry(task.id.clone()).or_default();
@@ -240,9 +310,17 @@ impl Core {
                         }
                         let missed = now - next > ChronoDuration::minutes(MISSED_GRACE_MINUTES);
                         if !missed {
-                            due.push(Job { task_id: t.id.clone(), mode: None, trigger: Trigger::Scheduled });
+                            due.push(Job {
+                                task_id: t.id.clone(),
+                                mode: None,
+                                trigger: Trigger::Scheduled,
+                            });
                         } else if t.catch_up {
-                            due.push(Job { task_id: t.id.clone(), mode: None, trigger: Trigger::CatchUp });
+                            due.push(Job {
+                                task_id: t.id.clone(),
+                                mode: None,
+                                trigger: Trigger::CatchUp,
+                            });
                         }
                         st.next_run = schedule::next_after(&t.schedule, now);
                         dirty = true;

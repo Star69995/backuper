@@ -8,9 +8,9 @@ UI is Hebrew, RTL, light/dark. See README.md for user-facing behavior.
 - `src-tauri/src/`
   - `model.rs` - all serialized types (camelCase JSON, mirrored in `src/types.ts` - keep both in sync).
   - `schedule.rs` - next-occurrence math (local time, DST-safe) + validation.
-  - `engine/mod.rs` - `CopyEngine` trait + `CopyJob`/`Filters`. `engine/robocopy.rs` - the only implementation. Backup logic must not call robocopy directly, so the engine stays swappable.
+  - `engine/mod.rs` - `CopyEngine` trait (`mirror` for full backups, `list_files` = filtered source listing) + `CopyJob`/`Filters`. `engine/robocopy.rs` implements it. `engine/native.rs` copies an explicit file list (the changes of an incremental) with std::fs::copy. Backup logic must not call robocopy directly, so the engine stays swappable.
   - `filters.rs` - user `FilterRule`s -> engine `Filters` (+ validation).
-  - `backup.rs` - dated folders (`<folderName> YYYY-MM-DD HH-mm`, `.partial` while in progress or failed), full/incremental decision, retention, path validation.
+  - `backup.rs` - per-source chains of dated folders (`<folderName> YYYY-MM-DD HH-mm מלא|אינקרמנטלי`, `.partial` while in progress/failed; no tag = legacy full), full/incremental decision, incremental diff (source listing vs. index of full + later incrementals, by size and mtime with a 2s tolerance), retention (`prune`), delete-before, path validation. `run_task` runs all sources with one shared timestamp.
   - `core.rs` - single worker thread (one backup at a time, queue) + scheduler thread (5s tick, missed-run catch-up). Emits `snapshot-changed` and `progress` events.
   - `commands.rs` - Tauri commands. `store.rs` - JSON persistence in app data dir. `tray.rs` - tray icon/menu.
 - `src/` - React UI. `api.ts` wraps all `invoke` calls. `components/ui.tsx` has the primitives (Button, Modal, Menu, Toggle, PathText...). `components/feedback.tsx` has toasts + the confirm dialog.
@@ -20,6 +20,8 @@ UI is Hebrew, RTL, light/dark. See README.md for user-facing behavior.
 
 - robocopy progress is read from its UTF-16 `/UNILOG` file (stdout is OEM codepage and garbles Hebrew names). A list-only `/L` pass runs first to get totals.
 - Never delete anything in a destination that isn't one of the task's own dated folders (`list_backups` pattern match).
+- A task has `sources: Vec<Source{path, folderName}>` + one destination. `(destination, folderName)` must be unique across all tasks (checked in `save_tasks`). Old single-`source` tasks are migrated in `Task::migrate`.
+- Run records hold per-source results (`RunRecord.sources`), each with its own log file (`logs/<runId>-<i>.log`, UTF-16).
 - Task config vs runtime state are separate (`tasks.json` vs `state.json`), so edits/undo never touch next/last run. Changing a task's schedule/enabled clears `nextRun` so it gets recomputed.
 - Bulk edit and undo both go through `save_tasks` (all-or-nothing validation).
 - Paths in the UI: render with `PathText` (LTR, each segment bidi-isolated). Byte sizes: wrap in `<bdi dir="ltr">`.

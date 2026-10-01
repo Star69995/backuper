@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 
 const MAX_HISTORY: usize = 2000;
 
+fn remove_logs(r: &RunRecord) {
+    for log in r.sources.iter().filter_map(|s| s.log_file.as_ref()) {
+        let _ = fs::remove_file(log);
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
     pub tasks: Vec<Task>,
@@ -17,7 +23,10 @@ pub struct Store {
 }
 
 fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
-    fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn save<T: Serialize>(path: &Path, value: &T) {
@@ -32,8 +41,10 @@ fn save<T: Serialize>(path: &Path, value: &T) {
 impl Store {
     pub fn open(dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(dir.join("logs"));
+        let mut tasks: Vec<Task> = load(&dir.join("tasks.json"));
+        tasks.iter_mut().for_each(Task::migrate);
         Self {
-            tasks: load(&dir.join("tasks.json")),
+            tasks,
             states: load(&dir.join("state.json")),
             settings: load(&dir.join("settings.json")),
             history: load(&dir.join("history.json")),
@@ -59,9 +70,7 @@ impl Store {
         self.history.insert(0, rec);
         if self.history.len() > MAX_HISTORY {
             for old in self.history.drain(MAX_HISTORY..) {
-                if let Some(log) = old.log_file {
-                    let _ = fs::remove_file(log);
-                }
+                remove_logs(&old);
             }
         }
         self.save_history();
@@ -69,6 +78,13 @@ impl Store {
 
     pub fn save_history(&self) {
         save(&self.dir.join("history.json"), &self.history);
+    }
+
+    pub fn clear_history(&mut self) {
+        for r in self.history.drain(..) {
+            remove_logs(&r);
+        }
+        self.save_history();
     }
 
     pub fn task(&self, id: &str) -> Option<&Task> {

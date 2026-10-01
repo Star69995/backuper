@@ -1,7 +1,7 @@
 //! robocopy-backed engine. Progress is read by tailing robocopy's UTF-16 log (/UNILOG),
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
-use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Outcome};
+use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -29,9 +29,19 @@ fn arg_path(p: &Path) -> OsString {
     }
 }
 
-fn build_args(job: &CopyJob, list_only: bool, log: &Path) -> Vec<OsString> {
-    let mut a: Vec<OsString> = vec![arg_path(&job.source), arg_path(&job.target)];
-    let flags: &[&str] = match (job.mirror, job.copy_empty_dirs) {
+struct Args<'a> {
+    source: &'a Path,
+    target: &'a Path,
+    /// false = plain recursive copy/list (no purge).
+    mirror: bool,
+    copy_empty_dirs: bool,
+    filters: &'a Filters,
+    list_only: bool,
+}
+
+fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec![arg_path(x.source), arg_path(x.target)];
+    let flags: &[&str] = match (x.mirror, x.copy_empty_dirs) {
         (true, true) => &["/MIR"],
         (true, false) => &["/S", "/PURGE"],
         (false, true) => &["/E"],
@@ -39,14 +49,23 @@ fn build_args(job: &CopyJob, list_only: bool, log: &Path) -> Vec<OsString> {
     };
     a.extend(flags.iter().map(OsString::from));
     for f in [
-        "/COPY:DAT", "/DCOPY:DAT", "/R:2", "/W:3", "/XJ", "/FFT", "/NP", "/NDL", "/FP", "/BYTES",
+        "/COPY:DAT",
+        "/DCOPY:DAT",
+        "/R:2",
+        "/W:3",
+        "/XJ",
+        "/FFT",
+        "/NP",
+        "/NDL",
+        "/FP",
+        "/BYTES",
     ] {
         a.push(f.into());
     }
-    if list_only {
+    if x.list_only {
         a.push("/L".into());
     }
-    let f = &job.filters;
+    let f = x.filters;
     if let Some(max) = f.max_size {
         a.push(format!("/MAX:{max}").into());
     }
@@ -67,7 +86,12 @@ fn build_args(job: &CopyJob, list_only: bool, log: &Path) -> Vec<OsString> {
     }
     a.push("/XD".into());
     a.extend(ALWAYS_EXCLUDED_DIRS.iter().map(OsString::from));
-    a.extend(f.exclude_dirs.iter().filter(|s| !s.trim().is_empty()).map(|s| arg_path(Path::new(s.trim()))));
+    a.extend(
+        f.exclude_dirs
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| arg_path(Path::new(s.trim()))),
+    );
     let mut unilog = OsString::from("/UNILOG:");
     unilog.push(log.as_os_str());
     a.push(unilog);
@@ -84,7 +108,12 @@ struct LogTail {
 
 impl LogTail {
     fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), pos: 0, pending_byte: None, partial_line: String::new() }
+        Self {
+            path: path.to_path_buf(),
+            pos: 0,
+            pending_byte: None,
+            partial_line: String::new(),
+        }
     }
 
     fn poll(&mut self, on_line: &mut dyn FnMut(&str)) {
@@ -121,12 +150,7 @@ impl LogTail {
 }
 
 /// Runs robocopy to completion. Ok(None) = cancelled.
-fn run_process(
-    args: &[OsString],
-    log: &Path,
-    cancel: &AtomicBool,
-    on_line: &mut dyn FnMut(&str),
-) -> Result<Option<i32>, String> {
+fn run_process(args: &[OsString], log: &Path, cancel: &AtomicBool, on_line: &mut dyn FnMut(&str)) -> Result<Option<i32>, String> {
     let _ = std::fs::remove_file(log);
     let mut child = Command::new("robocopy")
         .args(args)
@@ -170,14 +194,19 @@ fn classify(line: &str) -> Line {
     }
     let path = parts[parts.len() - 1];
     let looks_like_path = path.get(1..3) == Some(":\\") || path.starts_with("\\\\");
-    let Ok(size) = parts[parts.len() - 2].parse::<u64>() else { return Line::Other };
+    let Ok(size) = parts[parts.len() - 2].parse::<u64>() else {
+        return Line::Other;
+    };
     if !looks_like_path {
         return Line::Other;
     }
     if parts[0].contains("EXTRA") {
         Line::Extra
     } else {
-        Line::Copy { size, path: path.to_string() }
+        Line::Copy {
+            size,
+            path: path.to_string(),
+        }
     }
 }
 
@@ -212,54 +241,125 @@ fn is_error_line(line: &str) -> bool {
     line.contains(" ERROR ") && line.contains("(0x")
 }
 
+fn mirror_args(job: &CopyJob, list_only: bool) -> Args<'_> {
+    Args {
+        source: &job.source,
+        target: &job.target,
+        mirror: true,
+        copy_empty_dirs: job.copy_empty_dirs,
+        filters: &job.filters,
+        list_only,
+    }
+}
+
 impl CopyEngine for Robocopy {
-    fn run(&self, job: &CopyJob, cancel: &AtomicBool, on_event: &mut dyn FnMut(EngineEvent)) -> CopyResult {
-        let fail = |message: String| CopyResult { outcome: Outcome::Failed, message, stats: CopyStats::default() };
+    fn list_files(
+        &self,
+        source: &Path,
+        filters: &Filters,
+        log_file: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Vec<ListedFile>>, String> {
+        // Listing against a target that doesn't exist reports every file that passes the filters.
+        let nowhere = std::env::temp_dir().join(format!("backuper-list-{}", uuid::Uuid::new_v4()));
+        let args = Args {
+            source,
+            target: &nowhere,
+            mirror: false,
+            copy_empty_dirs: false,
+            filters,
+            list_only: true,
+        };
+        let root = arg_path(source).to_string_lossy().trim_end_matches('\\').to_string() + "\\";
+        let mut files = Vec::new();
+        let code = run_process(&build_args(&args, log_file), log_file, cancel, &mut |l| {
+            if let Line::Copy { size, path } = classify(l) {
+                let under_root = path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
+                if under_root {
+                    files.push(ListedFile {
+                        rel: path[root.len()..].to_string(),
+                        size,
+                    });
+                }
+            }
+        });
+        let _ = std::fs::remove_file(log_file);
+        match code? {
+            None => Ok(None),
+            Some(c) if c >= 8 => Err("לא ניתן לסרוק את תיקיית המקור".into()),
+            Some(_) => Ok(Some(files)),
+        }
+    }
+
+    fn mirror(&self, job: &CopyJob, cancel: &AtomicBool, on_event: &mut dyn FnMut(EngineEvent)) -> CopyResult {
+        let fail = |message: String| CopyResult {
+            outcome: Outcome::Failed,
+            message,
+            stats: CopyStats::default(),
+        };
 
         // Pass 1: list-only scan, so progress can show a real percentage.
         let scan_log = job.log_file.with_extension("scan.log");
         let mut scan = Summary::default();
-        match run_process(&build_args(job, true, &scan_log), &scan_log, cancel, &mut |l| scan.feed(l)) {
+        match run_process(&build_args(&mirror_args(job, true), &scan_log), &scan_log, cancel, &mut |l| {
+            scan.feed(l)
+        }) {
             Ok(None) => {
                 let _ = std::fs::remove_file(&scan_log);
-                return CopyResult { outcome: Outcome::Cancelled, message: "בוטל".into(), stats: CopyStats::default() };
+                return CopyResult {
+                    outcome: Outcome::Cancelled,
+                    message: "בוטל".into(),
+                    stats: CopyStats::default(),
+                };
             }
             Err(e) => return fail(e),
             Ok(Some(_)) => {}
         }
         let _ = std::fs::remove_file(&scan_log);
         if let (Some(f), Some(b)) = (scan.files(), scan.bytes()) {
-            on_event(EngineEvent::Totals { files: f[1], bytes: b[1] });
+            on_event(EngineEvent::Totals {
+                files: f[1],
+                bytes: b[1],
+            });
         }
 
         // Pass 2: the real copy.
         let mut stats = CopyStats::default();
         let mut summary = Summary::default();
         let mut last_error: Option<String> = None;
-        let code = run_process(&build_args(job, false, &job.log_file), &job.log_file, cancel, &mut |l| {
-            summary.feed(l);
-            if is_error_line(l) {
-                last_error = Some(l.to_string());
-                return;
-            }
-            if let Some(err) = last_error.take() {
-                // The line after an ERROR line is the human-readable reason.
-                let path = err.split(")").skip(1).collect::<Vec<_>>().join(")").trim().to_string();
-                let entry = format!("{path} - {}", l.trim());
-                if stats.errors.len() < MAX_ERRORS && !stats.errors.contains(&entry) {
-                    stats.errors.push(entry);
+        let code = run_process(
+            &build_args(&mirror_args(job, false), &job.log_file),
+            &job.log_file,
+            cancel,
+            &mut |l| {
+                summary.feed(l);
+                if is_error_line(l) {
+                    last_error = Some(l.to_string());
+                    return;
                 }
-            }
-            match classify(l) {
-                Line::Copy { size, path } => on_event(EngineEvent::File { path, size }),
-                Line::Extra | Line::Other => {}
-            }
-        });
+                if let Some(err) = last_error.take() {
+                    // The line after an ERROR line is the human-readable reason.
+                    let path = err.split(")").skip(1).collect::<Vec<_>>().join(")").trim().to_string();
+                    let entry = format!("{path} - {}", l.trim());
+                    if stats.errors.len() < MAX_ERRORS && !stats.errors.contains(&entry) {
+                        stats.errors.push(entry);
+                    }
+                }
+                match classify(l) {
+                    Line::Copy { size, path } => on_event(EngineEvent::File { path, size }),
+                    Line::Extra | Line::Other => {}
+                }
+            },
+        );
 
         let code = match code {
             Err(e) => return fail(e),
             Ok(None) => {
-                return CopyResult { outcome: Outcome::Cancelled, message: "הגיבוי בוטל על ידי המשתמש".into(), stats }
+                return CopyResult {
+                    outcome: Outcome::Cancelled,
+                    message: "הגיבוי בוטל על ידי המשתמש".into(),
+                    stats,
+                }
             }
             Ok(Some(c)) => c,
         };
@@ -267,7 +367,7 @@ impl CopyEngine for Robocopy {
         if let Some(f) = summary.files() {
             stats.files_copied = f[1];
             stats.files_failed = f[4];
-            stats.files_deleted = if job.mirror { f[5] } else { 0 };
+            stats.files_deleted = f[5];
         }
         if let Some(b) = summary.bytes() {
             stats.bytes_copied = b[1];
@@ -302,7 +402,10 @@ mod tests {
             }
             _ => panic!("expected copy line"),
         }
-        assert!(matches!(classify("\t*EXTRA File \t\t      10\tD:\\dst\\old.txt"), Line::Extra));
+        assert!(matches!(
+            classify("\t*EXTRA File \t\t      10\tD:\\dst\\old.txt"),
+            Line::Extra
+        ));
         assert!(matches!(classify("   Source : C:\\src\\"), Line::Other));
     }
 

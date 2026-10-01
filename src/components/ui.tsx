@@ -245,7 +245,12 @@ const tones: Record<Tone, string> = {
 
 export function Badge({ tone = "neutral", children, icon }: { tone?: Tone; children: ReactNode; icon?: ReactNode }) {
   return (
-    <span className={cx("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs font-medium whitespace-nowrap", tones[tone])}>
+    <span
+      className={cx(
+        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs font-medium whitespace-nowrap",
+        tones[tone],
+      )}
+    >
       {icon}
       {children}
     </span>
@@ -300,7 +305,10 @@ export function ProgressBar({ value }: { value: number | null }) {
       {value === null ? (
         <div className="h-full w-2/5 rounded-full bg-accent animate-indeterminate" />
       ) : (
-        <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
+        <div
+          className="h-full rounded-full bg-accent transition-[width] duration-300"
+          style={{ width: `${Math.min(100, Math.max(0, value))}%` }}
+        />
       )}
     </div>
   );
@@ -337,7 +345,10 @@ export function Modal({
       <div
         role="dialog"
         aria-modal
-        className={cx("flex max-h-[min(92vh,900px)] w-full flex-col rounded-xl border border-line bg-panel shadow-2xl", widths[size])}
+        className={cx(
+          "flex max-h-[min(92vh,900px)] w-full flex-col rounded-xl border border-line bg-panel shadow-2xl",
+          widths[size],
+        )}
       >
         <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
           <div className="min-w-0">
@@ -357,8 +368,7 @@ export function Modal({
 }
 
 export type MenuItem =
-  | { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }
-  | "separator";
+  { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean } | "separator";
 
 /** Dropdown menu rendered in a portal (so tables with overflow don't clip it). */
 export function Menu({ trigger, items }: { trigger: (open: () => void) => ReactNode; items: MenuItem[] }) {

@@ -1,16 +1,16 @@
 //! Copy engine abstraction. The backup logic only talks to `CopyEngine`, so robocopy
 //! can be swapped for another implementation later.
 
+pub mod native;
 pub mod robocopy;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+/// Make `target` identical to `source` (a full backup).
 pub struct CopyJob {
     pub source: PathBuf,
     pub target: PathBuf,
-    /// true: make target identical to source (delete extras). false: copy new/changed only.
-    pub mirror: bool,
     pub copy_empty_dirs: bool,
     pub filters: Filters,
     /// Where the engine writes its detailed log (kept for the run log viewer).
@@ -32,8 +32,20 @@ pub struct Filters {
     pub exclude_system: bool,
 }
 
+/// A source file that passes the filters.
+#[derive(Debug, Clone)]
+pub struct ListedFile {
+    /// Path relative to the source root.
+    pub rel: String,
+    pub size: u64,
+}
+
 pub enum EngineEvent {
-    /// Result of the pre-scan: how much work the real run will do.
+    /// The run moved on to the next source folder.
+    SourceStarted,
+    /// "scanning" | "deleting" (old backups, before a full) | "copying"
+    Phase(&'static str),
+    /// How much work the copy will do.
     Totals { files: u64, bytes: u64 },
     /// A file copy started.
     File { path: String, size: u64 },
@@ -42,7 +54,7 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Success,
-    /// Finished, but some items mismatched or were skipped.
+    /// Finished, but some items mismatched or failed.
     Warning,
     Failed,
     Cancelled,
@@ -65,5 +77,15 @@ pub struct CopyResult {
 }
 
 pub trait CopyEngine: Send + Sync {
-    fn run(&self, job: &CopyJob, cancel: &AtomicBool, on_event: &mut dyn FnMut(EngineEvent)) -> CopyResult;
+    /// Mirror source into target.
+    fn mirror(&self, job: &CopyJob, cancel: &AtomicBool, on_event: &mut dyn FnMut(EngineEvent)) -> CopyResult;
+
+    /// Every file under `source` that passes `filters`. Ok(None) = cancelled.
+    fn list_files(
+        &self,
+        source: &Path,
+        filters: &Filters,
+        log_file: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Vec<ListedFile>>, String>;
 }

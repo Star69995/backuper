@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupFolder, BackupMode, Progress, RunRecord, Schedule, Settings, Task, TaskState, Trigger};
+use crate::model::{BackupMode, Progress, RunRecord, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -38,13 +38,16 @@ pub fn get_snapshot(core: CoreState, app: tauri::AppHandle) -> Snapshot {
 }
 
 fn prepare(mut t: Task) -> Result<Task, String> {
+    t.migrate();
     t.name = t.name.trim().to_string();
-    t.source = t.source.trim().to_string();
     t.destination = t.destination.trim().to_string();
-    if t.folder_name.trim().is_empty() {
-        t.folder_name = t.name.clone();
+    for src in &mut t.sources {
+        src.path = src.path.trim().to_string();
+        if src.folder_name.trim().is_empty() {
+            src.folder_name = backup::default_folder_name(&src.path);
+        }
+        src.folder_name = backup::sanitize_folder_name(&src.folder_name);
     }
-    t.folder_name = backup::sanitize_folder_name(&t.folder_name);
     if t.id.is_empty() {
         t.id = uuid::Uuid::new_v4().to_string();
     }
@@ -58,16 +61,20 @@ pub fn save_tasks(core: CoreState, tasks: Vec<Task>) -> Result<Vec<Task>, String
     let prepared = tasks.into_iter().map(prepare).collect::<Result<Vec<_>, _>>()?;
     {
         let mut s = core.store.lock().unwrap();
-        // Two tasks writing the same dated folders into the same destination would delete each other's backups.
+        // Two sources writing the same dated folders into the same destination would delete each other's backups.
         let mut all: Vec<&Task> = s.tasks.iter().filter(|t| !prepared.iter().any(|p| p.id == t.id)).collect();
         all.extend(prepared.iter());
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
-                if a.destination.eq_ignore_ascii_case(&b.destination) && a.folder_name.eq_ignore_ascii_case(&b.folder_name) {
-                    return Err(format!(
-                        "למשימות \"{}\" ו-\"{}\" אותו יעד ואותו שם תיקיית גיבוי - יש לשנות אחד מהם",
-                        a.name, b.name
-                    ));
+        let key = |t: &Task, f: &str| format!("{}\\{}", t.destination.trim_end_matches('\\'), f).to_lowercase();
+        let mut seen: HashMap<String, &str> = HashMap::new();
+        for t in &all {
+            for src in &t.sources {
+                if let Some(other) = seen.insert(key(t, &src.folder_name), &t.name) {
+                    if other != t.name {
+                        return Err(format!(
+                            "למשימות \"{other}\" ו-\"{}\" יש תיקיית מקור עם אותו שם תיקיית גיבוי ({}) באותו יעד - יש לשנות אחד מהם",
+                            t.name, src.folder_name
+                        ));
+                    }
                 }
             }
         }
@@ -107,7 +114,8 @@ pub fn delete_tasks(core: CoreState, ids: Vec<String>) {
 #[tauri::command]
 pub fn reorder_tasks(core: CoreState, ids: Vec<String>) {
     let mut s = core.store.lock().unwrap();
-    s.tasks.sort_by_key(|t| ids.iter().position(|i| *i == t.id).unwrap_or(usize::MAX));
+    s.tasks
+        .sort_by_key(|t| ids.iter().position(|i| *i == t.id).unwrap_or(usize::MAX));
     s.save_tasks();
     drop(s);
     core.changed();
@@ -117,7 +125,13 @@ pub fn reorder_tasks(core: CoreState, ids: Vec<String>) {
 #[tauri::command]
 pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>) -> usize {
     ids.into_iter()
-        .filter(|id| core.enqueue(Job { task_id: id.clone(), mode, trigger: Trigger::Manual }))
+        .filter(|id| {
+            core.enqueue(Job {
+                task_id: id.clone(),
+                mode,
+                trigger: Trigger::Manual,
+            })
+        })
         .count()
 }
 
@@ -133,49 +147,57 @@ pub fn get_history(core: CoreState) -> Vec<RunRecord> {
 
 #[tauri::command]
 pub fn clear_history(core: CoreState) {
-    let mut s = core.store.lock().unwrap();
-    for r in s.history.drain(..) {
-        if let Some(log) = r.log_file {
-            let _ = std::fs::remove_file(log);
-        }
-    }
-    s.save_history();
-    drop(s);
+    core.store.lock().unwrap().clear_history();
     core.changed();
 }
 
 /// The robocopy log of a run (UTF-16 file), capped to the last ~4MB of text.
 #[tauri::command]
-pub async fn read_log(core: CoreState<'_>, run_id: String) -> Result<String, String> {
+pub async fn read_log(core: CoreState<'_>, run_id: String, source_index: usize) -> Result<String, String> {
     let path = {
         let s = core.store.lock().unwrap();
-        s.history.iter().find(|r| r.id == run_id).and_then(|r| r.log_file.clone())
+        s.history
+            .iter()
+            .find(|r| r.id == run_id)
+            .and_then(|r| r.sources.get(source_index)?.log_file.clone())
     }
     .ok_or("אין יומן מפורט לריצה זו")?;
     let bytes = std::fs::read(&path).map_err(|_| "קובץ היומן לא נמצא".to_string())?;
     const MAX: usize = 8 * 1024 * 1024;
     let start = bytes.len().saturating_sub(MAX) & !1;
-    let units: Vec<u16> = bytes[start..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes[start..]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     Ok(String::from_utf16_lossy(&units).trim_start_matches('\u{feff}').to_string())
 }
 
 fn find_task(core: &Core, id: &str) -> Result<Task, String> {
-    core.store.lock().unwrap().task(id).cloned().ok_or_else(|| "המשימה לא נמצאה".to_string())
+    core.store
+        .lock()
+        .unwrap()
+        .task(id)
+        .cloned()
+        .ok_or_else(|| "המשימה לא נמצאה".to_string())
 }
 
 #[tauri::command]
-pub async fn list_backups(core: CoreState<'_>, task_id: String) -> Result<Vec<BackupFolder>, String> {
+pub async fn list_backups(core: CoreState<'_>, task_id: String) -> Result<Vec<SourceBackups>, String> {
     let task = find_task(&core, &task_id)?;
-    tauri::async_runtime::spawn_blocking(move || backup::list_backups(&task)).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || backup::list_task_backups(&task))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_backup(core: CoreState<'_>, task_id: String, name: String) -> Result<(), String> {
+pub async fn delete_backup(core: CoreState<'_>, task_id: String, folder_name: String, name: String) -> Result<(), String> {
     let task = find_task(&core, &task_id)?;
     if core.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == task_id) {
         return Err("לא ניתן למחוק גיבוי בזמן שהמשימה רצה".into());
     }
-    tauri::async_runtime::spawn_blocking(move || backup::delete_backup(&task, &name)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || backup::delete_backup(&task, &folder_name, &name))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn dir_size(path: &std::path::Path) -> u64 {
@@ -191,7 +213,9 @@ fn dir_size(path: &std::path::Path) -> u64 {
 
 #[tauri::command]
 pub async fn folder_size(path: String) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || dir_size(std::path::Path::new(&path))).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || dir_size(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

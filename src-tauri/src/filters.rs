@@ -19,11 +19,11 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
             FilterRule::Extension { value } if extensions(value).is_empty() => {
                 return Err("כלל סינון: יש להזין סיומת (למשל tmp)".into())
             }
-            FilterRule::Pattern { value } if value.trim().is_empty() => {
-                return Err("כלל סינון: יש להזין תבנית שם קובץ".into())
-            }
+            FilterRule::Pattern { value } if value.trim().is_empty() => return Err("כלל סינון: יש להזין תבנית שם קובץ".into()),
             FilterRule::Pattern { value } if value.contains('\\') => {
-                return Err(format!("כלל סינון: תבנית שם קובץ לא יכולה לכלול נתיב ({value}). לתיקיות יש כלל \"תיקייה\""))
+                return Err(format!(
+                    "כלל סינון: תבנית שם קובץ לא יכולה לכלול נתיב ({value}). לתיקיות יש כלל \"תיקייה\""
+                ))
             }
             FilterRule::Folder { value } if value.trim().is_empty() => {
                 return Err("כלל סינון: יש להזין שם או נתיב של תיקייה".into())
@@ -64,9 +64,13 @@ mod tests {
     #[test]
     fn compiles_rules() {
         let f = compile(&[
-            FilterRule::Extension { value: "tmp, .log;*.bak".into() },
+            FilterRule::Extension {
+                value: "tmp, .log;*.bak".into(),
+            },
             FilterRule::Pattern { value: "~$*".into() },
-            FilterRule::Folder { value: "node_modules".into() },
+            FilterRule::Folder {
+                value: "node_modules".into(),
+            },
             FilterRule::LargerThan { mb: 100 },
             FilterRule::LargerThan { mb: 10 },
             FilterRule::Hidden,
@@ -80,7 +84,10 @@ mod tests {
     #[test]
     fn rejects_bad_rules() {
         assert!(validate(&[FilterRule::Extension { value: " , ".into() }]).is_err());
-        assert!(validate(&[FilterRule::Pattern { value: "a\\b.txt".into() }]).is_err());
+        assert!(validate(&[FilterRule::Pattern {
+            value: "a\\b.txt".into()
+        }])
+        .is_err());
         assert!(validate(&[FilterRule::OlderThan { days: 0 }]).is_err());
         assert!(validate(&[FilterRule::Extension { value: "tmp".into() }]).is_ok());
     }

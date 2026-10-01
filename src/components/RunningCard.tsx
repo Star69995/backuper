@@ -13,8 +13,17 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
     return () => clearInterval(t);
   }, []);
 
-  const scanning = p.phase === "scanning";
-  const pct = scanning ? null : p.bytesTotal > 0 ? (p.bytesDone / p.bytesTotal) * 100 : p.filesTotal > 0 ? (p.filesDone / p.filesTotal) * 100 : null;
+  const scanning = p.phase === "scanning" || p.phase === "deleting";
+  const phaseText = { scanning: "סורק את הקבצים...", deleting: "מוחק גיבויים קודמים לפני ההעתקה...", copying: "מעתיק קבצים" }[
+    p.phase
+  ];
+  const pct = scanning
+    ? null
+    : p.bytesTotal > 0
+      ? (p.bytesDone / p.bytesTotal) * 100
+      : p.filesTotal > 0
+        ? (p.filesDone / p.filesTotal) * 100
+        : null;
   const queuedNames = queue.map((j) => tasks.find((t) => t.id === j.taskId)?.name).filter(Boolean);
 
   return (
@@ -29,19 +38,32 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
               מגבה: {p.taskName} <span className="text-[13px] font-normal text-muted">({MODE_LABEL[p.mode]})</span>
             </div>
             <div className="text-[13px] text-muted">
-              {scanning ? "סורק את הקבצים..." : "מעתיק קבצים"} - {fmtDuration(p.startedAt)}
+              {p.sourceCount > 1 && `תיקייה ${p.sourceIndex} מתוך ${p.sourceCount} - `}
+              {phaseText} - {fmtDuration(p.startedAt)}
             </div>
           </div>
         </div>
-        <Button size="sm" variant="secondary" className="text-bad" icon={<Square size={14} />} onClick={() => api.cancelTask(p.taskId)}>
+        <Button
+          size="sm"
+          variant="secondary"
+          className="text-bad"
+          icon={<Square size={14} />}
+          onClick={() => api.cancelTask(p.taskId)}
+        >
           עצור
         </Button>
       </div>
       <div className="mt-4 flex flex-col gap-2">
+        {p.sourceCount > 1 && (
+          <div className="truncate text-xs">
+            <span className="text-muted">מקור: </span>
+            <PathText path={p.sourcePath} />
+          </div>
+        )}
         <ProgressBar value={pct} />
         <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted">
           {scanning ? (
-            <span>מחשב את כמות השינויים</span>
+            <span>{p.phase === "deleting" ? "מפנה מקום ביעד" : "מחשב את כמות השינויים"}</span>
           ) : (
             <span>
               {fmtNumber(p.filesDone)} מתוך {fmtNumber(p.filesTotal)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi> מתוך{" "}

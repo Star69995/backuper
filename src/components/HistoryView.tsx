@@ -1,11 +1,11 @@
-import { FileText, FolderOpen, History, Search, Trash2 } from "lucide-react";
+import { FileText, Folder, FolderOpen, History, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
-import type { RunRecord, RunStatus, Snapshot } from "../types";
+import type { RunRecord, RunStatus, Snapshot, SourceRun } from "../types";
 import { useFeedback } from "./feedback";
 import { statusBadge } from "./TasksView";
-import { Button, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
+import { Badge, Button, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
 
 export default function HistoryView({ snap }: { snap: Snapshot }) {
   const { toast, confirm } = useFeedback();
@@ -26,10 +26,19 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
     return [...m.entries()];
   }, [history, snap.tasks]);
 
-  const rows = (history ?? []).filter((r) => (!taskFilter || r.taskId === taskFilter) && (!statusFilter || r.status === statusFilter));
+  const rows = (history ?? []).filter(
+    (r) => (!taskFilter || r.taskId === taskFilter) && (!statusFilter || r.status === statusFilter),
+  );
 
   const clear = async () => {
-    if (!(await confirm({ title: "לנקות את יומן הריצות?", message: "כל רשומות הריצות והיומנים המפורטים יימחקו. הגיבויים עצמם לא יושפעו.", confirmLabel: "נקה", danger: true })))
+    if (
+      !(await confirm({
+        title: "לנקות את יומן הריצות?",
+        message: "כל רשומות הריצות והיומנים המפורטים יימחקו. הגיבויים עצמם לא יושפעו.",
+        confirmLabel: "נקה",
+        danger: true,
+      }))
+    )
       return;
     await api.clearHistory();
     setHistory([]);
@@ -44,7 +53,12 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
           <p className="text-[13px] text-muted">כל ריצות הגיבוי, כולל תוצאות ושגיאות</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Select className="w-44" value={taskFilter} onChange={(e) => setTaskFilter(e.target.value)} aria-label="סינון לפי משימה">
+          <Select
+            className="w-44"
+            value={taskFilter}
+            onChange={(e) => setTaskFilter(e.target.value)}
+            aria-label="סינון לפי משימה"
+          >
             <option value="">כל המשימות</option>
             {taskNames.map(([id, name]) => (
               <option key={id} value={id}>
@@ -52,7 +66,12 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
               </option>
             ))}
           </Select>
-          <Select className="w-36" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as RunStatus | "")} aria-label="סינון לפי תוצאה">
+          <Select
+            className="w-36"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as RunStatus | "")}
+            aria-label="סינון לפי תוצאה"
+          >
             <option value="">כל התוצאות</option>
             {(Object.keys(STATUS_LABEL) as RunStatus[]).map((s) => (
               <option key={s} value={s}>
@@ -92,7 +111,11 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
               </thead>
               <tbody>
                 {rows.slice(0, 500).map((r) => (
-                  <tr key={r.id} onClick={() => setDetails(r)} className="cursor-pointer border-b border-line last:border-b-0 hover:bg-hover/60">
+                  <tr
+                    key={r.id}
+                    onClick={() => setDetails(r)}
+                    className="cursor-pointer border-b border-line last:border-b-0 hover:bg-hover/60"
+                  >
                     <td className="px-3 py-2.5">{statusBadge(r.status)}</td>
                     <td className="px-2 py-2.5">
                       <div className="font-medium">{r.taskName}</div>
@@ -123,21 +146,80 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
   );
 }
 
+function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; onShowLog: (i: number) => void }) {
+  const { toast } = useFeedback();
+  return (
+    <section className="flex flex-col gap-2 rounded-xl border border-line p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Folder size={16} className="shrink-0 text-accent" />
+        <bdi className="font-semibold">{src.folderName}</bdi>
+        {src.mode && <Badge tone={src.mode === "full" ? "accent" : "neutral"}>{MODE_LABEL[src.mode]}</Badge>}
+        {src.status && statusBadge(src.status)}
+        <span className="min-w-0 truncate text-xs text-muted">
+          <PathText path={src.source} />
+        </span>
+      </div>
+      <p className="selectable text-[13px] leading-relaxed">{src.message}</p>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+        <span>הועתקו {fmtNumber(src.filesCopied)} קבצים</span>
+        <bdi dir="ltr">{fmtBytes(src.bytesCopied)}</bdi>
+        {src.filesDeleted > 0 && <span>נמחקו מהגיבוי {fmtNumber(src.filesDeleted)}</span>}
+        {src.filesFailed > 0 && <span className="text-bad">נכשלו {fmtNumber(src.filesFailed)}</span>}
+        {src.exitCode !== null && <span>קוד robocopy: {src.exitCode}</span>}
+      </div>
+      {src.targetFolder && (
+        <div className="flex min-w-0 items-center gap-2 text-xs">
+          <span className="shrink-0 text-muted">תיקיית הגיבוי:</span>
+          <PathText path={src.targetFolder} className="min-w-0 truncate" />
+        </div>
+      )}
+      {src.errors.length > 0 && (
+        <ul
+          className="selectable max-h-40 overflow-y-auto rounded-lg border border-bad/30 bg-bad-soft/50 p-2 font-mono text-xs leading-relaxed"
+          dir="ltr"
+        >
+          {src.errors.map((e, i) => (
+            <li key={i} className="text-left">
+              {e}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {src.targetFolder && (
+          <Button
+            size="sm"
+            icon={<FolderOpen size={14} />}
+            onClick={() => api.openPath(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}
+          >
+            פתח את תיקיית הגיבוי
+          </Button>
+        )}
+        {src.logFile && (
+          <Button size="sm" icon={<FileText size={14} />} onClick={() => onShowLog(index)}>
+            יומן מפורט
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
   const { toast } = useFeedback();
-  const [log, setLog] = useState<string | null>(null);
+  const [log, setLog] = useState<{ index: number; text: string } | null>(null);
   const [logFilter, setLogFilter] = useState("");
 
-  const showLog = () =>
+  const showLog = (index: number) =>
     api
-      .readLog(r.id)
-      .then(setLog)
+      .readLog(r.id, index)
+      .then((text) => setLog({ index, text }))
       .catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את היומן", message: errorText(e) }));
 
   const filtered = useMemo(() => {
-    if (log === null || !logFilter.trim()) return log;
+    if (log === null || !logFilter.trim()) return log?.text ?? null;
     const q = logFilter.toLowerCase();
-    return log
+    return log.text
       .split("\n")
       .filter((l) => l.toLowerCase().includes(q))
       .join("\n");
@@ -161,59 +243,42 @@ function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }
       subtitle={`${fmtDateTime(r.startedAt)} - ${MODE_LABEL[r.mode]}, ${TRIGGER_LABEL[r.trigger]}`}
       onClose={onClose}
       footer={
-        <>
-          {r.targetFolder && (
-            <Button icon={<FolderOpen size={15} />} onClick={() => api.openPath(r.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}>
-              פתח את תיקיית הגיבוי
-            </Button>
-          )}
-          {r.logFile && log === null && (
-            <Button icon={<FileText size={15} />} onClick={showLog}>
-              הצג יומן מפורט
-            </Button>
-          )}
-          <Button variant="primary" onClick={onClose}>
-            סגור
-          </Button>
-        </>
+        <Button variant="primary" onClick={onClose}>
+          סגור
+        </Button>
       }
     >
       <div className="flex flex-col gap-4">
         <p className="selectable text-sm leading-relaxed">{r.message}</p>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {stat("קבצים שהועתקו", fmtNumber(r.filesCopied))}
           {stat("נפח שהועתק", <bdi dir="ltr">{fmtBytes(r.bytesCopied)}</bdi>)}
+          {stat("משך", fmtDuration(r.startedAt, r.finishedAt))}
           {stat("קבצים שנמחקו מהגיבוי", fmtNumber(r.filesDeleted))}
           {stat("קבצים שנכשלו", fmtNumber(r.filesFailed))}
-          {stat("משך", fmtDuration(r.startedAt, r.finishedAt))}
           {stat("סיום", fmtDateTime(r.finishedAt))}
-          {stat("קוד יציאה (robocopy)", r.exitCode ?? "-")}
         </div>
-        {r.targetFolder && (
-          <div className="text-[13px]">
-            <span className="text-muted">תיקיית הגיבוי: </span>
-            <PathText path={r.targetFolder} />
-          </div>
-        )}
-        {r.errors.length > 0 && (
-          <div className="flex flex-col gap-1.5">
-            <h3 className="text-[13px] font-semibold text-bad">שגיאות ({r.errors.length})</h3>
-            <ul className="selectable max-h-48 overflow-y-auto rounded-lg border border-bad/30 bg-bad-soft/50 p-2 font-mono text-xs leading-relaxed" dir="ltr">
-              {r.errors.map((e, i) => (
-                <li key={i} className="text-left">
-                  {e}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+        {r.sources.map((src, i) => (
+          <SourceCard key={i} src={src} index={i} onShowLog={showLog} />
+        ))}
         {log !== null && (
           <div className="flex flex-col gap-2">
+            <h3 className="text-[13px] font-semibold">
+              יומן מפורט: <bdi>{r.sources[log.index]?.folderName}</bdi>
+            </h3>
             <div className="relative">
               <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
-              <TextInput value={logFilter} onChange={(e) => setLogFilter(e.target.value)} placeholder="סינון שורות ביומן..." className="ps-9" />
+              <TextInput
+                value={logFilter}
+                onChange={(e) => setLogFilter(e.target.value)}
+                placeholder="סינון שורות ביומן..."
+                className="ps-9"
+              />
             </div>
-            <pre dir="ltr" className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed">
+            <pre
+              dir="ltr"
+              className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed"
+            >
               {filtered || "(ריק)"}
             </pre>
           </div>

@@ -1,14 +1,14 @@
-import { AlertTriangle, FolderOpen, FolderX, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Folder, FolderOpen, FolderX, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText } from "../api";
-import { fmtBytes, fmtDateTime, fmtRelative } from "../lib/format";
-import type { BackupFolder, Task } from "../types";
+import { fmtBytes, fmtDateTime, fmtRelative, MODE_LABEL } from "../lib/format";
+import type { BackupFolder, SourceBackups, Task } from "../types";
 import { useFeedback } from "./feedback";
 import { Badge, Button, EmptyState, IconButton, Modal, PathText, Spinner } from "./ui";
 
 export default function BackupsDialog({ task, onClose }: { task: Task; onClose: () => void }) {
   const { toast, confirm } = useFeedback();
-  const [list, setList] = useState<BackupFolder[] | null>(null);
+  const [list, setList] = useState<SourceBackups[] | null>(null);
   const [sizes, setSizes] = useState<Record<string, number | "loading">>({});
 
   const load = useCallback(() => {
@@ -30,12 +30,13 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
     setSizes((s) => ({ ...s, [b.path]: n }));
   };
 
-  const remove = async (b: BackupFolder) => {
+  const remove = async (src: SourceBackups, b: BackupFolder) => {
     const ok = await confirm({
       title: "למחוק את הגיבוי?",
       message: (
         <>
-          התיקייה <b>{b.name}</b> וכל הקבצים שבה יימחקו לצמיתות מהדיסק.
+          התיקייה <bdi className="font-semibold">{b.name}</bdi> וכל הקבצים שבה יימחקו לצמיתות מהדיסק.
+          {b.kind === "full" && " גיבויים אינקרמנטליים שנוצרו אחריה יישארו, אבל בלי הגיבוי המלא שלהם."}
         </>
       ),
       confirmLabel: "מחק לצמיתות",
@@ -43,13 +44,15 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
     });
     if (!ok) return;
     try {
-      await api.deleteBackup(task.id, b.name);
+      await api.deleteBackup(task.id, src.folderName, b.name);
       toast({ tone: "ok", title: "הגיבוי נמחק" });
       load();
     } catch (e) {
       toast({ tone: "bad", title: "המחיקה נכשלה", message: errorText(e) });
     }
   };
+
+  const total = list?.reduce((n, s) => n + s.backups.length, 0) ?? 0;
 
   return (
     <Modal
@@ -75,51 +78,74 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
         <div className="flex justify-center py-10 text-muted">
           <Spinner />
         </div>
-      ) : list.length === 0 ? (
+      ) : total === 0 ? (
         <EmptyState icon={<FolderX size={26} />} title="אין עדיין גיבויים">
           הגיבוי הראשון ייווצר בריצה הבאה של המשימה.
         </EmptyState>
       ) : (
-        <ul className="flex flex-col gap-2">
-          {list.map((b, i) => {
-            const size = sizes[b.path];
+        <div className="flex flex-col gap-5">
+          {list.map((src) => {
+            const latestFull = src.backups.find((b) => b.kind === "full" && !b.partial);
             return (
-              <li key={b.path} className="flex flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2.5">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2 font-medium">
-                    <bdi className="selectable">{b.name}</bdi>
-                    {i === 0 && !b.partial && <Badge tone="ok">אחרון</Badge>}
-                    {b.partial && (
-                      <Badge tone="warn" icon={<AlertTriangle size={12} />}>
-                        לא הושלם
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="mt-0.5 text-xs text-muted">
-                    נוצר {fmtDateTime(b.createdAt)} ({fmtRelative(b.createdAt)})
-                  </div>
-                </div>
-                <div className="text-[13px] text-muted">
-                  {size === "loading" ? (
-                    <Spinner className="size-3.5" />
-                  ) : size !== undefined ? (
-                    <bdi dir="ltr">{fmtBytes(size)}</bdi>
-                  ) : (
-                    <button type="button" className="text-accent hover:underline" onClick={() => calcSize(b)}>
-                      חישוב גודל
-                    </button>
-                  )}
-                </div>
-                <IconButton label="פתח בסייר הקבצים" onClick={() => api.openPath(b.path)}>
-                  <FolderOpen size={16} />
-                </IconButton>
-                <IconButton label="מחק גיבוי" tone="danger" onClick={() => remove(b)}>
-                  <Trash2 size={16} />
-                </IconButton>
-              </li>
+              <section key={src.folderName} className="flex flex-col gap-2">
+                <h3 className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                  <Folder size={16} className="shrink-0 text-accent" />
+                  <bdi>{src.folderName}</bdi>
+                  <span className="min-w-0 truncate text-xs font-normal text-muted">
+                    <PathText path={src.source} />
+                  </span>
+                </h3>
+                {src.backups.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-line px-3 py-2 text-[13px] text-muted">
+                    אין עדיין גיבויים לתיקייה זו
+                  </p>
+                ) : (
+                  <ul className="flex flex-col gap-1.5">
+                    {src.backups.map((b) => {
+                      const size = sizes[b.path];
+                      return (
+                        <li key={b.path} className="flex flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2 text-[13px] font-medium">
+                              <bdi className="selectable">{b.name}</bdi>
+                              <Badge tone={b.kind === "full" ? "accent" : "neutral"}>{MODE_LABEL[b.kind]}</Badge>
+                              {b === latestFull && <Badge tone="ok">מלא אחרון</Badge>}
+                              {b.partial && (
+                                <Badge tone="warn" icon={<AlertTriangle size={12} />}>
+                                  לא הושלם
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="mt-0.5 text-xs text-muted">
+                              נוצר {fmtDateTime(b.createdAt)} ({fmtRelative(b.createdAt)})
+                            </div>
+                          </div>
+                          <div className="text-[13px] text-muted">
+                            {size === "loading" ? (
+                              <Spinner className="size-3.5" />
+                            ) : size !== undefined ? (
+                              <bdi dir="ltr">{size === 0 ? "ריק" : fmtBytes(size)}</bdi>
+                            ) : (
+                              <button type="button" className="text-accent hover:underline" onClick={() => calcSize(b)}>
+                                חישוב גודל
+                              </button>
+                            )}
+                          </div>
+                          <IconButton label="פתח בסייר הקבצים" onClick={() => api.openPath(b.path)}>
+                            <FolderOpen size={16} />
+                          </IconButton>
+                          <IconButton label="מחק גיבוי" tone="danger" onClick={() => remove(src, b)}>
+                            <Trash2 size={16} />
+                          </IconButton>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </section>
             );
           })}
-        </ul>
+        </div>
       )}
     </Modal>
   );

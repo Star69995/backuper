@@ -47,7 +47,12 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 show_main(tray.app_handle());
             }
         })
@@ -58,9 +63,11 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
 /// Syncs the tooltip and the pause checkbox with the current state.
 pub fn refresh(app: &AppHandle) {
-    let (Some(core), Some(items), Some(tray)) =
-        (app.try_state::<Arc<Core>>(), app.try_state::<TrayItems>(), app.tray_by_id(TRAY_ID))
-    else {
+    let (Some(core), Some(items), Some(tray)) = (
+        app.try_state::<Arc<Core>>(),
+        app.try_state::<TrayItems>(),
+        app.tray_by_id(TRAY_ID),
+    ) else {
         return;
     };
     let paused = core.store.lock().unwrap().settings.scheduler_paused;

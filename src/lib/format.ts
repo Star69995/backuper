@@ -110,10 +110,17 @@ export function sanitizeFolderName(name: string) {
     .replace(/\.+$/, "");
 }
 
-export function exampleFolderName(prefix: string) {
+/** "C:\Users\me\Documents" -> "Documents", "D:\" -> "D". Mirrors backup::default_folder_name in Rust. */
+export function defaultFolderName(path: string) {
+  const last = path.trim().replace(/\\+$/, "").split("\\").pop() ?? "";
+  return sanitizeFolderName(last.replace(/:$/, ""));
+}
+
+export function exampleFolderName(prefix: string, mode: BackupMode) {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${sanitizeFolderName(prefix) || "גיבוי"} ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}`;
+  const tag = mode === "full" ? "מלא" : "אינקרמנטלי";
+  return `${sanitizeFolderName(prefix) || "גיבוי"} ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())} ${tag}`;
 }
 
 export function joinPath(root: string, name: string) {

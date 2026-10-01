@@ -1,11 +1,11 @@
-import { AlertCircle, ChevronDown, Copy, FolderOpen, Layers, RefreshCw } from "lucide-react";
+import { AlertCircle, AlertTriangle, ChevronDown, Copy, FolderOpen, FolderPlus, Layers, RefreshCw, Trash2 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { api, errorText } from "../api";
-import { exampleFolderName, joinPath, sanitizeFolderName } from "../lib/format";
-import type { BackupMode, Task } from "../types";
+import { defaultFolderName, exampleFolderName, joinPath, sanitizeFolderName } from "../lib/format";
+import type { BackupMode, Source, Task } from "../types";
 import FilterRulesEditor from "./FilterRulesEditor";
 import ScheduleEditor from "./ScheduleEditor";
-import { Button, cx, Field, Modal, NumberInput, TextInput, Toggle } from "./ui";
+import { Button, cx, Field, IconButton, Modal, NumberInput, TextInput, Toggle } from "./ui";
 
 export function Section({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
   return (
@@ -29,7 +29,13 @@ export function PathPicker({
 }) {
   return (
     <div className="flex gap-2">
-      <TextInput dir="ltr" className="text-left" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+      <TextInput
+        dir="ltr"
+        className="text-left"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
       <Button
         icon={<FolderOpen size={16} />}
         onClick={async () => {
@@ -43,26 +49,18 @@ export function PathPicker({
   );
 }
 
-export function ModeCard({
-  mode,
-  selected,
-  onSelect,
-}: {
-  mode: BackupMode;
-  selected: boolean;
-  onSelect: () => void;
-}) {
+export function ModeCard({ mode, selected, onSelect }: { mode: BackupMode; selected: boolean; onSelect: () => void }) {
   const info =
     mode === "full"
       ? {
           icon: <Copy size={18} />,
           title: "מלא",
-          text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, זהה לגמרי למקור (קבצים שנמחקו במקור לא יופיעו). הגיבוי הקודם נמחק אחרי הצלחה.",
+          text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, זהה לגמרי למקור (קבצים שנמחקו במקור לא יופיעו). הגיבויים הקודמים נמחקים.",
         }
       : {
           icon: <Layers size={18} />,
           title: "אינקרמנטלי",
-          text: "מעתיק רק קבצים חדשים או ששונו אל תיקיית הגיבוי האחרונה. מהיר מאוד. קבצים שנמחקו במקור נשארים בגיבוי.",
+          text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, ובה רק קבצים חדשים או ששונו מאז הגיבוי הקודם. אם לא היו שינויים, התיקייה ריקה ותימחק בגיבוי המלא הבא. הגיבוי הראשון תמיד מלא.",
         };
   return (
     <button
@@ -84,6 +82,109 @@ export function ModeCard({
   );
 }
 
+/** Adds " (2)", " (3)"... until the folder name is unique among the task's sources. */
+function uniqueName(name: string, taken: string[]) {
+  const lower = taken.map((t) => t.toLowerCase());
+  if (!lower.includes(name.toLowerCase())) return name;
+  let i = 2;
+  while (lower.includes(`${name} (${i})`.toLowerCase())) i++;
+  return `${name} (${i})`;
+}
+
+function SourcesEditor({
+  sources,
+  destination,
+  mode,
+  onChange,
+}: {
+  sources: Source[];
+  destination: string;
+  mode: BackupMode;
+  onChange: (s: Source[]) => void;
+}) {
+  const update = (i: number, s: Source) => onChange(sources.map((x, j) => (j === i ? s : x)));
+  const others = (i: number) => sources.filter((_, j) => j !== i).map((s) => s.folderName);
+  const setPath = (i: number, path: string) => {
+    const cur = sources[i];
+    // Keep the folder name in sync with the path until the user names it themselves.
+    const auto = !cur.folderName || cur.folderName === defaultFolderName(cur.path);
+    update(i, { path, folderName: auto ? uniqueName(defaultFolderName(path), others(i)) : cur.folderName });
+  };
+  const add = async () => {
+    const paths = await api.pickFolders("הוספת תיקיות מקור (אפשר לבחור כמה עם Ctrl)");
+    const next = [...sources];
+    for (const path of paths) {
+      if (next.some((s) => s.path.toLowerCase() === path.toLowerCase())) continue;
+      next.push({
+        path,
+        folderName: uniqueName(
+          defaultFolderName(path),
+          next.map((s) => s.folderName),
+        ),
+      });
+    }
+    if (next.length !== sources.length) onChange(next);
+  };
+  const example = sources.find((s) => s.folderName)?.folderName ?? "Documents";
+
+  return (
+    <div className="flex flex-col gap-2">
+      {sources.length > 0 && (
+        <div className="hidden gap-2 px-1 text-xs font-medium text-muted sm:flex">
+          <span className="flex-1">תיקיית מקור</span>
+          <span className="w-44">שם תיקיות הגיבוי</span>
+          <span className="w-8" />
+        </div>
+      )}
+      {sources.length === 0 && (
+        <div className="rounded-lg border border-dashed border-line px-3 py-3 text-[13px] text-muted">
+          עדיין לא נבחרו תיקיות. אפשר להוסיף כמה תיקיות מקור - כולן יגובו יחד לאותו יעד.
+        </div>
+      )}
+      {sources.map((src, i) => (
+        <div
+          key={i}
+          className="flex flex-col gap-2 rounded-lg border border-line bg-panel2 p-2 sm:flex-row sm:items-center sm:border-0 sm:bg-transparent sm:p-0"
+        >
+          <div className="min-w-0 flex-1">
+            <PathPicker
+              value={src.path}
+              onChange={(v) => setPath(i, v)}
+              title="בחירת תיקיית מקור"
+              placeholder="C:\Users\...\Documents"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <TextInput
+              aria-label="שם תיקיות הגיבוי"
+              className="w-44"
+              value={src.folderName}
+              placeholder={defaultFolderName(src.path) || "שם"}
+              onChange={(e) => update(i, { ...src, folderName: e.target.value })}
+            />
+            <IconButton label="הסרת תיקיית המקור" tone="danger" onClick={() => onChange(sources.filter((_, j) => j !== i))}>
+              <Trash2 size={16} />
+            </IconButton>
+          </div>
+        </div>
+      ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button size="sm" icon={<FolderPlus size={15} />} onClick={add}>
+          הוספת תיקיית מקור
+        </Button>
+        {sources.length > 1 && <span className="text-xs text-muted">כל התיקיות מגובות יחד, באותו תזמון ועם אותו תאריך.</span>}
+      </div>
+      <p className="text-xs text-muted">
+        לכל תיקיית מקור יש גיבויים משלה ביעד, לדוגמה:{" "}
+        <bdi dir="ltr" className="selectable">
+          {joinPath(destination || "D:\\Backups", "")}
+          <bdi>{exampleFolderName(example, mode)}</bdi>
+        </bdi>
+      </p>
+    </div>
+  );
+}
+
 export default function TaskEditor({
   task,
   globalFilterCount,
@@ -97,14 +198,20 @@ export default function TaskEditor({
 }) {
   const isNew = !task.id;
   const [t, setT] = useState<Task>(task);
-  const [folderTouched, setFolderTouched] = useState(!isNew);
   const [advanced, setAdvanced] = useState(task.copyEmptyDirs);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const set = <K extends keyof Task>(k: K, v: Task[K]) => setT((x) => ({ ...x, [k]: v }));
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
-  const locationChanged = !isNew && (t.destination !== task.destination || sanitizeFolderName(t.folderName) !== task.folderName);
+  // Existing backups are found by destination + folder name; changing either orphans them.
+  const locationChanged =
+    !isNew &&
+    (t.destination !== task.destination ||
+      task.sources.some((old) => {
+        const cur = t.sources.find((s) => s.path === old.path);
+        return cur && sanitizeFolderName(cur.folderName) !== old.folderName;
+      }));
 
   const save = async () => {
     setSaving(true);
@@ -144,15 +251,7 @@ export default function TaskEditor({
         <Section title="כללי">
           <div className="flex flex-wrap items-end gap-4">
             <Field label="שם המשימה" className="min-w-60 flex-1">
-              <TextInput
-                autoFocus
-                value={t.name}
-                placeholder="למשל: מסמכים"
-                onChange={(e) => {
-                  const name = e.target.value;
-                  setT((x) => ({ ...x, name, folderName: folderTouched ? x.folderName : sanitizeFolderName(name) }));
-                }}
-              />
+              <TextInput autoFocus value={t.name} placeholder="למשל: מסמכים" onChange={(e) => set("name", e.target.value)} />
             </Field>
             <div className="pb-2">
               <Toggle checked={t.enabled} onChange={(v) => set("enabled", v)} label="משימה פעילה" />
@@ -160,38 +259,23 @@ export default function TaskEditor({
           </div>
         </Section>
 
-        <Section title="מקור ויעד">
-          <Field label="תיקיית מקור" hint="התיקייה שאותה מגבים">
-            <PathPicker value={t.source} onChange={(v) => set("source", v)} title="בחירת תיקיית מקור" placeholder="C:\Users\...\Documents" />
-          </Field>
-          <Field label="תיקיית יעד" hint="בתוכה תיווצר תיקיית גיבוי עם תאריך">
-            <PathPicker value={t.destination} onChange={(v) => set("destination", v)} title="בחירת תיקיית יעד" placeholder="D:\Backups" />
-          </Field>
-          <Field
-            label="שם תיקיות הגיבוי"
-            hint={
-              <span>
-                לדוגמה:{" "}
-                <bdi dir="ltr" className="selectable">
-                  {joinPath(t.destination || "D:\\Backups", "")}
-                  <bdi>{exampleFolderName(t.folderName || t.name)}</bdi>
-                </bdi>
-              </span>
-            }
-          >
-            <TextInput
-              value={t.folderName}
-              placeholder={t.name || "שם"}
-              onChange={(e) => {
-                setFolderTouched(true);
-                set("folderName", e.target.value);
-              }}
+        <Section title="תיקיות מקור">
+          <SourcesEditor sources={t.sources} destination={t.destination} mode={t.mode} onChange={(v) => set("sources", v)} />
+        </Section>
+
+        <Section title="יעד">
+          <Field label="תיקיית יעד" hint="בתוכה נוצרות תיקיות הגיבוי עם התאריך, בנפרד לכל תיקיית מקור">
+            <PathPicker
+              value={t.destination}
+              onChange={(v) => set("destination", v)}
+              title="בחירת תיקיית יעד"
+              placeholder="D:\Backups"
             />
           </Field>
           {locationChanged && (
             <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
               <AlertCircle size={16} className="mt-0.5 shrink-0" />
-              שיניתם את היעד או את שם התיקיות. גיבויים שכבר קיימים במיקום הקודם לא ינוהלו יותר על ידי המשימה (ולא יימחקו
+              שיניתם את היעד או שם של תיקיות גיבוי. גיבויים שכבר קיימים במיקום הקודם לא ינוהלו יותר על ידי המשימה (ולא יימחקו
               אוטומטית).
             </div>
           )}
@@ -229,9 +313,24 @@ export default function TaskEditor({
               }
             />
           )}
-          <Field label="מספר גיבויים מלאים לשמירה" hint="1 = כל גיבוי מלא חדש מוחק את הקודם (אחרי שהצליח).">
+          <Field
+            label="מספר גיבויים מלאים לשמירה"
+            hint="1 = כל גיבוי מלא חדש מוחק את הקודם, יחד עם הגיבויים האינקרמנטליים שאחריו."
+          >
             <NumberInput className="w-24" min={1} max={100} value={t.keepCount} onChange={(v) => set("keepCount", v)} />
           </Field>
+          <Toggle
+            checked={t.deleteBefore}
+            onChange={(v) => set("deleteBefore", v)}
+            label="מחיקת הגיבויים הקודמים לפני תחילת גיבוי מלא"
+            description="מפנה מקום בדיסק לפני ההעתקה, כשאין מספיק מקום לשני עותקים. כברירת מחדל הגיבויים הקודמים נמחקים רק אחרי שהגיבוי החדש הצליח."
+          />
+          {t.deleteBefore && (
+            <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              שימו לב: אם הגיבוי המלא ייכשל או יבוטל באמצע, לא יישאר גיבוי שלם קודם.
+            </div>
+          )}
         </Section>
 
         <Section title="תזמון">

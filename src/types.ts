@@ -23,16 +23,22 @@ export type FilterRule =
 
 export type FilterKind = FilterRule["kind"];
 
+export interface Source {
+  path: string;
+  /** Prefix of this source's dated folders. */
+  folderName: string;
+}
+
 export interface Task {
   id: string;
   name: string;
-  source: string;
+  sources: Source[];
   destination: string;
-  folderName: string;
   mode: BackupMode;
   schedule: Schedule;
   enabled: boolean;
   keepCount: number;
+  deleteBefore: boolean;
   reusePrevious: boolean;
   fullEveryDays: number;
   copyEmptyDirs: boolean;
@@ -56,8 +62,11 @@ export interface Progress {
   taskId: string;
   taskName: string;
   mode: BackupMode;
-  phase: "scanning" | "copying" | "finishing";
+  phase: "scanning" | "deleting" | "copying";
   startedAt: string;
+  sourceIndex: number;
+  sourceCount: number;
+  sourcePath: string;
   filesDone: number;
   filesTotal: number;
   bytesDone: number;
@@ -90,15 +99,11 @@ export interface Snapshot {
   autostart: boolean;
 }
 
-export interface RunRecord {
-  id: string;
-  taskId: string;
-  taskName: string;
-  trigger: Trigger;
-  mode: BackupMode;
-  startedAt: string;
-  finishedAt: string;
-  status: RunStatus;
+export interface SourceRun {
+  source: string;
+  folderName: string;
+  mode: BackupMode | null;
+  status: RunStatus | null;
   message: string;
   targetFolder: string | null;
   filesCopied: number;
@@ -110,23 +115,47 @@ export interface RunRecord {
   logFile: string | null;
 }
 
+export interface RunRecord {
+  id: string;
+  taskId: string;
+  taskName: string;
+  trigger: Trigger;
+  mode: BackupMode;
+  startedAt: string;
+  finishedAt: string;
+  status: RunStatus;
+  message: string;
+  filesCopied: number;
+  bytesCopied: number;
+  filesDeleted: number;
+  filesFailed: number;
+  sources: SourceRun[];
+}
+
 export interface BackupFolder {
   name: string;
   path: string;
   createdAt: string;
+  kind: BackupMode;
   partial: boolean;
+}
+
+export interface SourceBackups {
+  source: string;
+  folderName: string;
+  backups: BackupFolder[];
 }
 
 export const newTask = (): Task => ({
   id: "",
   name: "",
-  source: "",
+  sources: [],
   destination: "",
-  folderName: "",
   mode: "incremental",
   schedule: { kind: "daily", time: "03:00" },
   enabled: true,
   keepCount: 1,
+  deleteBefore: false,
   reusePrevious: false,
   fullEveryDays: 30,
   copyEmptyDirs: false,

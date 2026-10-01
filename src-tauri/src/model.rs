@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum BackupMode {
-    /// Destination becomes identical to the source, in a new dated folder.
+    /// A new dated folder identical to the source.
     Full,
-    /// Only new/changed files are copied into the latest dated folder.
+    /// A new dated folder holding only files new/changed since the previous backup.
     Incremental,
 }
 
@@ -17,13 +17,25 @@ pub enum BackupMode {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Schedule {
     Manual,
-    Once { at: String },
-    Daily { time: String },
+    Once {
+        at: String,
+    },
+    Daily {
+        time: String,
+    },
     /// days: 0 = Sunday .. 6 = Saturday
-    Weekly { days: Vec<u8>, time: String },
+    Weekly {
+        days: Vec<u8>,
+        time: String,
+    },
     /// day: 1..=31, clamped to the month's last day
-    Monthly { day: u8, time: String },
-    Interval { minutes: u32 },
+    Monthly {
+        day: u8,
+        time: String,
+    },
+    Interval {
+        minutes: u32,
+    },
 }
 
 /// A rule for files/folders that are never backed up.
@@ -31,17 +43,36 @@ pub enum Schedule {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilterRule {
     /// One or more extensions: "tmp", "tmp, log, .bak"
-    Extension { value: String },
+    Extension {
+        value: String,
+    },
     /// Wildcard on the file name: "~$*", "Thumbs.db", "*.part"
-    Pattern { value: String },
+    Pattern {
+        value: String,
+    },
     /// Folder name anywhere in the tree ("node_modules") or a full path.
-    Folder { value: String },
+    Folder {
+        value: String,
+    },
     /// Files larger than this many MB.
-    LargerThan { mb: u64 },
+    LargerThan {
+        mb: u64,
+    },
     /// Files last modified more than this many days ago.
-    OlderThan { days: u32 },
+    OlderThan {
+        days: u32,
+    },
     Hidden,
     System,
+}
+
+/// One source folder of a task. Each source has its own chain of dated backup folders.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Source {
+    pub path: String,
+    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03-00 מלא").
+    pub folder_name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -49,19 +80,20 @@ pub enum FilterRule {
 pub struct Task {
     pub id: String,
     pub name: String,
-    pub source: String,
-    /// Root folder that holds this task's dated backup folders.
+    /// All sources run together, on the same schedule, with the same date in their folder names.
+    pub sources: Vec<Source>,
+    /// Root folder that holds the dated backup folders of all sources.
     pub destination: String,
-    /// Prefix of the dated folders ("<prefix> 2026-10-01 03-00").
-    pub folder_name: String,
     pub mode: BackupMode,
     pub schedule: Schedule,
     pub enabled: bool,
-    /// How many dated full backups to keep (>= 1). Older ones are deleted after a successful full.
+    /// How many full backups (each with its incrementals) to keep per source (>= 1).
     pub keep_count: u32,
-    /// Full backup: rename the previous folder and mirror into it instead of copying everything again.
+    /// Delete old backups before a full backup starts (frees space) instead of after it succeeds.
+    pub delete_before: bool,
+    /// Full backup: rename the previous full folder and mirror into it instead of copying everything again.
     pub reuse_previous: bool,
-    /// Incremental task: start a new dated full backup every N days (0 = never).
+    /// Incremental task: start a new full backup every N days (0 = never).
     pub full_every_days: u32,
     pub copy_empty_dirs: bool,
     /// Run a scheduled occurrence that was missed while the computer was off.
@@ -69,6 +101,11 @@ pub struct Task {
     pub filters: Vec<FilterRule>,
     /// Also apply the global filter rules from Settings.
     pub use_global_filters: bool,
+    /// Pre-multi-source fields, read once and migrated into `sources`.
+    #[serde(skip_serializing)]
+    pub source: String,
+    #[serde(skip_serializing)]
+    pub folder_name: String,
 }
 
 impl Default for Task {
@@ -76,19 +113,33 @@ impl Default for Task {
         Self {
             id: String::new(),
             name: String::new(),
-            source: String::new(),
+            sources: Vec::new(),
             destination: String::new(),
-            folder_name: String::new(),
             mode: BackupMode::Incremental,
             schedule: Schedule::Manual,
             enabled: true,
             keep_count: 1,
+            delete_before: false,
             reuse_previous: false,
             full_every_days: 0,
             copy_empty_dirs: false,
             catch_up: true,
             filters: Vec::new(),
             use_global_filters: true,
+            source: String::new(),
+            folder_name: String::new(),
+        }
+    }
+}
+
+impl Task {
+    /// Moves the legacy single `source` into `sources`.
+    pub fn migrate(&mut self) {
+        if self.sources.is_empty() && !self.source.is_empty() {
+            self.sources.push(Source {
+                path: std::mem::take(&mut self.source),
+                folder_name: std::mem::take(&mut self.folder_name),
+            });
         }
     }
 }
@@ -103,13 +154,14 @@ pub struct TaskState {
     pub last_message: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum RunStatus {
+    // Ordered from best to worst, so the overall status of a run is the max.
     Success,
     Warning,
-    Failed,
     Cancelled,
+    Failed,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,17 +172,14 @@ pub enum Trigger {
     CatchUp,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct RunRecord {
-    pub id: String,
-    pub task_id: String,
-    pub task_name: String,
-    pub trigger: Trigger,
-    pub mode: BackupMode,
-    pub started_at: DateTime<Local>,
-    pub finished_at: DateTime<Local>,
-    pub status: RunStatus,
+/// Result of one source within a run.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SourceRun {
+    pub source: String,
+    pub folder_name: String,
+    pub mode: Option<BackupMode>,
+    pub status: Option<RunStatus>,
     pub message: String,
     pub target_folder: Option<String>,
     pub files_copied: u64,
@@ -140,6 +189,27 @@ pub struct RunRecord {
     pub errors: Vec<String>,
     pub exit_code: Option<i32>,
     pub log_file: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRecord {
+    pub id: String,
+    pub task_id: String,
+    pub task_name: String,
+    pub trigger: Trigger,
+    /// The requested mode (each source may still have needed a full; see `sources`).
+    pub mode: BackupMode,
+    pub started_at: DateTime<Local>,
+    pub finished_at: DateTime<Local>,
+    pub status: RunStatus,
+    pub message: String,
+    pub files_copied: u64,
+    pub bytes_copied: u64,
+    pub files_deleted: u64,
+    pub files_failed: u64,
+    #[serde(default)]
+    pub sources: Vec<SourceRun>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -177,9 +247,13 @@ pub struct Progress {
     pub task_id: String,
     pub task_name: String,
     pub mode: BackupMode,
-    /// "preparing" | "scanning" | "copying" | "finishing"
+    /// "scanning" | "deleting" | "copying"
     pub phase: String,
     pub started_at: DateTime<Local>,
+    /// 1-based index of the source being backed up, out of source_count.
+    pub source_index: usize,
+    pub source_count: usize,
+    pub source_path: String,
     pub files_done: u64,
     pub files_total: u64,
     pub bytes_done: u64,
@@ -193,5 +267,15 @@ pub struct BackupFolder {
     pub name: String,
     pub path: String,
     pub created_at: DateTime<Local>,
+    pub kind: BackupMode,
     pub partial: bool,
+}
+
+/// The dated backups of one source.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceBackups {
+    pub source: String,
+    pub folder_name: String,
+    pub backups: Vec<BackupFolder>,
 }

@@ -7,23 +7,27 @@ Backups are **plain files and folders**: no private format, no compression, no e
 
 ## How backups work
 
-Each task has a source, a destination root and a schedule. Backups go into dated folders inside the destination:
+A task has **one or more source folders**, one destination folder and a schedule. All sources of a task run together and their backup folders share the same date. Each source has its own chain of dated folders in the destination, named after the source folder (editable):
 
 ```
-E:\Backups\Documents 2026-10-01 03-00\...   <- date the backup folder was created
+E:\Backups\Documents 2026-10-01 03-00 מלא            <- full: identical to the source
+E:\Backups\Documents 2026-10-02 03-00 אינקרמנטלי     <- only files new/changed since the previous backup
+E:\Backups\Pictures  2026-10-01 03-00 מלא
 ```
 
-- **Full**: creates a new dated folder that is identical to the source (files deleted from the source don't show up). After it succeeds, older backups are deleted (keeps the newest `keepCount`, default 1).
-  - *Fast full* (optional, only with keepCount = 1): renames the previous folder to the new date and mirrors into it, so only the differences get copied.
-- **Incremental**: copies only new or changed files into the latest complete dated folder. Nothing is deleted. If there's no previous backup yet, it runs a full backup. Optional "new full every N days".
-- A full backup that is still running or that failed carries a `.partial` suffix. It is never used as an incremental base, and it is cleaned up by the next successful full.
-- Empty folders aren't copied unless the task's "copy empty folders" option is on.
+- **Full**: a new dated folder identical to the source (files deleted from the source don't show up).
+  - *Fast full* (optional, keepCount = 1): renames the previous full folder to the new date and mirrors into it, so only the differences get copied.
+- **Incremental**: every run creates a **new** dated folder holding only the files that are new or changed since the previous backup (compared against the full backup plus the incrementals after it, by size and modified time). If nothing changed, the folder stays empty, so Explorer still shows the backup ran. The first backup is always full. Optional "new full every N days".
+- **Retention**: a full backup plus the incrementals after it is a chain. When a full backup completes, chains beyond `keepCount` (default 1) are deleted, together with empty incremental folders and incomplete ones.
+- **Delete before** (optional, per task): deletes the old backups *before* the full backup starts, to free disk space. If that backup then fails, no previous backup is left (the UI warns about this). By default old backups are deleted only after the new one succeeds.
+- A folder still being written, or one that failed or was cancelled, carries a `.partial` suffix and is never used as a full base.
+- Empty folders inside the source aren't copied unless "copy empty folders" is on (full backups only).
 
-**Filter rules** (what never gets backed up), per task and/or global (Settings): file extension, file-name wildcard (`~$*`), folder name or path (`node_modules`), files larger than N MB, files not modified for N days, hidden files, system files. `$RECYCLE.BIN` and `System Volume Information` are always skipped.
+**Filter rules** (what never gets backed up), per task and/or global (Settings): file extension, file-name wildcard (`~$*`), folder name or path (`node_modules`), files larger than N MB, files not modified for N days, hidden files, system files. `$RECYCLE.BIN` and `System Volume Information` are always skipped. Full and incremental backups apply the same rules (both come from robocopy).
 
 **Schedules**: manual, one-time, daily, weekly (chosen weekdays), monthly (day 1-31, clamped to the month's end), every X minutes/hours. A run missed while the PC was off or asleep can be caught up on next start ("catch-up", per task).
 
-Also included: run log with per-run details, robocopy errors and the full log; a toast notification on success/failure; bulk edit of several tasks (choose fields, preview the diff, apply, undo); sorting the task list by name, source or destination folder (grouped by folder); a per-task backup manager (list, size, open, delete).
+Also included: a run log with per-source details, errors and the full log; a toast notification on success/failure; bulk edit of several tasks (choose fields, preview the diff, apply, undo); sorting the task list by name, source or destination folder (grouped by folder); a backups manager per task (per source: list, type, size, open, delete); folders picked with the Windows folder dialog (several sources at once).
 
 ## Use
 

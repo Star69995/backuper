@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { BackupFolder, BackupMode, Progress, RunRecord, Schedule, Settings, Snapshot, Task } from "./types";
+import type { BackupMode, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task } from "./types";
 
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
@@ -12,9 +12,9 @@ export const api = {
   cancelTask: (id: string) => invoke<void>("cancel_task", { id }),
   history: () => invoke<RunRecord[]>("get_history"),
   clearHistory: () => invoke<void>("clear_history"),
-  readLog: (runId: string) => invoke<string>("read_log", { runId }),
-  listBackups: (taskId: string) => invoke<BackupFolder[]>("list_backups", { taskId }),
-  deleteBackup: (taskId: string, name: string) => invoke<void>("delete_backup", { taskId, name }),
+  readLog: (runId: string, sourceIndex: number) => invoke<string>("read_log", { runId, sourceIndex }),
+  listBackups: (taskId: string) => invoke<SourceBackups[]>("list_backups", { taskId }),
+  deleteBackup: (taskId: string, folderName: string, name: string) => invoke<void>("delete_backup", { taskId, folderName, name }),
   folderSize: (path: string) => invoke<number>("folder_size", { path }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
@@ -23,6 +23,11 @@ export const api = {
   pickFolder: async (title: string, defaultPath?: string) => {
     const r = await open({ directory: true, multiple: false, title, defaultPath: defaultPath || undefined });
     return typeof r === "string" ? r : null;
+  },
+  /** Windows folder dialog with multi-select (Ctrl/Shift+click). */
+  pickFolders: async (title: string) => {
+    const r = await open({ directory: true, multiple: true, title });
+    return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
   },
   onSnapshotChanged: (cb: () => void) => listen("snapshot-changed", cb),
   onProgress: (cb: (p: Progress) => void) => listen<Progress>("progress", (e) => cb(e.payload)),
