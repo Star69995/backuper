@@ -15,6 +15,45 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Slot {
+    /// Not due yet.
+    Idle,
+    /// Was due but missed while off, and catch-up is disabled: skipped.
+    Skipped,
+    Run(Trigger),
+}
+
+/// Checks one schedule slot; if it is due, moves it to its next occurrence.
+fn take_due(next: &mut Option<chrono::DateTime<Local>>, sched: &Schedule, now: chrono::DateTime<Local>, catch_up: bool) -> Slot {
+    let Some(at) = *next else { return Slot::Idle };
+    if now < at {
+        return Slot::Idle;
+    }
+    *next = schedule::next_after(sched, now);
+    let missed = now - at > ChronoDuration::minutes(MISSED_GRACE_MINUTES);
+    match (missed, catch_up) {
+        (false, _) => Slot::Run(Trigger::Scheduled),
+        (true, true) => Slot::Run(Trigger::CatchUp),
+        (true, false) => Slot::Skipped,
+    }
+}
+
+/// Fills in a missing next-run time, or clears it when the schedule is off/manual. Returns true if changed.
+fn refresh_slot(next: &mut Option<chrono::DateTime<Local>>, sched: Option<&Schedule>, now: chrono::DateTime<Local>) -> bool {
+    match sched.filter(|s| **s != Schedule::Manual) {
+        None if next.is_some() => {
+            *next = None;
+            true
+        }
+        Some(s) if next.is_none() => {
+            *next = schedule::next_after(s, now);
+            next.is_some()
+        }
+        _ => false,
+    }
+}
+
 /// One record for the whole run; status is the worst of its sources.
 fn summarize(
     id: String,
@@ -121,7 +160,17 @@ impl Core {
     pub fn enqueue(&self, job: Job) -> bool {
         let running = self.current.lock().unwrap().as_ref().map(|p| p.task_id.clone());
         let mut q = self.queue.lock().unwrap();
-        if running.as_deref() == Some(job.task_id.as_str()) || q.iter().any(|j| j.task_id == job.task_id) {
+        if running.as_deref() == Some(job.task_id.as_str()) {
+            return false;
+        }
+        if let Some(queued) = q.iter_mut().find(|j| j.task_id == job.task_id) {
+            // A full backup that comes due replaces a queued incremental of the same task.
+            if job.mode == Some(BackupMode::Full) && queued.mode != Some(BackupMode::Full) {
+                queued.mode = Some(BackupMode::Full);
+                drop(q);
+                self.changed();
+                return true;
+            }
             return false;
         }
         q.push_back(job);
@@ -278,14 +327,8 @@ impl Core {
         let mut dirty = false;
         for t in &tasks {
             let st = s.states.entry(t.id.clone()).or_default();
-            let active = t.enabled && t.schedule != Schedule::Manual;
-            if !active && st.next_run.is_some() {
-                st.next_run = None;
-                dirty = true;
-            } else if active && st.next_run.is_none() {
-                st.next_run = schedule::next_after(&t.schedule, now);
-                dirty |= st.next_run.is_some();
-            }
+            dirty |= refresh_slot(&mut st.next_run, t.enabled.then_some(&t.schedule), now);
+            dirty |= refresh_slot(&mut st.next_full_run, t.full_schedule.as_ref().filter(|_| t.enabled), now);
         }
         if dirty {
             s.save_states();
@@ -304,26 +347,26 @@ impl Core {
                     let mut dirty = false;
                     for t in tasks.iter().filter(|t| t.enabled) {
                         let st = s.states.entry(t.id.clone()).or_default();
-                        let Some(next) = st.next_run else { continue };
-                        if now < next {
-                            continue;
-                        }
-                        let missed = now - next > ChronoDuration::minutes(MISSED_GRACE_MINUTES);
-                        if !missed {
+                        let main = take_due(&mut st.next_run, &t.schedule, now, t.catch_up);
+                        let full = match &t.full_schedule {
+                            Some(fs) => take_due(&mut st.next_full_run, fs, now, t.catch_up),
+                            None => Slot::Idle,
+                        };
+                        dirty |= main != Slot::Idle || full != Slot::Idle;
+                        // When both come due together, the full backup wins.
+                        if let Slot::Run(trigger) = full {
+                            due.push(Job {
+                                task_id: t.id.clone(),
+                                mode: Some(BackupMode::Full),
+                                trigger,
+                            });
+                        } else if let Slot::Run(trigger) = main {
                             due.push(Job {
                                 task_id: t.id.clone(),
                                 mode: None,
-                                trigger: Trigger::Scheduled,
-                            });
-                        } else if t.catch_up {
-                            due.push(Job {
-                                task_id: t.id.clone(),
-                                mode: None,
-                                trigger: Trigger::CatchUp,
+                                trigger,
                             });
                         }
-                        st.next_run = schedule::next_after(&t.schedule, now);
-                        dirty = true;
                     }
                     if dirty {
                         s.save_states();
@@ -339,5 +382,45 @@ impl Core {
             }
             std::thread::sleep(SCHEDULER_TICK);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(h: u32, m: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 10, 2, h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn slots_run_skip_and_advance() {
+        let daily = Schedule::Daily { time: "03:00".into() };
+        let mut next = Some(at(3, 0));
+        assert_eq!(take_due(&mut next, &daily, at(2, 59), true), Slot::Idle);
+        assert_eq!(take_due(&mut next, &daily, at(3, 0), true), Slot::Run(Trigger::Scheduled));
+        assert_eq!(next, Some(Local.with_ymd_and_hms(2026, 10, 3, 3, 0, 0).unwrap()));
+
+        // Missed by hours (PC was off): catch-up runs it, otherwise it's skipped.
+        let mut next = Some(at(3, 0));
+        assert_eq!(take_due(&mut next, &daily, at(9, 0), true), Slot::Run(Trigger::CatchUp));
+        let mut next = Some(at(3, 0));
+        assert_eq!(take_due(&mut next, &daily, at(9, 0), false), Slot::Skipped);
+        assert!(next.unwrap() > at(9, 0));
+    }
+
+    #[test]
+    fn slot_refresh_follows_schedule() {
+        let mut next = None;
+        assert!(refresh_slot(
+            &mut next,
+            Some(&Schedule::Daily { time: "03:00".into() }),
+            at(1, 0)
+        ));
+        assert_eq!(next, Some(at(3, 0)));
+        assert!(refresh_slot(&mut next, Some(&Schedule::Manual), at(1, 0)));
+        assert_eq!(next, None);
+        assert!(!refresh_slot(&mut next, None, at(1, 0)));
     }
 }

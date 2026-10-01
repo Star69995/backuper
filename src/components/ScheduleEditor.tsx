@@ -42,7 +42,16 @@ export function defaultSchedule(kind: ScheduleKind, prev: Schedule): Schedule {
   }
 }
 
-export default function ScheduleEditor({ value, onChange }: { value: Schedule; onChange: (s: Schedule) => void }) {
+export default function ScheduleEditor({
+  value,
+  onChange,
+  allowManual = true,
+}: {
+  value: Schedule;
+  onChange: (s: Schedule) => void;
+  /** false for schedules that must actually run (the full schedule of combined mode). */
+  allowManual?: boolean;
+}) {
   const [preview, setPreview] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,7 +82,11 @@ export default function ScheduleEditor({ value, onChange }: { value: Schedule; o
 
   return (
     <div className="flex flex-col gap-4">
-      <Segmented value={value.kind} onChange={(k) => onChange(defaultSchedule(k, value))} options={KINDS} />
+      <Segmented
+        value={value.kind}
+        onChange={(k) => onChange(defaultSchedule(k, value))}
+        options={allowManual ? KINDS : KINDS.filter((k) => k.value !== "manual")}
+      />
 
       {value.kind === "manual" && (
         <p className="text-[13px] text-muted">המשימה תרוץ רק כשתפעילו אותה בעצמכם (כפתור "הרץ עכשיו").</p>

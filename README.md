@@ -17,8 +17,9 @@ E:\Backups\Pictures  2026-10-01 03-00 מלא
 
 - **Full**: a new dated folder identical to the source (files deleted from the source don't show up).
   - *Fast full* (optional, keepCount = 1): renames the previous full folder to the new date and mirrors into it, so only the differences get copied.
-- **Incremental**: every run creates a **new** dated folder holding only the files that are new or changed since the previous backup (compared against the full backup plus the incrementals after it, by size and modified time). If nothing changed, the folder stays empty, so Explorer still shows the backup ran. The first backup is always full. Optional "new full every N days".
-- **Retention**: a full backup plus the incrementals after it is a chain. When a full backup completes, chains beyond `keepCount` (default 1) are deleted, together with empty incremental folders and incomplete ones.
+- **Incremental**: every run creates a **new** dated folder holding only the files that are new or changed since the previous backup (compared against the full backup plus the incrementals after it, by size and modified time). If nothing changed, the folder stays empty, so Explorer still shows the backup ran. The first backup is always full.
+- **Combined**: full backups on their own schedule (e.g. weekly on Friday) and incrementals on another (e.g. daily). When both are due at once, only the full runs. Each full starts a new chain.
+- **Retention**: a full backup plus the incrementals after it is a chain. When a full backup completes, chains beyond `keepCount` (default 1) are deleted, together with incomplete folders and (option "delete empty incremental folders", on by default) incremental folders that ended up empty.
 - **Delete before** (optional, per task): deletes the old backups *before* the full backup starts, to free disk space. If that backup then fails, no previous backup is left (the UI warns about this). By default old backups are deleted only after the new one succeeds.
 - A folder still being written, or one that failed or was cancelled, carries a `.partial` suffix and is never used as a full base.
 - Empty folders inside the source aren't copied unless "copy empty folders" is on (full backups only).
@@ -27,11 +28,13 @@ E:\Backups\Pictures  2026-10-01 03-00 מלא
 
 **Schedules**: manual, one-time, daily, weekly (chosen weekdays), monthly (day 1-31, clamped to the month's end), every X minutes/hours. A run missed while the PC was off or asleep can be caught up on next start ("catch-up", per task).
 
+**Import from Cobian**: "ייבוא מ-Cobian" reads a Cobian Backup / Reflector task list (`.lst`) and shows a preview first. Name, enabled state, local sources/destination, schedule, full/incremental, a fixed weekly full day (imported as combined mode), copies to keep, empty folders and exclusion masks all carry over. Anything without an equivalent gets a per-task warning (include-only filters, "full every N backups", differential, FTP sources). Tasks keep Cobian's task id, so importing again offers to update them instead of duplicating them. The app doesn't recognize Cobian's existing backup folders, so each task's first run is a full backup.
+
 Also included: a run log with per-source details, errors and the full log; a toast notification on success/failure; bulk edit of several tasks (choose fields, preview the diff, apply, undo); sorting the task list by name, source or destination folder (grouped by folder); a backups manager per task (per source: list, type, size, open, delete); folders picked with the Windows folder dialog (several sources at once).
 
 ## Use
 
-Install with `src-tauri\target\release\bundle\nsis\Backuper_<version>_x64-setup.exe` (per-user install, no admin needed).
+Install with `src-tauri\target\release\bundle\nsis\Backuper_<version>_x64-setup.exe` (per-user install, no admin needed). The installer is in Hebrew. Running a newer installer over an installed version updates it in place (tasks, settings and the log are kept).
 On first launch the app registers itself to start with Windows (to the tray, `--hidden`). You can change this in Settings.
 Closing the window minimizes to the tray. Right-click the tray icon to pause scheduling or exit.
 

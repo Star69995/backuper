@@ -16,7 +16,11 @@ pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
+        // Windows won't let a background process take focus; briefly going always-on-top
+        // brings the window in front of whatever is active (installer, Explorer).
+        let _ = w.set_always_on_top(true);
         let _ = w.set_focus();
+        let _ = w.set_always_on_top(false);
     }
 }
 

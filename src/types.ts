@@ -34,13 +34,16 @@ export interface Task {
   name: string;
   sources: Source[];
   destination: string;
+  /** Backup type of the main schedule. */
   mode: BackupMode;
   schedule: Schedule;
+  /** Combined mode (mode = incremental): full backups run on this schedule. */
+  fullSchedule: Schedule | null;
   enabled: boolean;
   keepCount: number;
   deleteBefore: boolean;
   reusePrevious: boolean;
-  fullEveryDays: number;
+  deleteEmptyIncrementals: boolean;
   copyEmptyDirs: boolean;
   catchUp: boolean;
   filters: FilterRule[];
@@ -52,6 +55,7 @@ export type Trigger = "manual" | "scheduled" | "catchUp";
 
 export interface TaskState {
   nextRun: string | null;
+  nextFullRun: string | null;
   lastRunAt: string | null;
   lastStatus: RunStatus | null;
   lastMessage: string | null;
@@ -86,7 +90,7 @@ export interface Settings {
   notifyFailure: boolean;
   schedulerPaused: boolean;
   closeToTray: boolean;
-  firstRunDone: boolean;
+  startWithWindows: boolean;
   globalFilters: FilterRule[];
 }
 
@@ -146,6 +150,17 @@ export interface SourceBackups {
   backups: BackupFolder[];
 }
 
+/** A task read from a Cobian task list, before it's saved. */
+export interface ImportedTask {
+  task: Task;
+  /** Settings that couldn't be carried over exactly. */
+  warnings: string[];
+  /** Why it can't be imported as is. */
+  error: string | null;
+  /** A task with this id exists (importing again updates it). */
+  exists: boolean;
+}
+
 export const newTask = (): Task => ({
   id: "",
   name: "",
@@ -153,11 +168,12 @@ export const newTask = (): Task => ({
   destination: "",
   mode: "incremental",
   schedule: { kind: "daily", time: "03:00" },
+  fullSchedule: null,
   enabled: true,
   keepCount: 1,
   deleteBefore: false,
   reusePrevious: false,
-  fullEveryDays: 30,
+  deleteEmptyIncrementals: true,
   copyEmptyDirs: false,
   catchUp: true,
   filters: [],

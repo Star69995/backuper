@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { BackupMode, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task } from "./types";
+import type { BackupMode, ImportedTask, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task } from "./types";
 
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
@@ -20,6 +20,11 @@ export const api = {
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
+  importCobian: (path: string) => invoke<ImportedTask[]>("import_cobian", { path }),
+  pickFile: async (title: string, filterName: string, extensions: string[]) => {
+    const r = await open({ multiple: false, title, filters: [{ name: filterName, extensions }] });
+    return typeof r === "string" ? r : null;
+  },
   pickFolder: async (title: string, defaultPath?: string) => {
     const r = await open({ directory: true, multiple: false, title, defaultPath: defaultPath || undefined });
     return typeof r === "string" ? r : null;

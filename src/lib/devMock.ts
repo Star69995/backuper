@@ -1,7 +1,7 @@
 // Dev-only: lets the UI run in a plain browser (`npm run dev`) with fake data,
 // for visual checks and screenshots. Never loaded inside the real Tauri app.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { RunRecord, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
+import type { ImportedTask, RunRecord, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
 import { newTask } from "../types";
 
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
@@ -20,6 +20,7 @@ export function installDevMock() {
       ],
       destination: "E:\\Backups",
       schedule: { kind: "daily", time: "03:00" },
+      fullSchedule: { kind: "weekly", days: [5], time: "03:00" },
     },
     {
       ...newTask(),
@@ -57,18 +58,20 @@ export function installDevMock() {
   const states: Record<string, TaskState> = {
     "1": {
       nextRun: iso(9 * 60),
+      nextFullRun: iso(2 * 24 * 60),
       lastRunAt: iso(-15 * 60),
       lastStatus: "success",
       lastMessage: "3 תיקיות, 3 הצליחו. הועתקו 132 קבצים",
     },
     "2": {
       nextRun: iso(3 * 24 * 60),
+      nextFullRun: null,
       lastRunAt: iso(-4 * 24 * 60),
       lastStatus: "warning",
       lastMessage: "נמצאו פריטים לא תואמים",
     },
-    "3": { nextRun: iso(47), lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין" },
-    "4": { nextRun: null, lastRunAt: null, lastStatus: null, lastMessage: null },
+    "3": { nextRun: iso(47), nextFullRun: null, lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין" },
+    "4": { nextRun: null, nextFullRun: null, lastRunAt: null, lastStatus: null, lastMessage: null },
   };
   let settings: Settings = {
     theme: "system",
@@ -76,7 +79,7 @@ export function installDevMock() {
     notifyFailure: true,
     schedulerPaused: false,
     closeToTray: true,
-    firstRunDone: true,
+    startWithWindows: true,
     globalFilters: [{ kind: "pattern", value: "~$*" }],
   };
   const sourceRun = (folderName: string, source: string, i: number): SourceRun => ({
@@ -214,6 +217,11 @@ export function installDevMock() {
         return "Backuper - גיבוי אינקרמנטלי\nמקור: C:\\Users\\User\\Pictures\n\nהועתק\t1234\tC:\\Users\\User\\Pictures\\a.jpg\n";
       case "preview_schedule":
         return [iso(60), iso(24 * 60 + 60), iso(48 * 60 + 60)];
+      case "plugin:dialog|open":
+        // Only the Cobian file picker gets an answer (folder pickers stay cancelled).
+        return (a.options as { filters?: unknown[] } | undefined)?.filters ? "C:\\Users\\User\\Desktop\\cobian.lst" : null;
+      case "import_cobian":
+        return cobianImport();
       case "run_tasks":
         return (a.ids as string[]).length;
       case "plugin:app|version":
@@ -225,3 +233,58 @@ export function installDevMock() {
     }
   });
 }
+
+function cobianImport(): ImportedTask[] {
+  const t = (id: string, name: string, extra: Partial<Task>): Task => ({ ...newTask(), id, name, ...extra });
+  return [
+    {
+      task: t("c1", "Docs to K Daily א-ב", {
+        sources: [src("C:\\Users\\User\\Documents", "Documents"), src("D:\\מסמכים", "מסמכים")],
+        destination: "K:\\cobian\\Docs",
+        schedule: { kind: "daily", time: "23:35" },
+        fullSchedule: { kind: "weekly", days: [0], time: "23:35" },
+        copyEmptyDirs: true,
+      }),
+      warnings: [],
+      error: null,
+      exists: false,
+    },
+    {
+      task: t("c2", "LR catalogs to K daily full", {
+        sources: [src("C:\\LR catalogs", "LR catalogs")],
+        destination: "K:\\Cobian LR Bkp",
+        mode: "full",
+        keepCount: 5,
+        schedule: { kind: "daily", time: "00:10" },
+      }),
+      warnings: [
+        'ב-Cobian גובו רק קבצים שתואמים ל-"\u2066*.lrcat\u2069" - כאן אין סינון "רק", ולכן יגובו כל הקבצים. אפשר להוסיף כללי החרגה במקום',
+      ],
+      error: null,
+      exists: false,
+    },
+    {
+      task: t("c3", "Pic folders to K bi-weekly ב-ו", {
+        enabled: false,
+        sources: [src("D:\\Pictures\\Old Pictures", "Old Pictures"), src("D:\\Pictures\\Scans and more", "Scans and more")],
+        destination: "K:\\cobian\\Pic Folders",
+        schedule: { kind: "weekly", days: [1, 5], time: "00:21" },
+        fullSchedule: { kind: "weekly", days: [5], time: "00:21" },
+      }),
+      warnings: [],
+      error: null,
+      exists: true,
+    },
+    {
+      task: t("c4", "Photos to E", {
+        sources: [src("D:\\Photos", "תמונות")],
+        destination: "E:\\Backups",
+        schedule: { kind: "daily", time: "01:00" },
+      }),
+      warnings: [],
+      error: 'למשימות "תמונות משפחה" ו-"Photos to E" יש תיקיית מקור עם אותו שם תיקיית גיבוי (תמונות) באותו יעד - יש לשנות אחד מהם',
+      exists: false,
+    },
+  ];
+}
+

@@ -67,7 +67,7 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
             ))}
           </Select>
           <Select
-            className="w-36"
+            className="w-40"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as RunStatus | "")}
             aria-label="סינון לפי תוצאה"

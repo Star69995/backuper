@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, Eye } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
-import { describeSchedule, MODE_LABEL } from "../lib/format";
-import type { BackupMode, FilterRule, Schedule, Task } from "../types";
+import { describeSchedule, KIND_LABEL, kindFields, type TaskKind, taskKind } from "../lib/format";
+import type { FilterRule, Schedule, Task } from "../types";
 import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import ScheduleEditor from "./ScheduleEditor";
 import { PathPicker } from "./TaskEditor";
@@ -15,24 +15,32 @@ type Key =
   | "catchUp"
   | "keepCount"
   | "deleteBefore"
-  | "fullEveryDays"
+  | "deleteEmptyIncrementals"
   | "reusePrevious"
   | "copyEmptyDirs"
   | "filters"
   | "useGlobalFilters";
-type Values = Pick<Task, Key>;
+type Values = Pick<Task, Key | "fullSchedule">;
+
+/** The "mode" field covers both mode and fullSchedule (full / incremental / combined). */
+const valueOf = (k: Key, t: Values) => (k === "mode" ? { mode: t.mode, fullSchedule: t.fullSchedule } : t[k]);
+
+function showKind(v: Pick<Task, "mode" | "fullSchedule">) {
+  const kind = taskKind(v);
+  return kind === "combined" ? `${KIND_LABEL.combined} (מלא: ${describeSchedule(v.fullSchedule!)})` : KIND_LABEL[kind];
+}
 
 const yesNo = (v: boolean) => (v ? "כן" : "לא");
 
-const FIELDS: { key: Key; label: string; show: (v: Values[Key]) => ReactNode }[] = [
+const FIELDS: { key: Key; label: string; show: (v: ReturnType<typeof valueOf>) => ReactNode }[] = [
   { key: "enabled", label: "פעילה", show: (v) => yesNo(v as boolean) },
-  { key: "mode", label: "סוג גיבוי", show: (v) => MODE_LABEL[v as BackupMode] },
+  { key: "mode", label: "סוג גיבוי", show: (v) => showKind(v as Pick<Task, "mode" | "fullSchedule">) },
   { key: "destination", label: "תיקיית יעד", show: (v) => <PathText path={v as string} /> },
   { key: "schedule", label: "תזמון", show: (v) => describeSchedule(v as Schedule) },
   { key: "catchUp", label: "השלמת גיבוי שהוחמץ", show: (v) => yesNo(v as boolean) },
   { key: "keepCount", label: "גיבויים לשמירה", show: (v) => String(v) },
   { key: "deleteBefore", label: "מחיקת גיבויים לפני גיבוי מלא", show: (v) => yesNo(v as boolean) },
-  { key: "fullEveryDays", label: "גיבוי מלא כל X ימים", show: (v) => ((v as number) === 0 ? "אף פעם" : `${v} ימים`) },
+  { key: "deleteEmptyIncrementals", label: "מחיקת תיקיות אינקרמנטליות ריקות", show: (v) => yesNo(v as boolean) },
   { key: "reusePrevious", label: "גיבוי מלא מהיר", show: (v) => yesNo(v as boolean) },
   { key: "copyEmptyDirs", label: "העתקת תיקיות ריקות", show: (v) => yesNo(v as boolean) },
   {
@@ -58,12 +66,13 @@ export default function BulkEditDialog({
   const [values, setValues] = useState<Values>({
     enabled: first.enabled,
     mode: first.mode,
+    fullSchedule: first.fullSchedule,
     destination: first.destination,
     schedule: first.schedule,
     catchUp: first.catchUp,
     keepCount: first.keepCount,
     deleteBefore: first.deleteBefore,
-    fullEveryDays: first.fullEveryDays,
+    deleteEmptyIncrementals: first.deleteEmptyIncrementals,
     reusePrevious: first.reusePrevious,
     copyEmptyDirs: first.copyEmptyDirs,
     filters: [],
@@ -89,7 +98,7 @@ export default function BulkEditDialog({
     () =>
       tasks.map((t) => {
         const n = { ...t };
-        active.forEach((k) => Object.assign(n, { [k]: values[k] }));
+        active.forEach((k) => Object.assign(n, k === "mode" ? valueOf(k, values) : { [k]: values[k] }));
         if (active.has("filters") && filterMode === "add") {
           const extra = values.filters.filter((f) => !t.filters.some((x) => same(x, f)));
           n.filters = [...t.filters, ...extra];
@@ -109,17 +118,33 @@ export default function BulkEditDialog({
       case "copyEmptyDirs":
       case "useGlobalFilters":
       case "deleteBefore":
+      case "deleteEmptyIncrementals":
         return <Toggle checked={values[k]} onChange={(v) => set(k, v)} />;
       case "mode":
         return (
-          <Segmented
-            value={values.mode}
-            onChange={(v) => set("mode", v)}
-            options={[
-              { value: "incremental", label: MODE_LABEL.incremental },
-              { value: "full", label: MODE_LABEL.full },
-            ]}
-          />
+          <div className="flex flex-col gap-3">
+            <Segmented<TaskKind>
+              value={taskKind(values)}
+              onChange={(kind) => {
+                setValues((x) => ({ ...x, ...kindFields(kind, x.fullSchedule) }));
+                setActive((a) => new Set(a).add("mode"));
+              }}
+              options={(["incremental", "combined", "full"] as const).map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+            />
+            {values.fullSchedule && values.mode === "incremental" && (
+              <div className="flex flex-col gap-2">
+                <span className="text-[13px] font-medium">תזמון הגיבוי המלא</span>
+                <ScheduleEditor
+                  value={values.fullSchedule}
+                  onChange={(v) => {
+                    setValues((x) => ({ ...x, fullSchedule: v }));
+                    setActive((a) => new Set(a).add("mode"));
+                  }}
+                  allowManual={false}
+                />
+              </div>
+            )}
+          </div>
         );
       case "destination":
         return (
@@ -157,8 +182,6 @@ export default function BulkEditDialog({
             />
           </div>
         );
-      case "fullEveryDays":
-        return <NumberInput className="w-24" min={0} value={values.fullEveryDays} onChange={(v) => set("fullEveryDays", v)} />;
     }
   };
 
@@ -198,7 +221,7 @@ export default function BulkEditDialog({
         <div className="flex flex-col divide-y divide-line">
           {FIELDS.map((f) => {
             const on = active.has(f.key);
-            const differing = new Set(tasks.map((t) => JSON.stringify(t[f.key]))).size > 1;
+            const differing = new Set(tasks.map((t) => JSON.stringify(valueOf(f.key, t)))).size > 1;
             return (
               <div key={f.key} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-start">
                 <label className="flex w-52 shrink-0 cursor-pointer items-start gap-2 pt-1.5">
@@ -233,8 +256,8 @@ export default function BulkEditDialog({
                 <tr key={t.id} className="border-b border-line last:border-b-0">
                   <td className="px-3 py-2 font-medium">{t.name}</td>
                   {activeFields.map((f) => {
-                    const before = t[f.key];
-                    const after = next[i][f.key];
+                    const before = valueOf(f.key, t);
+                    const after = valueOf(f.key, next[i]);
                     return (
                       <td key={f.key} className="px-3 py-2">
                         {same(before, after) ? (

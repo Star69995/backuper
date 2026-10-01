@@ -11,6 +11,7 @@ import {
   FolderOpen,
   FolderTree,
   HardDrive,
+  Import,
   ListChecks,
   MoreVertical,
   Pencil,
@@ -26,13 +27,14 @@ import {
 } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import { api, errorText } from "../api";
-import { describeSchedule, fmtRelative, fmtSmart, MODE_LABEL } from "../lib/format";
+import { describeSchedule, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind } from "../lib/format";
 import { groupTasks, SORT_LABEL, type SortKey, sortTasks, useTaskSort } from "../lib/sortTasks";
-import type { BackupMode, RunStatus, Snapshot, Task } from "../types";
+import type { BackupMode, ImportedTask, RunStatus, Snapshot, Task } from "../types";
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
 import { useFeedback } from "./feedback";
+import ImportCobianDialog from "./ImportCobianDialog";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
 import { Badge, Button, Checkbox, cx, EmptyState, IconButton, Menu, PathText, Select, Spinner, TextInput } from "./ui";
@@ -64,6 +66,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const [editing, setEditing] = useState<Task | null>(null);
   const [backupsOf, setBackupsOf] = useState<Task | null>(null);
   const [bulk, setBulk] = useState<Task[] | null>(null);
+  const [importing, setImporting] = useState<ImportedTask[] | null>(null);
 
   const [sort, setSort] = useTaskSort();
   const tasks = useMemo(() => {
@@ -116,6 +119,40 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       });
     } catch (e) {
       toast({ tone: "bad", title: "השמירה נכשלה", message: errorText(e) });
+    }
+  };
+
+  const pickCobianFile = async () => {
+    const path = await api.pickFile("בחירת קובץ משימות של Cobian", "רשימת משימות של Cobian", ["lst"]);
+    if (!path) return;
+    try {
+      setImporting(await api.importCobian(path));
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לקרוא את הקובץ", message: errorText(e) });
+    }
+  };
+
+  /** Saves imported tasks; undo deletes the new ones and restores the ones that were updated. */
+  const importTasks = async (list: Task[]) => {
+    const before = snap.tasks.filter((t) => list.some((n) => n.id === t.id));
+    const added = list.filter((n) => !before.some((t) => t.id === n.id)).map((t) => t.id);
+    try {
+      await api.saveTasks(list);
+      setImporting(null);
+      refresh();
+      toast({
+        tone: "ok",
+        title: list.length === 1 ? "משימה אחת יובאה" : `${list.length} משימות יובאו`,
+        action: {
+          label: "ביטול",
+          onClick: () =>
+            Promise.all([api.deleteTasks(added), before.length ? api.saveTasks(before) : null])
+              .then(() => toast({ tone: "info", title: "הייבוא בוטל" }))
+              .catch((e) => toast({ tone: "bad", title: "הביטול נכשל", message: errorText(e) })),
+        },
+      });
+    } catch (e) {
+      toast({ tone: "bad", title: "הייבוא נכשל", message: errorText(e) });
     }
   };
 
@@ -202,6 +239,9 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
               />
             </div>
           )}
+          <Button icon={<Import size={16} />} onClick={pickCobianFile}>
+            ייבוא מ-Cobian
+          </Button>
           <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing(newTask())}>
             משימה חדשה
           </Button>
@@ -239,9 +279,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         {snap.tasks.length === 0 ? (
           <EmptyState icon={<HardDrive size={26} />} title="בואו ניצור את משימת הגיבוי הראשונה">
             <p>בחרו תיקיית מקור, יעד ולוח זמנים. הגיבוי נשמר כקבצים רגילים שאפשר לפתוח ישירות בסייר הקבצים.</p>
-            <Button variant="primary" className="mt-4" icon={<Plus size={16} />} onClick={() => setEditing(newTask())}>
-              משימה חדשה
-            </Button>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing(newTask())}>
+                משימה חדשה
+              </Button>
+              <Button icon={<Import size={16} />} onClick={pickCobianFile}>
+                ייבוא מ-Cobian
+              </Button>
+            </div>
           </EmptyState>
         ) : tasks.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted">אין משימות שתואמות לחיפוש</div>
@@ -301,6 +346,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                     )}
                     {g.tasks.map((t) => {
                       const st = snap.states[t.id];
+                      const next = nextRunOf(t, st);
                       const running = runningId === t.id;
                       const queued = queuedIds.has(t.id);
                       const checked = selected.has(t.id);
@@ -346,16 +392,34 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                             </div>
                           </td>
                           <td className="px-2 py-3">
-                            <Badge tone={t.mode === "full" ? "accent" : "neutral"}>{MODE_LABEL[t.mode]}</Badge>
+                            <Badge tone={taskKind(t) === "incremental" ? "neutral" : "accent"}>{KIND_LABEL[taskKind(t)]}</Badge>
                           </td>
-                          <td className="px-2 py-3 text-[13px]">{describeSchedule(t.schedule)}</td>
                           <td className="px-2 py-3 text-[13px]">
-                            {!t.enabled || t.schedule.kind === "manual" || !st?.nextRun ? (
+                            {t.fullSchedule && t.mode === "incremental" ? (
+                              <div className="flex flex-col gap-0.5">
+                                <span>
+                                  <span className="text-muted">אינקרמנטלי: </span>
+                                  {describeSchedule(t.schedule)}
+                                </span>
+                                <span>
+                                  <span className="text-muted">מלא: </span>
+                                  {describeSchedule(t.fullSchedule)}
+                                </span>
+                              </div>
+                            ) : (
+                              describeSchedule(t.schedule)
+                            )}
+                          </td>
+                          <td className="px-2 py-3 text-[13px]">
+                            {!next ? (
                               <span className="text-muted">-</span>
                             ) : (
                               <div className={cx(snap.settings.schedulerPaused && "text-muted line-through")}>
-                                <div>{fmtSmart(st.nextRun)}</div>
-                                <div className="text-xs text-muted">{fmtRelative(st.nextRun)}</div>
+                                <div>{fmtSmart(next.at)}</div>
+                                <div className="text-xs text-muted">
+                                  {fmtRelative(next.at)}
+                                  {t.fullSchedule && ` (${MODE_LABEL[next.mode]})`}
+                                </div>
                               </div>
                             )}
                           </td>
@@ -451,6 +515,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           }}
         />
       )}
+      {importing && <ImportCobianDialog items={importing} onClose={() => setImporting(null)} onImport={importTasks} />}
       {backupsOf && <BackupsDialog task={backupsOf} onClose={() => setBackupsOf(null)} />}
       {bulk && (
         <BulkEditDialog

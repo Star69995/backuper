@@ -33,12 +33,21 @@ pub fn get_snapshot(core: CoreState, app: tauri::AppHandle) -> Snapshot {
         current: core.current.lock().unwrap().clone(),
         queue: core.queued(),
         settings: s.settings.clone(),
-        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        // Dev builds never register; show the saved choice there.
+        autostart: if cfg!(debug_assertions) {
+            s.settings.start_with_windows
+        } else {
+            app.autolaunch().is_enabled().unwrap_or(false)
+        },
     }
 }
 
 fn prepare(mut t: Task) -> Result<Task, String> {
     t.migrate();
+    // A full schedule only makes sense next to incremental runs (combined mode).
+    if t.mode == BackupMode::Full {
+        t.full_schedule = None;
+    }
     t.name = t.name.trim().to_string();
     t.destination = t.destination.trim().to_string();
     for src in &mut t.sources {
@@ -55,36 +64,47 @@ fn prepare(mut t: Task) -> Result<Task, String> {
     Ok(t)
 }
 
-/// Creates or updates tasks (used by the editor, bulk edit and undo). All-or-nothing.
+/// Two sources writing the same dated folders into the same destination would delete each other's backups.
+/// `incoming` replaces the existing tasks with the same id.
+fn check_folder_conflicts(existing: &[Task], incoming: &[Task]) -> Result<(), String> {
+    let mut all: Vec<&Task> = existing.iter().filter(|t| !incoming.iter().any(|p| p.id == t.id)).collect();
+    all.extend(incoming.iter());
+    let key = |t: &Task, f: &str| format!("{}\\{}", t.destination.trim_end_matches('\\'), f).to_lowercase();
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    for t in &all {
+        for src in &t.sources {
+            if let Some(other) = seen.insert(key(t, &src.folder_name), &t.name) {
+                if other != t.name {
+                    return Err(format!(
+                        "למשימות \"{other}\" ו-\"{}\" יש תיקיית מקור עם אותו שם תיקיית גיבוי ({}) באותו יעד - יש לשנות אחד מהם",
+                        t.name, src.folder_name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Creates or updates tasks (used by the editor, bulk edit, undo and import). All-or-nothing.
 #[tauri::command]
 pub fn save_tasks(core: CoreState, tasks: Vec<Task>) -> Result<Vec<Task>, String> {
     let prepared = tasks.into_iter().map(prepare).collect::<Result<Vec<_>, _>>()?;
     {
         let mut s = core.store.lock().unwrap();
-        // Two sources writing the same dated folders into the same destination would delete each other's backups.
-        let mut all: Vec<&Task> = s.tasks.iter().filter(|t| !prepared.iter().any(|p| p.id == t.id)).collect();
-        all.extend(prepared.iter());
-        let key = |t: &Task, f: &str| format!("{}\\{}", t.destination.trim_end_matches('\\'), f).to_lowercase();
-        let mut seen: HashMap<String, &str> = HashMap::new();
-        for t in &all {
-            for src in &t.sources {
-                if let Some(other) = seen.insert(key(t, &src.folder_name), &t.name) {
-                    if other != t.name {
-                        return Err(format!(
-                            "למשימות \"{other}\" ו-\"{}\" יש תיקיית מקור עם אותו שם תיקיית גיבוי ({}) באותו יעד - יש לשנות אחד מהם",
-                            t.name, src.folder_name
-                        ));
-                    }
-                }
-            }
-        }
+        check_folder_conflicts(&s.tasks, &prepared)?;
         for t in &prepared {
-            match s.tasks.iter_mut().find(|x| x.id == t.id) {
-                Some(existing) => {
+            match s.tasks.iter().position(|x| x.id == t.id) {
+                Some(i) => {
+                    let existing = std::mem::replace(&mut s.tasks[i], t.clone());
+                    // A changed schedule gets its next run recomputed.
+                    let st = s.states.entry(t.id.clone()).or_default();
                     if existing.schedule != t.schedule || existing.enabled != t.enabled {
-                        s.states.entry(t.id.clone()).or_default().next_run = None;
+                        st.next_run = None;
                     }
-                    *s.tasks.iter_mut().find(|x| x.id == t.id).unwrap() = t.clone();
+                    if existing.full_schedule != t.full_schedule || existing.enabled != t.enabled {
+                        st.next_full_run = None;
+                    }
                 }
                 None => s.tasks.push(t.clone()),
             }
@@ -244,8 +264,57 @@ pub fn save_settings(core: CoreState, settings: Settings) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command]
-pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+/// Makes the Windows startup entry match `enabled`. Debug builds never touch it (it would register the debug exe).
+pub fn apply_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        return Ok(());
+    }
     let al = app.autolaunch();
+    if al.is_enabled().unwrap_or(false) == enabled {
+        return Ok(());
+    }
     if enabled { al.enable() } else { al.disable() }.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_autostart(core: CoreState, app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    apply_autostart(&app, enabled)?;
+    let mut s = core.store.lock().unwrap();
+    s.settings.start_with_windows = enabled;
+    s.save_settings();
+    drop(s);
+    core.changed();
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTask {
+    task: Task,
+    warnings: Vec<String>,
+    /// Why the task can't be imported as is (validation / folder conflict).
+    error: Option<String>,
+    /// A task with this id already exists (importing again updates it).
+    exists: bool,
+}
+
+/// Reads a Cobian task list (.lst) and converts its tasks, without saving anything.
+#[tauri::command]
+pub fn import_cobian(core: CoreState, path: String) -> Result<Vec<ImportedTask>, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("לא ניתן לקרוא את הקובץ: {e}"))?;
+    let imported = crate::cobian::parse_file(&bytes)?;
+    let existing = core.store.lock().unwrap().tasks.clone();
+    Ok(imported
+        .into_iter()
+        .map(|i| {
+            let exists = existing.iter().any(|t| t.id == i.task.id);
+            match prepare(i.task.clone()) {
+                Ok(task) => {
+                    let error = check_folder_conflicts(&existing, std::slice::from_ref(&task)).err();
+                    ImportedTask { task, warnings: i.warnings, error, exists }
+                }
+                Err(error) => ImportedTask { task: i.task, warnings: i.warnings, error: Some(error), exists },
+            }
+        })
+        .collect())
 }

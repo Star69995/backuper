@@ -1,7 +1,26 @@
-import { AlertCircle, AlertTriangle, ChevronDown, Copy, FolderOpen, FolderPlus, Layers, RefreshCw, Trash2 } from "lucide-react";
+import {
+  AlertCircle,
+  AlertTriangle,
+  CalendarRange,
+  ChevronDown,
+  Copy,
+  FolderOpen,
+  FolderPlus,
+  Layers,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { api, errorText } from "../api";
-import { defaultFolderName, exampleFolderName, joinPath, sanitizeFolderName } from "../lib/format";
+import {
+  defaultFolderName,
+  exampleFolderName,
+  joinPath,
+  kindFields,
+  sanitizeFolderName,
+  type TaskKind,
+  taskKind,
+} from "../lib/format";
 import type { BackupMode, Source, Task } from "../types";
 import FilterRulesEditor from "./FilterRulesEditor";
 import ScheduleEditor from "./ScheduleEditor";
@@ -49,19 +68,25 @@ export function PathPicker({
   );
 }
 
-export function ModeCard({ mode, selected, onSelect }: { mode: BackupMode; selected: boolean; onSelect: () => void }) {
+export function ModeCard({ kind, selected, onSelect }: { kind: TaskKind; selected: boolean; onSelect: () => void }) {
   const info =
-    mode === "full"
+    kind === "combined"
       ? {
-          icon: <Copy size={18} />,
-          title: "מלא",
-          text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, זהה לגמרי למקור (קבצים שנמחקו במקור לא יופיעו). הגיבויים הקודמים נמחקים.",
+          icon: <CalendarRange size={18} />,
+          title: "משולב",
+          text: "גיבוי מלא לפי תזמון משלו (למשל פעם בשבוע), ובשאר הזמן גיבויים אינקרמנטליים בלבד. כל גיבוי מלא פותח רצף חדש.",
         }
-      : {
-          icon: <Layers size={18} />,
-          title: "אינקרמנטלי",
-          text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, ובה רק קבצים חדשים או ששונו מאז הגיבוי הקודם. אם לא היו שינויים, התיקייה ריקה ותימחק בגיבוי המלא הבא. הגיבוי הראשון תמיד מלא.",
-        };
+      : kind === "full"
+        ? {
+            icon: <Copy size={18} />,
+            title: "מלא",
+            text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, זהה לגמרי למקור (קבצים שנמחקו במקור לא יופיעו). הגיבויים הקודמים נמחקים.",
+          }
+        : {
+            icon: <Layers size={18} />,
+            title: "אינקרמנטלי",
+            text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, ובה רק קבצים חדשים או ששונו מאז הגיבוי הקודם. אם לא היו שינויים, התיקייה ריקה ותימחק בגיבוי המלא הבא. הגיבוי הראשון תמיד מלא.",
+          };
   return (
     <button
       type="button"
@@ -203,6 +228,7 @@ export default function TaskEditor({
   const [saving, setSaving] = useState(false);
 
   const set = <K extends keyof Task>(k: K, v: Task[K]) => setT((x) => ({ ...x, [k]: v }));
+  const kind = taskKind(t);
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
   // Existing backups are found by destination + folder name; changing either orphans them.
   const locationChanged =
@@ -283,20 +309,24 @@ export default function TaskEditor({
 
         <Section title="סוג גיבוי">
           <div className="flex flex-col gap-3 sm:flex-row" role="radiogroup">
-            <ModeCard mode="incremental" selected={t.mode === "incremental"} onSelect={() => set("mode", "incremental")} />
-            <ModeCard mode="full" selected={t.mode === "full"} onSelect={() => set("mode", "full")} />
+            {(["incremental", "combined", "full"] as const).map((k) => (
+              <ModeCard
+                key={k}
+                kind={k}
+                selected={kind === k}
+                onSelect={() => setT((x) => ({ ...x, ...kindFields(k, x.fullSchedule ?? task.fullSchedule) }))}
+              />
+            ))}
           </div>
-          {t.mode === "incremental" ? (
-            <Field
-              label="גיבוי מלא חדש כל"
-              hint="יוצר מדי פעם תיקיית גיבוי חדשה ונקייה (ומוחק את הקודמת). 0 = אף פעם, הגיבוי המלא נעשה רק בפעם הראשונה."
-            >
-              <div className="flex items-center gap-2">
-                <NumberInput className="w-24" min={0} value={t.fullEveryDays} onChange={(v) => set("fullEveryDays", v)} />
-                <span className="text-sm text-muted">ימים</span>
-              </div>
-            </Field>
-          ) : (
+          {kind !== "full" && (
+            <Toggle
+              checked={t.deleteEmptyIncrementals}
+              onChange={(v) => set("deleteEmptyIncrementals", v)}
+              label="מחיקת תיקיות אינקרמנטליות ריקות בגיבוי מלא"
+              description="תיקייה אינקרמנטלית ריקה נוצרת כשלא היו שינויים. כשכבויה - התיקיות הריקות נשארות כתיעוד לריצות, עד שהרצף שלהן נמחק (לפי מספר הגיבויים לשמירה)."
+            />
+          )}
+          {kind !== "incremental" && (
             <Toggle
               checked={t.reusePrevious}
               onChange={(v) => set("reusePrevious", v)}
@@ -309,7 +339,7 @@ export default function TaskEditor({
               description={
                 t.keepCount > 1
                   ? "זמין רק כששומרים גיבוי אחד."
-                  : "במקום להעתיק הכול מחדש, הגיבוי הקודם מקבל את התאריך החדש ומתעדכן להיות זהה למקור. חוסך זמן ומקום, אבל בזמן הריצה אין עותק שלם נוסף."
+                  : "במקום להעתיק הכול מחדש, הגיבוי המלא הקודם מקבל את התאריך החדש ומתעדכן להיות זהה למקור. חוסך זמן ומקום, אבל בזמן הריצה אין עותק שלם נוסף."
               }
             />
           )}
@@ -334,7 +364,21 @@ export default function TaskEditor({
         </Section>
 
         <Section title="תזמון">
-          <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
+          {kind === "combined" ? (
+            <>
+              <div className="flex flex-col gap-2 rounded-xl border border-line p-3">
+                <h4 className="text-sm font-semibold">גיבויים אינקרמנטליים</h4>
+                <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
+              </div>
+              <div className="flex flex-col gap-2 rounded-xl border border-accent/30 p-3">
+                <h4 className="text-sm font-semibold text-accent">גיבוי מלא</h4>
+                <ScheduleEditor value={t.fullSchedule!} onChange={(s) => set("fullSchedule", s)} allowManual={false} />
+              </div>
+              <p className="text-xs text-muted">אם שני התזמונים חלים באותו זמן, רץ רק הגיבוי המלא.</p>
+            </>
+          ) : (
+            <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
+          )}
           <Toggle
             checked={t.catchUp}
             onChange={(v) => set("catchUp", v)}

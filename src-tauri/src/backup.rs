@@ -100,6 +100,12 @@ pub fn validate_task(t: &Task) -> Result<(), String> {
     if t.keep_count == 0 {
         return Err("יש לשמור לפחות גיבוי אחד".into());
     }
+    if let Some(fs) = &t.full_schedule {
+        if *fs == crate::model::Schedule::Manual {
+            return Err("במצב משולב יש לבחור תזמון לגיבוי המלא".into());
+        }
+        crate::schedule::validate(fs)?;
+    }
     crate::filters::validate(&t.filters)?;
     crate::schedule::validate(&t.schedule)
 }
@@ -215,9 +221,9 @@ fn has_files(path: &Path) -> bool {
 }
 
 /// Deletes old backups of one source. Keeps the newest `keep_fulls` complete full backups
-/// (besides `protect`) together with their non-empty incrementals; everything else goes:
-/// older chains, partial folders and empty incremental folders.
-fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, notes: &mut Vec<String>) -> u64 {
+/// (besides `protect`) together with their incrementals; everything else goes: older chains,
+/// partial folders, and (with `delete_empty`) incremental folders that are empty.
+fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, delete_empty: bool, notes: &mut Vec<String>) -> u64 {
     let all: Vec<BackupFolder> = list_backups(dest, prefix)
         .into_iter()
         .filter(|b| Some(b.name.as_str()) != protect)
@@ -235,7 +241,7 @@ fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, not
             BackupMode::Full => kept_fulls.iter().any(|k| k.name == b.name),
             BackupMode::Incremental => {
                 let in_kept_chain = !b.partial && oldest_kept.is_some_and(|d| b.created_at > d);
-                in_kept_chain && has_files(Path::new(&b.path))
+                in_kept_chain && !(delete_empty && !has_files(Path::new(&b.path)))
             }
         };
         if keep {
@@ -258,24 +264,12 @@ fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, not
 }
 
 /// Decides whether this source's run is full or incremental (incremental needs a complete full).
-fn effective_mode(
-    task: &Task,
-    backups: &[BackupFolder],
-    requested: BackupMode,
-    now: DateTime<Local>,
-) -> (BackupMode, Option<String>) {
+fn effective_mode(backups: &[BackupFolder], requested: BackupMode) -> (BackupMode, Option<String>) {
     if requested == BackupMode::Full {
         return (BackupMode::Full, None);
     }
     match backups.iter().find(|b| b.kind == BackupMode::Full && !b.partial) {
         None => (BackupMode::Full, Some("אין גיבוי מלא קודם - מבוצע גיבוי מלא".into())),
-        Some(b) if task.full_every_days > 0 && (now - b.created_at).num_days() >= task.full_every_days as i64 => (
-            BackupMode::Full,
-            Some(format!(
-                "עברו {} ימים מהגיבוי המלא האחרון - מבוצע גיבוי מלא",
-                task.full_every_days
-            )),
-        ),
         Some(_) => (BackupMode::Incremental, None),
     }
 }
@@ -390,7 +384,7 @@ pub fn backup_source(
     }
 
     let backups = list_backups(&task.destination, &prefix);
-    let (mode, note) = effective_mode(task, &backups, requested, ctx.now);
+    let (mode, note) = effective_mode(&backups, requested);
     run.mode = Some(mode);
     let mut notes: Vec<String> = note.into_iter().collect();
     let final_path = new_folder_path(&dest, &prefix, ctx.now, mode);
@@ -419,6 +413,7 @@ pub fn backup_source(
                     &prefix,
                     task.keep_count as usize - 1,
                     Some(&file_name(&work)),
+                    task.delete_empty_incrementals,
                     &mut notes,
                 );
                 if deleted > 0 {
@@ -481,6 +476,7 @@ pub fn backup_source(
                         &prefix,
                         task.keep_count as usize - 1,
                         Some(&file_name(&final_path)),
+                        task.delete_empty_incrementals,
                         &mut notes,
                     );
                 }
@@ -708,6 +704,30 @@ mod tests {
         );
         env.run(&t, BackupMode::Full, "2026-10-05 03:00");
         assert_eq!(env.names(&t, 0), ["Src 2026-10-04 03-00 מלא", "Src 2026-10-05 03-00 מלא"]);
+    }
+
+    #[test]
+    fn empty_incrementals_kept_when_option_off() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = Task {
+            keep_count: 2,
+            delete_empty_incrementals: false,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        env.run(&t, BackupMode::Incremental, "2026-10-02 03:00"); // empty
+        env.run(&t, BackupMode::Full, "2026-10-03 03:00");
+        assert_eq!(
+            env.names(&t, 0),
+            [
+                "Src 2026-10-01 03-00 מלא",
+                "Src 2026-10-02 03-00 אינקרמנטלי",
+                "Src 2026-10-03 03-00 מלא"
+            ]
+        );
     }
 
     #[test]

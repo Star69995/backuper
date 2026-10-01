@@ -10,6 +10,7 @@ UI is Hebrew, RTL, light/dark. See README.md for user-facing behavior.
   - `schedule.rs` - next-occurrence math (local time, DST-safe) + validation.
   - `engine/mod.rs` - `CopyEngine` trait (`mirror` for full backups, `list_files` = filtered source listing) + `CopyJob`/`Filters`. `engine/robocopy.rs` implements it. `engine/native.rs` copies an explicit file list (the changes of an incremental) with std::fs::copy. Backup logic must not call robocopy directly, so the engine stays swappable.
   - `filters.rs` - user `FilterRule`s -> engine `Filters` (+ validation).
+  - `cobian.rs` - parses Cobian `.lst` task lists (UTF-16, `<§- guid -§>` sections linked by `{ *§* guid *§* }`) into `Task`s + per-task warnings. The `import_cobian` command only previews (prepare + folder-conflict check); saving goes through `save_tasks`. UI: `ImportCobianDialog.tsx`.
   - `backup.rs` - per-source chains of dated folders (`<folderName> YYYY-MM-DD HH-mm מלא|אינקרמנטלי`, `.partial` while in progress/failed; no tag = legacy full), full/incremental decision, incremental diff (source listing vs. index of full + later incrementals, by size and mtime with a 2s tolerance), retention (`prune`), delete-before, path validation. `run_task` runs all sources with one shared timestamp.
   - `core.rs` - single worker thread (one backup at a time, queue) + scheduler thread (5s tick, missed-run catch-up). Emits `snapshot-changed` and `progress` events.
   - `commands.rs` - Tauri commands. `store.rs` - JSON persistence in app data dir. `tray.rs` - tray icon/menu.
@@ -20,12 +21,14 @@ UI is Hebrew, RTL, light/dark. See README.md for user-facing behavior.
 
 - robocopy progress is read from its UTF-16 `/UNILOG` file (stdout is OEM codepage and garbles Hebrew names). A list-only `/L` pass runs first to get totals.
 - Never delete anything in a destination that isn't one of the task's own dated folders (`list_backups` pattern match).
+- A task has a main `schedule` (its type = `mode`) and, in combined mode (`mode = incremental`), a `fullSchedule` with its own `nextFullRun` in state. Scheduler slots go through `take_due`/`refresh_slot` in core.rs. A due full wins over (and upgrades a queued) incremental.
 - A task has `sources: Vec<Source{path, folderName}>` + one destination. `(destination, folderName)` must be unique across all tasks (checked in `save_tasks`). Old single-`source` tasks are migrated in `Task::migrate`.
 - Run records hold per-source results (`RunRecord.sources`), each with its own log file (`logs/<runId>-<i>.log`, UTF-16).
 - Task config vs runtime state are separate (`tasks.json` vs `state.json`), so edits/undo never touch next/last run. Changing a task's schedule/enabled clears `nextRun` so it gets recomputed.
 - Bulk edit and undo both go through `save_tasks` (all-or-nothing validation).
 - Paths in the UI: render with `PathText` (LTR, each segment bidi-isolated). Byte sizes: wrap in `<bdi dir="ltr">`.
-- Debug builds never register autostart (would register the debug exe).
+- Autostart: `settings.startWithWindows` is the source of truth, synced to the registry on every launch (`commands::apply_autostart`); an uninstall removes the Run entry, so a one-time registration isn't enough. Debug builds never touch the registry (would register the debug exe).
+- The NSIS installer uses a custom template (`src-tauri/nsis/installer.nsi`, Tauri 2.12.1's with changes marked "Backuper:"): upgrades update in place without the "already installed" page. Re-sync the template when upgrading `@tauri-apps/cli`. `src-tauri/nsis/Hebrew.nsh` translates Tauri's own installer strings (all 27 keys); save it as UTF-8 **without** BOM (Tauri adds one, two break makensis).
 - Tests: `cargo test` includes end-to-end runs against real robocopy in temp dirs.
 - Windows service mode isn't implemented yet. Keep `core.rs` UI-independent so it can move into a service.
 

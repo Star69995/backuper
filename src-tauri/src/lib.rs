@@ -1,4 +1,5 @@
 mod backup;
+mod cobian;
 mod commands;
 mod core;
 mod engine;
@@ -9,12 +10,17 @@ mod store;
 mod tray;
 
 use crate::core::Core;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tauri::webview::PageLoadEvent;
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_autostart::MacosLauncher;
 
 /// Passed by the autostart entry so the app starts straight to the tray.
 const HIDDEN_ARG: &str = "--hidden";
+
+/// Whether the main window still has to be shown once its page has loaded (normal, non-tray start).
+static SHOW_ON_LOAD: AtomicBool = AtomicBool::new(false);
 
 pub fn run() {
     tauri::Builder::default()
@@ -31,25 +37,27 @@ pub fn run() {
             let core = Core::new(handle.clone(), store);
             app.manage(core.clone());
 
-            // First launch of an installed build: register to start with Windows.
-            // (Skipped in dev so the debug exe is never registered.)
-            {
-                let mut s = core.store.lock().unwrap();
-                if !s.settings.first_run_done {
-                    if !cfg!(debug_assertions) {
-                        let _ = handle.autolaunch().enable();
-                    }
-                    s.settings.first_run_done = true;
-                    s.save_settings();
-                }
-            }
+            // Keep the Windows startup entry in line with the user's choice.
+            let start_with_windows = core.store.lock().unwrap().settings.start_with_windows;
+            let _ = commands::apply_autostart(&handle, start_with_windows);
 
             tray::create(&handle)?;
             core.start();
             if !std::env::args().any(|a| a == HIDDEN_ARG) {
+                SHOW_ON_LOAD.store(true, Ordering::SeqCst);
                 tray::show_main(&handle);
             }
             Ok(())
+        })
+        // Showing during setup can lose to the window that launched us (e.g. the installer's
+        // finish page), so show and bring it to the front again once the page has loaded.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Finished
+                && webview.label() == "main"
+                && SHOW_ON_LOAD.swap(false, Ordering::SeqCst)
+            {
+                tray::show_main(webview.app_handle());
+            }
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -77,6 +85,7 @@ pub fn run() {
             commands::preview_schedule,
             commands::save_settings,
             commands::set_autostart,
+            commands::import_cobian,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

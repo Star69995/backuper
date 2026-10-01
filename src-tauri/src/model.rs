@@ -84,8 +84,11 @@ pub struct Task {
     pub sources: Vec<Source>,
     /// Root folder that holds the dated backup folders of all sources.
     pub destination: String,
+    /// Backup type of the main schedule.
     pub mode: BackupMode,
     pub schedule: Schedule,
+    /// Combined mode (with mode = Incremental): full backups run on this schedule, incrementals on `schedule`.
+    pub full_schedule: Option<Schedule>,
     pub enabled: bool,
     /// How many full backups (each with its incrementals) to keep per source (>= 1).
     pub keep_count: u32,
@@ -93,8 +96,8 @@ pub struct Task {
     pub delete_before: bool,
     /// Full backup: rename the previous full folder and mirror into it instead of copying everything again.
     pub reuse_previous: bool,
-    /// Incremental task: start a new full backup every N days (0 = never).
-    pub full_every_days: u32,
+    /// On a full backup, delete incremental folders that ended up empty (no changes at that run).
+    pub delete_empty_incrementals: bool,
     pub copy_empty_dirs: bool,
     /// Run a scheduled occurrence that was missed while the computer was off.
     pub catch_up: bool,
@@ -117,11 +120,12 @@ impl Default for Task {
             destination: String::new(),
             mode: BackupMode::Incremental,
             schedule: Schedule::Manual,
+            full_schedule: None,
             enabled: true,
             keep_count: 1,
             delete_before: false,
             reuse_previous: false,
-            full_every_days: 0,
+            delete_empty_incrementals: true,
             copy_empty_dirs: false,
             catch_up: true,
             filters: Vec::new(),
@@ -149,6 +153,8 @@ impl Task {
 #[serde(rename_all = "camelCase", default)]
 pub struct TaskState {
     pub next_run: Option<DateTime<Local>>,
+    /// Next run of `full_schedule` (combined mode).
+    pub next_full_run: Option<DateTime<Local>>,
     pub last_run_at: Option<DateTime<Local>>,
     pub last_status: Option<RunStatus>,
     pub last_message: Option<String>,
@@ -221,7 +227,9 @@ pub struct Settings {
     pub notify_failure: bool,
     pub scheduler_paused: bool,
     pub close_to_tray: bool,
-    pub first_run_done: bool,
+    /// The user's choice; the Windows startup entry is synced to it on every launch
+    /// (an uninstall removes the entry, so a one-time registration isn't enough).
+    pub start_with_windows: bool,
     /// Rules applied to every task that has use_global_filters.
     pub global_filters: Vec<FilterRule>,
 }
@@ -234,7 +242,7 @@ impl Default for Settings {
             notify_failure: true,
             scheduler_paused: false,
             close_to_tray: true,
-            first_run_done: false,
+            start_with_windows: true,
             global_filters: Vec::new(),
         }
     }

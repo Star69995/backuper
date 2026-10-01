@@ -1,4 +1,4 @@
-import type { BackupMode, RunStatus, Schedule, Trigger } from "../types";
+import type { BackupMode, RunStatus, Schedule, Task, TaskState, Trigger } from "../types";
 
 const dateTimeFmt = new Intl.DateTimeFormat("he-IL", {
   day: "2-digit",
@@ -62,6 +62,32 @@ export function fmtDuration(fromIso: string, toIso: string | number = Date.now()
 }
 
 export const MODE_LABEL: Record<BackupMode, string> = { full: "מלא", incremental: "אינקרמנטלי" };
+
+/** What a task does: only full, only incremental, or combined (full on its own schedule + incrementals). */
+export type TaskKind = "full" | "incremental" | "combined";
+
+export const KIND_LABEL: Record<TaskKind, string> = { full: "מלא", incremental: "אינקרמנטלי", combined: "משולב" };
+
+export const taskKind = (t: Pick<Task, "mode" | "fullSchedule">): TaskKind =>
+  t.mode === "full" ? "full" : t.fullSchedule ? "combined" : "incremental";
+
+export const DEFAULT_FULL_SCHEDULE: Schedule = { kind: "weekly", days: [5], time: "03:00" };
+
+/** The task fields that encode a kind. Keeps an existing full schedule when switching back to combined. */
+export function kindFields(kind: TaskKind, prevFull: Schedule | null): Pick<Task, "mode" | "fullSchedule"> {
+  if (kind === "full") return { mode: "full", fullSchedule: null };
+  if (kind === "incremental") return { mode: "incremental", fullSchedule: null };
+  return { mode: "incremental", fullSchedule: prevFull ?? DEFAULT_FULL_SCHEDULE };
+}
+
+/** The task's next scheduled run (earliest of its schedules) and its type. A full wins a tie. */
+export function nextRunOf(t: Task, st: TaskState | undefined): { at: string; mode: BackupMode } | null {
+  if (!t.enabled || !st) return null;
+  const main = t.schedule.kind !== "manual" && st.nextRun ? { at: st.nextRun, mode: t.mode } : null;
+  const full = t.fullSchedule && st.nextFullRun ? { at: st.nextFullRun, mode: "full" as const } : null;
+  if (!main || !full) return main ?? full;
+  return new Date(full.at).getTime() <= new Date(main.at).getTime() ? full : main;
+}
 
 export const STATUS_LABEL: Record<RunStatus, string> = {
   success: "הצליח",
