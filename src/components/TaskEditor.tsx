@@ -1,39 +1,45 @@
 import {
   AlertCircle,
   AlertTriangle,
+  Archive,
   CalendarRange,
-  ChevronDown,
+  Clock,
   Copy,
+  Filter,
+  FolderInput,
   FolderOpen,
   FolderPlus,
+  HardDrive,
   Layers,
   RefreshCw,
+  Settings2,
+  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { api, errorText } from "../api";
 import {
+  DRIVE_ACTION_LABEL,
   defaultFolderName,
+  describeRetention,
+  describeSchedule,
   exampleFolderName,
   joinPath,
+  KEEP_MODE_LABEL,
+  KIND_LABEL,
   kindFields,
   sanitizeFolderName,
   type TaskKind,
+  taskDrives,
   taskKind,
 } from "../lib/format";
-import type { BackupMode, Source, Task } from "../types";
+import type { BackupMode, DriveAction, KeepMode, Source, Task } from "../types";
 import FilterRulesEditor from "./FilterRulesEditor";
 import ScheduleEditor from "./ScheduleEditor";
-import { Button, cx, Field, IconButton, Modal, NumberInput, TextInput, Toggle } from "./ui";
+import { Section, type SectionInfo, SectionNav, useScrollSpy } from "./sections";
+import { Button, cx, Field, IconButton, Modal, NumberInput, Segmented, TextInput, Toggle } from "./ui";
 
-export function Section({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
-  return (
-    <section className={cx("flex flex-col gap-3", className)}>
-      <h3 className="text-[13px] font-semibold text-muted">{title}</h3>
-      {children}
-    </section>
-  );
-}
+type SectionId = "general" | "sources" | "destination" | "kind" | "retention" | "schedule" | "filters" | "advanced";
 
 export function PathPicker({
   value,
@@ -68,6 +74,50 @@ export function PathPicker({
   );
 }
 
+type Retention = Pick<Task, "keepMode" | "keepCount" | "keepDays">;
+
+const KEEP_HINT: Record<KeepMode, string> = {
+  count: "1 = כל גיבוי מלא חדש מוחק את הקודם, יחד עם הגיבויים האינקרמנטליים שאחריו.",
+  days: "נשמר כל מה שצריך כדי לשחזר כל רגע בתקופה הזו. רצף (גיבוי מלא והאינקרמנטליים שאחריו) נמחק רק כשגם הגיבוי המלא שאחריו ישן מהתקופה.",
+  all: "גיבויים קודמים לא נמחקים אף פעם - רק גיבויים שלא הושלמו ותיקיות אינקרמנטליות ריקות (אם האפשרות פעילה).",
+};
+
+/** How long old backups are kept: by count, by days, or forever. */
+export function RetentionEditor({ value, onChange }: { value: Retention; onChange: (v: Retention) => void }) {
+  const { keepMode, keepCount, keepDays } = value;
+  const set = (patch: Partial<Retention>) => onChange({ keepMode, keepCount, keepDays, ...patch });
+  return (
+    <div className="flex flex-col gap-3">
+      <Segmented<KeepMode>
+        className="self-start"
+        value={value.keepMode}
+        onChange={(keepMode) => set({ keepMode })}
+        options={(["count", "days", "all"] as const).map((k) => ({ value: k, label: KEEP_MODE_LABEL[k] }))}
+      />
+      {value.keepMode === "count" && (
+        <Field label="מספר גיבויים מלאים לשמירה" hint={KEEP_HINT.count}>
+          <NumberInput className="w-24" min={1} max={100} value={value.keepCount} onChange={(keepCount) => set({ keepCount })} />
+        </Field>
+      )}
+      {value.keepMode === "days" && (
+        <Field label="מספר ימים לשמירה" hint={KEEP_HINT.days}>
+          <NumberInput className="w-24" min={1} max={3650} value={value.keepDays} onChange={(keepDays) => set({ keepDays })} />
+        </Field>
+      )}
+      {value.keepMode === "all" && (
+        <>
+          <p className="text-xs text-muted">{KEEP_HINT.all}</p>
+          <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            כונן היעד יתמלא עם הזמן. כדי לפנות מקום, מחקו גיבויים ישנים ידנית (ברשימת הגיבויים של המשימה) או עברו לשמירה לפי
+            מספר או לפי זמן.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ModeCard({ kind, selected, onSelect }: { kind: TaskKind; selected: boolean; onSelect: () => void }) {
   const info =
     kind === "combined"
@@ -80,7 +130,7 @@ export function ModeCard({ kind, selected, onSelect }: { kind: TaskKind; selecte
         ? {
             icon: <Copy size={18} />,
             title: "מלא",
-            text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, זהה לגמרי למקור (קבצים שנמחקו במקור לא יופיעו). הגיבויים הקודמים נמחקים.",
+            text: "בכל ריצה נוצרת תיקייה חדשה עם התאריך, זהה לגמרי למקור (קבצים שנמחקו במקור לא יופיעו). גיבויים קודמים נמחקים לפי הגדרת השמירה.",
           }
         : {
             icon: <Layers size={18} />,
@@ -210,6 +260,34 @@ function SourcesEditor({
   );
 }
 
+export function DriveConnectField({ task, onChange }: { task: Task; onChange: (v: DriveAction) => void }) {
+  const drives = taskDrives(task);
+  // Not a <Field>: that's a <label>, and clicking its text would press the first button.
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[13px] font-medium">כשהכונן מתחבר למחשב</span>
+      <Segmented<DriveAction>
+        className="self-start"
+        value={task.onDriveConnect}
+        onChange={onChange}
+        options={(["off", "run", "ask"] as const).map((v) => ({ value: v, label: DRIVE_ACTION_LABEL[v] }))}
+      />
+      <span className="text-xs text-muted">
+        למשל כונן חיצוני או דיסק און קי, בנוסף לתזמון. הגיבוי מתחיל כשכל הכוננים של המשימה
+        {drives.length > 0 && (
+          <>
+            {" "}
+            (<bdi dir="ltr">{drives.join(" ")}</bdi>)
+          </>
+        )}{" "}
+        זמינים, אחרי שאחד מהם לא היה מחובר.
+        {drives.length === 0 && " זמין רק לנתיבים עם אות כונן."}
+      </span>
+    </div>
+  );
+}
+
+
 export default function TaskEditor({
   task,
   globalFilterCount,
@@ -223,12 +301,12 @@ export default function TaskEditor({
 }) {
   const isNew = !task.id;
   const [t, setT] = useState<Task>(task);
-  const [advanced, setAdvanced] = useState(task.copyEmptyDirs);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const set = <K extends keyof Task>(k: K, v: Task[K]) => setT((x) => ({ ...x, [k]: v }));
   const kind = taskKind(t);
+  const keepsOne = t.keepMode === "count" && t.keepCount === 1;
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
   // Existing backups are found by destination + folder name; changing either orphans them.
   const locationChanged =
@@ -238,6 +316,71 @@ export default function TaskEditor({
         const cur = t.sources.find((s) => s.path === old.path);
         return cur && sanitizeFolderName(cur.folderName) !== old.folderName;
       }));
+
+  const sourceCount = t.sources.filter((s) => s.path.trim()).length;
+  const sections: SectionInfo<SectionId>[] = [
+    {
+      id: "general",
+      title: "כללי",
+      description: "שם המשימה והאם היא פעילה",
+      icon: Settings2,
+      summary: t.enabled ? "פעילה" : "מושבתת",
+      missing: !t.name.trim(),
+    },
+    {
+      id: "sources",
+      title: "תיקיות מקור",
+      description: "מה מגבים - אפשר כמה תיקיות יחד",
+      icon: FolderInput,
+      summary: sourceCount === 0 ? "לא נבחרו" : sourceCount === 1 ? "תיקייה אחת" : `${sourceCount} תיקיות`,
+      missing: sourceCount === 0 || t.sources.some((s) => !s.path.trim()),
+    },
+    {
+      id: "destination",
+      title: "יעד",
+      description: "לאן נשמרים הגיבויים",
+      icon: HardDrive,
+      summary: t.destination.trim() ? t.destination : "לא נבחר",
+      ltrSummary: !!t.destination.trim(),
+      missing: !t.destination.trim(),
+    },
+    {
+      id: "kind",
+      title: "סוג גיבוי",
+      description: "מה נכנס לכל גיבוי",
+      icon: Layers,
+      summary: KIND_LABEL[kind],
+    },
+    {
+      id: "retention",
+      title: "שמירה ומחיקה",
+      description: "כמה גיבויים נשמרים ומתי ישנים נמחקים",
+      icon: Archive,
+      summary: describeRetention(t),
+    },
+    {
+      id: "schedule",
+      title: "תזמון והפעלה",
+      description: "מתי הגיבוי רץ",
+      icon: Clock,
+      summary: describeSchedule(t.schedule),
+    },
+    {
+      id: "filters",
+      title: "סינון קבצים",
+      description: "אילו קבצים ותיקיות נכללים בגיבוי",
+      icon: Filter,
+      summary: t.filters.length === 0 ? "ללא כללים" : t.filters.length === 1 ? "כלל אחד" : `${t.filters.length} כללים`,
+    },
+    {
+      id: "advanced",
+      title: "מתקדם",
+      description: "אפשרויות נוספות",
+      icon: SlidersHorizontal,
+    },
+  ];
+  const spy = useScrollSpy(sections.map((s) => s.id));
+  const sec = (id: SectionId) => ({ info: sections.find((s) => s.id === id)!, sectionRef: spy.register(id) });
 
   const save = async () => {
     setSaving(true);
@@ -254,8 +397,9 @@ export default function TaskEditor({
 
   return (
     <Modal
-      size="lg"
+      size="xl"
       dismissable={!dirty}
+      bodyRef={spy.body}
       title={isNew ? "משימת גיבוי חדשה" : `עריכת משימה: ${task.name}`}
       onClose={onClose}
       footer={
@@ -273,154 +417,147 @@ export default function TaskEditor({
         </>
       }
     >
-      <div className="flex flex-col gap-6">
-        <Section title="כללי">
-          <div className="flex flex-wrap items-end gap-4">
-            <Field label="שם המשימה" className="min-w-60 flex-1">
-              <TextInput autoFocus value={t.name} placeholder="למשל: מסמכים" onChange={(e) => set("name", e.target.value)} />
+      <div className="md:flex md:items-start md:gap-6">
+        <SectionNav label="מקטעי המשימה" sections={sections} active={spy.active} onSelect={spy.jump} />
+        <div className="flex min-w-0 flex-1 flex-col gap-5">
+          <Section {...sec("general")}>
+            <div className="flex flex-wrap items-end gap-4">
+              <Field label="שם המשימה" className="min-w-52 flex-1">
+                <TextInput autoFocus value={t.name} placeholder="למשל: מסמכים" onChange={(e) => set("name", e.target.value)} />
+              </Field>
+              <div className="pb-2">
+                <Toggle checked={t.enabled} onChange={(v) => set("enabled", v)} label="משימה פעילה" />
+              </div>
+            </div>
+          </Section>
+
+          <Section {...sec("sources")}>
+            <SourcesEditor sources={t.sources} destination={t.destination} mode={t.mode} onChange={(v) => set("sources", v)} />
+          </Section>
+
+          <Section {...sec("destination")}>
+            <Field label="תיקיית יעד" hint="בתוכה נוצרות תיקיות הגיבוי עם התאריך, בנפרד לכל תיקיית מקור">
+              <PathPicker
+                value={t.destination}
+                onChange={(v) => set("destination", v)}
+                title="בחירת תיקיית יעד"
+                placeholder="D:\Backups"
+              />
             </Field>
-            <div className="pb-2">
-              <Toggle checked={t.enabled} onChange={(v) => set("enabled", v)} label="משימה פעילה" />
-            </div>
-          </div>
-        </Section>
-
-        <Section title="תיקיות מקור">
-          <SourcesEditor sources={t.sources} destination={t.destination} mode={t.mode} onChange={(v) => set("sources", v)} />
-        </Section>
-
-        <Section title="יעד">
-          <Field label="תיקיית יעד" hint="בתוכה נוצרות תיקיות הגיבוי עם התאריך, בנפרד לכל תיקיית מקור">
-            <PathPicker
-              value={t.destination}
-              onChange={(v) => set("destination", v)}
-              title="בחירת תיקיית יעד"
-              placeholder="D:\Backups"
-            />
-          </Field>
-          {locationChanged && (
-            <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
-              <AlertCircle size={16} className="mt-0.5 shrink-0" />
-              שיניתם את היעד או שם של תיקיות גיבוי. גיבויים שכבר קיימים במיקום הקודם לא ינוהלו יותר על ידי המשימה (ולא יימחקו
-              אוטומטית).
-            </div>
-          )}
-        </Section>
-
-        <Section title="סוג גיבוי">
-          <div className="flex flex-col gap-3 sm:flex-row" role="radiogroup">
-            {(["incremental", "combined", "full"] as const).map((k) => (
-              <ModeCard
-                key={k}
-                kind={k}
-                selected={kind === k}
-                onSelect={() => setT((x) => ({ ...x, ...kindFields(k, x.fullSchedule ?? task.fullSchedule) }))}
-              />
-            ))}
-          </div>
-          {kind !== "full" && (
-            <Toggle
-              checked={t.deleteEmptyIncrementals}
-              onChange={(v) => set("deleteEmptyIncrementals", v)}
-              label="מחיקת תיקיות אינקרמנטליות ריקות בגיבוי מלא"
-              description="תיקייה אינקרמנטלית ריקה נוצרת כשלא היו שינויים. כשכבויה - התיקיות הריקות נשארות כתיעוד לריצות, עד שהרצף שלהן נמחק (לפי מספר הגיבויים לשמירה)."
-            />
-          )}
-          {kind !== "incremental" && (
-            <Toggle
-              checked={t.reusePrevious}
-              onChange={(v) => set("reusePrevious", v)}
-              disabled={t.keepCount > 1}
-              label={
-                <span className="flex items-center gap-1.5">
-                  <RefreshCw size={14} /> גיבוי מלא מהיר
-                </span>
-              }
-              description={
-                t.keepCount > 1
-                  ? "זמין רק כששומרים גיבוי אחד."
-                  : "במקום להעתיק הכול מחדש, הגיבוי המלא הקודם מקבל את התאריך החדש ומתעדכן להיות זהה למקור. חוסך זמן ומקום, אבל בזמן הריצה אין עותק שלם נוסף."
-              }
-            />
-          )}
-          <Field
-            label="מספר גיבויים מלאים לשמירה"
-            hint="1 = כל גיבוי מלא חדש מוחק את הקודם, יחד עם הגיבויים האינקרמנטליים שאחריו."
-          >
-            <NumberInput className="w-24" min={1} max={100} value={t.keepCount} onChange={(v) => set("keepCount", v)} />
-          </Field>
-          <Toggle
-            checked={t.deleteBefore}
-            onChange={(v) => set("deleteBefore", v)}
-            label="מחיקת הגיבויים הקודמים לפני תחילת גיבוי מלא"
-            description="מפנה מקום בדיסק לפני ההעתקה, כשאין מספיק מקום לשני עותקים. כברירת מחדל הגיבויים הקודמים נמחקים רק אחרי שהגיבוי החדש הצליח."
-          />
-          {t.deleteBefore && (
-            <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
-              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-              שימו לב: אם הגיבוי המלא ייכשל או יבוטל באמצע, לא יישאר גיבוי שלם קודם.
-            </div>
-          )}
-        </Section>
-
-        <Section title="תזמון">
-          {kind === "combined" ? (
-            <>
-              <div className="flex flex-col gap-2 rounded-xl border border-line p-3">
-                <h4 className="text-sm font-semibold">גיבויים אינקרמנטליים</h4>
-                <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
+            {locationChanged && (
+              <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+                <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                שיניתם את היעד או שם של תיקיות גיבוי. גיבויים שכבר קיימים במיקום הקודם לא ינוהלו יותר על ידי המשימה (ולא
+                יימחקו אוטומטית).
               </div>
-              <div className="flex flex-col gap-2 rounded-xl border border-accent/30 p-3">
-                <h4 className="text-sm font-semibold text-accent">גיבוי מלא</h4>
-                <ScheduleEditor value={t.fullSchedule!} onChange={(s) => set("fullSchedule", s)} allowManual={false} />
-              </div>
-              <p className="text-xs text-muted">אם שני התזמונים חלים באותו זמן, רץ רק הגיבוי המלא.</p>
-            </>
-          ) : (
-            <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
-          )}
-          <Toggle
-            checked={t.catchUp}
-            onChange={(v) => set("catchUp", v)}
-            label="השלמת גיבוי שהוחמץ"
-            description="אם המחשב היה כבוי או במצב שינה בזמן המתוזמן, הגיבוי ירוץ מיד כשהתוכנה עולה."
-          />
-        </Section>
+            )}
+          </Section>
 
-        <Section title="סינון קבצים - מה לא לגבות">
-          <FilterRulesEditor rules={t.filters} onChange={(f) => set("filters", f)} />
-          <Toggle
-            checked={t.useGlobalFilters}
-            onChange={(v) => set("useGlobalFilters", v)}
-            label="החלת כללי הסינון הכלליים"
-            description={
-              globalFilterCount === 0
-                ? "עדיין לא הוגדרו כללים כלליים (אפשר להגדיר אותם בהגדרות)."
-                : `${globalFilterCount} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
-            }
-          />
-        </Section>
+          <Section {...sec("kind")}>
+            <div className="flex flex-col gap-3 lg:flex-row" role="radiogroup">
+              {(["incremental", "combined", "full"] as const).map((k) => (
+                <ModeCard
+                  key={k}
+                  kind={k}
+                  selected={kind === k}
+                  onSelect={() => setT((x) => ({ ...x, ...kindFields(k, x.fullSchedule ?? task.fullSchedule) }))}
+                />
+              ))}
+            </div>
+          </Section>
 
-        <section className="flex flex-col gap-3">
-          <button
-            type="button"
-            onClick={() => setAdvanced((a) => !a)}
-            className="flex items-center gap-1.5 self-start text-[13px] font-semibold text-muted hover:text-fg"
-          >
-            <ChevronDown size={16} className={cx("transition-transform", advanced && "rotate-180")} />
-            אפשרויות מתקדמות
-          </button>
-          {advanced && (
-            <div className="flex flex-col gap-4 rounded-xl border border-line p-4">
+          <Section {...sec("retention")}>
+            <RetentionEditor value={t} onChange={(v) => setT((x) => ({ ...x, ...v }))} />
+            {kind !== "incremental" && (
               <Toggle
-                checked={t.copyEmptyDirs}
-                onChange={(v) => set("copyEmptyDirs", v)}
-                label="העתקת תיקיות ריקות"
-                description="כברירת מחדל תיקיות ריקות לא מועתקות לגיבוי."
+                checked={t.reusePrevious}
+                onChange={(v) => set("reusePrevious", v)}
+                disabled={!keepsOne}
+                label={
+                  <span className="flex items-center gap-1.5">
+                    <RefreshCw size={14} /> גיבוי מלא מהיר
+                  </span>
+                }
+                description={
+                  !keepsOne
+                    ? "זמין רק כששומרים גיבוי מלא אחד."
+                    : "במקום להעתיק הכול מחדש, הגיבוי המלא הקודם מקבל את התאריך החדש ומתעדכן להיות זהה למקור. חוסך זמן ומקום, אבל בזמן הריצה אין עותק שלם נוסף."
+                }
               />
-            </div>
-          )}
-        </section>
+            )}
+            {t.keepMode !== "all" && (
+              <Toggle
+                checked={t.deleteBefore}
+                onChange={(v) => set("deleteBefore", v)}
+                label="מחיקת הגיבויים הקודמים לפני תחילת גיבוי מלא"
+                description="מפנה מקום בדיסק לפני ההעתקה, כשאין מספיק מקום לשני עותקים. כברירת מחדל הגיבויים הקודמים נמחקים רק אחרי שהגיבוי החדש הצליח."
+              />
+            )}
+            {t.deleteBefore && t.keepMode !== "all" && (
+              <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                שימו לב: אם הגיבוי המלא ייכשל או יבוטל באמצע, לא יישאר גיבוי שלם קודם.
+              </div>
+            )}
+            {kind !== "full" && (
+              <Toggle
+                checked={t.deleteEmptyIncrementals}
+                onChange={(v) => set("deleteEmptyIncrementals", v)}
+                label="מחיקת תיקיות אינקרמנטליות ריקות בגיבוי מלא"
+                description="תיקייה אינקרמנטלית ריקה נוצרת כשלא היו שינויים. כשכבויה - התיקיות הריקות נשארות כתיעוד לריצות, עד שהרצף שלהן נמחק (לפי הגדרת השמירה)."
+              />
+            )}
+          </Section>
+
+          <Section {...sec("schedule")}>
+            {kind === "combined" ? (
+              <>
+                <div className="flex flex-col gap-2 rounded-xl border border-line p-3">
+                  <h4 className="text-sm font-semibold">גיבויים אינקרמנטליים</h4>
+                  <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
+                </div>
+                <div className="flex flex-col gap-2 rounded-xl border border-accent/30 p-3">
+                  <h4 className="text-sm font-semibold text-accent">גיבוי מלא</h4>
+                  <ScheduleEditor value={t.fullSchedule!} onChange={(s) => set("fullSchedule", s)} allowManual={false} />
+                </div>
+                <p className="text-xs text-muted">אם שני התזמונים חלים באותו זמן, רץ רק הגיבוי המלא.</p>
+              </>
+            ) : (
+              <ScheduleEditor value={t.schedule} onChange={(s) => set("schedule", s)} />
+            )}
+            <div className="h-px bg-line" />
+            <Toggle
+              checked={t.catchUp}
+              onChange={(v) => set("catchUp", v)}
+              label="השלמת גיבוי שהוחמץ"
+              description="אם המחשב היה כבוי או במצב שינה בזמן המתוזמן, הגיבוי ירוץ מיד כשהתוכנה עולה."
+            />
+            <DriveConnectField task={t} onChange={(v) => set("onDriveConnect", v)} />
+          </Section>
+
+          <Section {...sec("filters")}>
+            <FilterRulesEditor rules={t.filters} onChange={(f) => set("filters", f)} />
+            <Toggle
+              checked={t.useGlobalFilters}
+              onChange={(v) => set("useGlobalFilters", v)}
+              label="החלת כללי הסינון הכלליים"
+              description={
+                globalFilterCount === 0
+                  ? "עדיין לא הוגדרו כללים כלליים (אפשר להגדיר אותם בהגדרות)."
+                  : `${globalFilterCount} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
+              }
+            />
+          </Section>
+
+          <Section {...sec("advanced")}>
+            <Toggle
+              checked={t.copyEmptyDirs}
+              onChange={(v) => set("copyEmptyDirs", v)}
+              label="העתקת תיקיות ריקות"
+              description="כברירת מחדל תיקיות ריקות לא מועתקות לגיבוי."
+            />
+          </Section>
+        </div>
       </div>
     </Modal>
   );

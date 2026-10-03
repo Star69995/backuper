@@ -13,6 +13,7 @@ export type Schedule =
 export type ScheduleKind = Schedule["kind"];
 
 export type FilterRule =
+  | { kind: "include"; value: string }
   | { kind: "extension"; value: string }
   | { kind: "pattern"; value: string }
   | { kind: "folder"; value: string }
@@ -23,11 +24,17 @@ export type FilterRule =
 
 export type FilterKind = FilterRule["kind"];
 
+/** What a task does when its drives (destination / sources) get connected. */
+export type DriveAction = "off" | "run" | "ask";
+
 export interface Source {
   path: string;
   /** Prefix of this source's dated folders. */
   folderName: string;
 }
+
+/** count = newest keepCount fulls, days = enough to restore the last keepDays days, all = never delete. */
+export type KeepMode = "count" | "days" | "all";
 
 export interface Task {
   id: string;
@@ -40,18 +47,21 @@ export interface Task {
   /** Combined mode (mode = incremental): full backups run on this schedule. */
   fullSchedule: Schedule | null;
   enabled: boolean;
+  keepMode: KeepMode;
   keepCount: number;
+  keepDays: number;
   deleteBefore: boolean;
   reusePrevious: boolean;
   deleteEmptyIncrementals: boolean;
   copyEmptyDirs: boolean;
   catchUp: boolean;
+  onDriveConnect: DriveAction;
   filters: FilterRule[];
   useGlobalFilters: boolean;
 }
 
 export type RunStatus = "success" | "warning" | "failed" | "cancelled";
-export type Trigger = "manual" | "scheduled" | "catchUp";
+export type Trigger = "manual" | "scheduled" | "catchUp" | "driveConnected";
 
 export interface TaskState {
   nextRun: string | null;
@@ -88,9 +98,15 @@ export interface Settings {
   theme: "system" | "light" | "dark";
   notifySuccess: boolean;
   notifyFailure: boolean;
+  /** Windows toast sound name ("Default", "IM", "Mail", "Reminder", "SMS"). Empty = silent. */
+  soundSuccess: string;
+  /** Used for failures, warnings and notices. */
+  soundFailure: string;
   schedulerPaused: boolean;
   closeToTray: boolean;
   startWithWindows: boolean;
+  /** Folder that also gets the task list snapshots (in a hidden subfolder). Empty = off. */
+  taskListCopyDir: string;
   globalFilters: FilterRule[];
 }
 
@@ -101,6 +117,24 @@ export interface Snapshot {
   queue: Job[];
   settings: Settings;
   autostart: boolean;
+  /** Ids of tasks whose drive was connected, waiting for "back up now?". */
+  drivePrompts: string[];
+  /** Shown until dismissed (e.g. the task list was recovered from a backup). */
+  notice: Notice | null;
+}
+
+export interface Notice {
+  title: string;
+  message: string;
+  /** A file or folder the user may want to see. */
+  path: string | null;
+}
+
+/** A file that couldn't be copied. `code` = Win32 error code (explained in lib/fileErrors.ts). */
+export interface FileError {
+  path: string;
+  code: number | null;
+  message: string;
 }
 
 export interface SourceRun {
@@ -112,9 +146,13 @@ export interface SourceRun {
   targetFolder: string | null;
   filesCopied: number;
   bytesCopied: number;
+  /** Size of the finished backup folder. */
+  backupBytes: number;
+  /** Space freed by deleting older backups. */
+  freedBytes: number;
   filesDeleted: number;
   filesFailed: number;
-  errors: string[];
+  errors: FileError[];
   exitCode: number | null;
   logFile: string | null;
 }
@@ -131,6 +169,10 @@ export interface RunRecord {
   message: string;
   filesCopied: number;
   bytesCopied: number;
+  /** Size of the finished backup folder. */
+  backupBytes: number;
+  /** Space freed by deleting older backups. */
+  freedBytes: number;
   filesDeleted: number;
   filesFailed: number;
   sources: SourceRun[];
@@ -150,7 +192,7 @@ export interface SourceBackups {
   backups: BackupFolder[];
 }
 
-/** A task read from a Cobian task list, before it's saved. */
+/** A task read from a task list file (export, snapshot or Cobian), before it's saved. */
 export interface ImportedTask {
   task: Task;
   /** Settings that couldn't be carried over exactly. */
@@ -159,6 +201,20 @@ export interface ImportedTask {
   error: string | null;
   /** A task with this id exists (importing again updates it). */
   exists: boolean;
+  /** It exists and is identical, so importing it changes nothing. */
+  unchanged: boolean;
+}
+
+export interface ImportPreview {
+  source: "backuper" | "cobian";
+  tasks: ImportedTask[];
+}
+
+/** An automatic copy of the task list, taken whenever it changed. */
+export interface TaskSnapshot {
+  path: string;
+  savedAt: string;
+  taskCount: number;
 }
 
 export const newTask = (): Task => ({
@@ -170,12 +226,15 @@ export const newTask = (): Task => ({
   schedule: { kind: "daily", time: "03:00" },
   fullSchedule: null,
   enabled: true,
+  keepMode: "count",
   keepCount: 1,
+  keepDays: 30,
   deleteBefore: false,
   reusePrevious: false,
   deleteEmptyIncrementals: true,
   copyEmptyDirs: false,
   catchUp: true,
+  onDriveConnect: "off",
   filters: [],
   useGlobalFilters: true,
 });

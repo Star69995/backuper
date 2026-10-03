@@ -1,4 +1,4 @@
-import type { BackupMode, RunStatus, Schedule, Task, TaskState, Trigger } from "../types";
+import type { BackupMode, DriveAction, KeepMode, RunStatus, Schedule, Task, TaskState, Trigger } from "../types";
 
 const dateTimeFmt = new Intl.DateTimeFormat("he-IL", {
   day: "2-digit",
@@ -89,6 +89,19 @@ export function nextRunOf(t: Task, st: TaskState | undefined): { at: string; mod
   return new Date(full.at).getTime() <= new Date(main.at).getTime() ? full : main;
 }
 
+export const KEEP_MODE_LABEL: Record<KeepMode, string> = { count: "לפי מספר", days: "לפי זמן", all: "לתמיד" };
+
+export function describeRetention(t: Pick<Task, "keepMode" | "keepCount" | "keepDays">) {
+  switch (t.keepMode) {
+    case "all":
+      return "כל הגיבויים נשמרים";
+    case "days":
+      return t.keepDays === 1 ? "גיבויים מהיום האחרון" : `גיבויים מ-${t.keepDays} הימים האחרונים`;
+    default:
+      return t.keepCount === 1 ? "גיבוי מלא אחד" : `${t.keepCount} גיבויים מלאים`;
+  }
+}
+
 export const STATUS_LABEL: Record<RunStatus, string> = {
   success: "הצליח",
   warning: "אזהרות",
@@ -100,7 +113,25 @@ export const TRIGGER_LABEL: Record<Trigger, string> = {
   manual: "ידני",
   scheduled: "מתוזמן",
   catchUp: "השלמה",
+  driveConnected: "חיבור כונן",
 };
+
+export const DRIVE_ACTION_LABEL: Record<DriveAction, string> = {
+  off: "כלום",
+  run: "גיבוי אוטומטי",
+  ask: "שאלה לפני גיבוי",
+};
+
+/** The drive roots ("E:") a task needs - mirrors drives::task_drives in Rust. */
+export function taskDrives(t: Pick<Task, "destination" | "sources">) {
+  const out: string[] = [];
+  for (const p of [t.destination, ...t.sources.map((s) => s.path)]) {
+    const m = /^\s*([a-z]):/i.exec(p);
+    const d = m && `${m[1].toUpperCase()}:`;
+    if (d && !out.includes(d)) out.push(d);
+  }
+  return out;
+}
 
 export function fmtInterval(minutes: number) {
   if (minutes === 1) return "כל דקה";

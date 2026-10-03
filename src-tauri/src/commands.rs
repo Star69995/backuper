@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupMode, Progress, RunRecord, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
+use crate::model::{BackupMode, Notice, Progress, RunRecord, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -22,6 +22,9 @@ pub struct Snapshot {
     queue: Vec<Job>,
     settings: Settings,
     autostart: bool,
+    /// Tasks whose drive was connected, waiting for the user to say whether to back up.
+    drive_prompts: Vec<String>,
+    notice: Option<Notice>,
 }
 
 #[tauri::command]
@@ -33,6 +36,8 @@ pub fn get_snapshot(core: CoreState, app: tauri::AppHandle) -> Snapshot {
         current: core.current.lock().unwrap().clone(),
         queue: core.queued(),
         settings: s.settings.clone(),
+        drive_prompts: core.drive_prompts(),
+        notice: s.notice.clone(),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -60,7 +65,9 @@ fn prepare(mut t: Task) -> Result<Task, String> {
     if t.id.is_empty() {
         t.id = uuid::Uuid::new_v4().to_string();
     }
-    backup::validate_task(&t).map_err(|e| format!("{}: {e}", if t.name.is_empty() { "משימה" } else { &t.name }))?;
+    backup::validate_task(&t)
+        .and_then(|_| crate::drives::validate(&t))
+        .map_err(|e| format!("{}: {e}", if t.name.is_empty() { "משימה" } else { &t.name }))?;
     Ok(t)
 }
 
@@ -153,6 +160,12 @@ pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>) ->
             })
         })
         .count()
+}
+
+/// Answers the "drive connected" question: queues `run`, drops the rest of `ids`.
+#[tauri::command]
+pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>) {
+    core.answer_drive_prompts(&ids, &run);
 }
 
 #[tauri::command]
@@ -257,7 +270,15 @@ pub fn preview_schedule(schedule: Schedule) -> Result<Vec<String>, String> {
 pub fn save_settings(core: CoreState, settings: Settings) -> Result<(), String> {
     crate::filters::validate(&settings.global_filters)?;
     let mut s = core.store.lock().unwrap();
-    s.settings = settings;
+    let new_copy_dir = settings.task_list_copy_dir.trim() != s.settings.task_list_copy_dir.trim();
+    let previous = std::mem::replace(&mut s.settings, settings);
+    // A newly chosen folder gets the copy right away, so a wrong folder is reported now.
+    if new_copy_dir {
+        if let Err(e) = s.write_task_list_copy() {
+            s.settings = previous;
+            return Err(e);
+        }
+    }
     s.save_settings();
     drop(s);
     core.changed();
@@ -296,25 +317,101 @@ pub struct ImportedTask {
     error: Option<String>,
     /// A task with this id already exists (importing again updates it).
     exists: bool,
+    /// It exists and is identical, so importing it changes nothing.
+    unchanged: bool,
 }
 
-/// Reads a Cobian task list (.lst) and converts its tasks, without saving anything.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    /// "backuper" (export / snapshot / tasks.json) | "cobian"
+    source: &'static str,
+    tasks: Vec<ImportedTask>,
+}
+
+/// Reads a task list file (this app's export or snapshot, or a Cobian .lst) without saving anything.
 #[tauri::command]
-pub fn import_cobian(core: CoreState, path: String) -> Result<Vec<ImportedTask>, String> {
+pub fn import_tasks(core: CoreState, path: String) -> Result<ImportPreview, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("לא ניתן לקרוא את הקובץ: {e}"))?;
-    let imported = crate::cobian::parse_file(&bytes)?;
+    let (source, imported) = match crate::tasklist::parse(&bytes)? {
+        Some(tasks) => (
+            "backuper",
+            tasks
+                .into_iter()
+                .map(|task| crate::cobian::Imported {
+                    task,
+                    warnings: Vec::new(),
+                })
+                .collect(),
+        ),
+        None => ("cobian", crate::cobian::parse_file(&bytes)?),
+    };
     let existing = core.store.lock().unwrap().tasks.clone();
-    Ok(imported
+    let tasks = imported
         .into_iter()
         .map(|i| {
-            let exists = existing.iter().any(|t| t.id == i.task.id);
+            let current = existing.iter().find(|t| t.id == i.task.id);
+            let exists = current.is_some();
             match prepare(i.task.clone()) {
                 Ok(task) => {
                     let error = check_folder_conflicts(&existing, std::slice::from_ref(&task)).err();
-                    ImportedTask { task, warnings: i.warnings, error, exists }
+                    let unchanged = current == Some(&task);
+                    ImportedTask {
+                        task,
+                        warnings: i.warnings,
+                        error,
+                        exists,
+                        unchanged,
+                    }
                 }
-                Err(error) => ImportedTask { task: i.task, warnings: i.warnings, error: Some(error), exists },
+                Err(error) => ImportedTask {
+                    task: i.task,
+                    warnings: i.warnings,
+                    error: Some(error),
+                    exists,
+                    unchanged: false,
+                },
             }
         })
-        .collect())
+        .collect();
+    Ok(ImportPreview { source, tasks })
+}
+
+/// Saves the given tasks (all of them when `ids` is None) to a file. Returns how many.
+#[tauri::command]
+pub fn export_tasks(core: CoreState, path: String, ids: Option<Vec<String>>) -> Result<usize, String> {
+    let tasks: Vec<Task> = {
+        let s = core.store.lock().unwrap();
+        s.tasks
+            .iter()
+            .filter(|t| ids.as_ref().is_none_or(|ids| ids.contains(&t.id)))
+            .cloned()
+            .collect()
+    };
+    crate::tasklist::write_file(std::path::Path::new(&path), &tasks).map_err(|e| format!("השמירה נכשלה: {e}"))?;
+    Ok(tasks.len())
+}
+
+/// Snapshots of the task list, newest first: the automatic ones, or those in a folder the
+/// user picked (e.g. the copy folder on the backup drive, after reinstalling).
+#[tauri::command]
+pub fn list_task_snapshots(core: CoreState, dir: Option<String>) -> Vec<crate::tasklist::Snapshot> {
+    let dir = match dir {
+        Some(d) => crate::tasklist::snapshots_in(std::path::Path::new(&d)),
+        None => core.store.lock().unwrap().snapshots_dir(),
+    };
+    crate::tasklist::list_snapshots(&dir)
+}
+
+/// Shows a sample notification with `sound`, so the user can hear it before choosing.
+#[tauri::command]
+pub fn test_sound(app: tauri::AppHandle, sound: String) {
+    let body = if sound.is_empty() { "ללא צליל" } else { "כך תישמע ההתראה" };
+    crate::core::toast(&app, "בדיקת צליל - Backuper", body, &sound);
+}
+
+#[tauri::command]
+pub fn dismiss_notice(core: CoreState) {
+    core.store.lock().unwrap().notice = None;
+    core.changed();
 }

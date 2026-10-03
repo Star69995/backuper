@@ -2,6 +2,7 @@
 //! std::fs::copy uses CopyFileExW on Windows, so attributes and the modified time are preserved.
 
 use super::{CopyResult, CopyStats, EngineEvent, ListedFile, Outcome};
+use crate::model::FileError;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,8 +64,11 @@ pub fn copy_files(
             }
             fs::copy(&from, &to)
         };
-        // One retry: files are often locked only for a moment.
-        let result = copy().or_else(|_| {
+        // One retry: files are often locked only for a moment. A file that's gone stays gone.
+        let result = copy().or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(e);
+            }
             std::thread::sleep(Duration::from_secs(2));
             copy()
         });
@@ -76,10 +80,13 @@ pub fn copy_files(
             }
             Err(e) => {
                 stats.files_failed += 1;
-                let entry = format!("{} - {e}", from.display());
-                log.push(format!("שגיאה\t{entry}"));
+                log.push(format!("שגיאה\t{} - {e}", from.display()));
                 if stats.errors.len() < MAX_ERRORS {
-                    stats.errors.push(entry);
+                    stats.errors.push(FileError {
+                        path: from.to_string_lossy().to_string(),
+                        code: e.raw_os_error().map(|c| c as u32),
+                        message: e.to_string(),
+                    });
                 }
             }
         }

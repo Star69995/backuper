@@ -7,7 +7,7 @@ interface Toast {
   id: number;
   tone: ToastTone;
   title: string;
-  message?: string;
+  message?: ReactNode;
   action?: { label: string; onClick: () => void };
 }
 interface ConfirmOpts {

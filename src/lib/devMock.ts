@@ -1,7 +1,7 @@
 // Dev-only: lets the UI run in a plain browser (`npm run dev`) with fake data,
 // for visual checks and screenshots. Never loaded inside the real Tauri app.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { ImportedTask, RunRecord, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
+import type { ImportedTask, ImportPreview, Notice, RunRecord, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
 import { newTask } from "../types";
 
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
@@ -29,7 +29,8 @@ export function installDevMock() {
       sources: [src("D:\\Photos", "תמונות")],
       destination: "E:\\Backups",
       mode: "full",
-      keepCount: 2,
+      keepMode: "days",
+      keepDays: 14,
       deleteBefore: true,
       schedule: { kind: "weekly", days: [5], time: "22:00" },
     },
@@ -77,9 +78,12 @@ export function installDevMock() {
     theme: "system",
     notifySuccess: true,
     notifyFailure: true,
+    soundSuccess: "Default",
+    soundFailure: "Reminder",
     schedulerPaused: false,
     closeToTray: true,
     startWithWindows: true,
+    taskListCopyDir: "",
     globalFilters: [{ kind: "pattern", value: "~$*" }],
   };
   const sourceRun = (folderName: string, source: string, i: number): SourceRun => ({
@@ -96,6 +100,8 @@ export function installDevMock() {
     targetFolder: `E:\\Backups\\${folderName} 2026-10-01 03-00 ${i === 0 ? "מלא" : "אינקרמנטלי"}`,
     filesCopied: i === 0 ? 120 : i === 1 ? 12 : 0,
     bytesCopied: i === 0 ? 480_000_000 : i === 1 ? 3_200_000 : 0,
+    backupBytes: i === 0 ? 480_000_000 : i === 1 ? 3_200_000 : 0,
+    freedBytes: i === 0 ? 455_000_000 : 0,
     filesDeleted: 0,
     filesFailed: 0,
     errors: [],
@@ -109,8 +115,29 @@ export function installDevMock() {
       Object.assign(sources[0], {
         status: "failed",
         message: "היעד לא זמין (F:\\Mirror): The system cannot find the path specified.",
-        errors: ["C:\\code\\locked.db - The process cannot access the file because it is being used by another process."],
-        filesFailed: 1,
+        errors: [
+          {
+            path: "C:\\code\\locked.db",
+            code: 32,
+            message: "The process cannot access the file because it is being used by another process.",
+          },
+          ...["0bsw7oyftsd743.o", "0d37qz099npk2s.o", "0fkisol3qgcake.o"].map((f) => ({
+            path: `C:\\code\\app\\target\\debug\\incremental\\s-hmvdvqo39o-working\\${f}`,
+            code: 3,
+            message: "The system cannot find the path specified. (os error 3)",
+          })),
+          { path: "C:\\code\\odd.bin", code: 1359, message: "An internal error occurred. (os error 1359)" },
+        ],
+        filesFailed: 5,
+      });
+    }
+    // Matches the "warning" last status of task 2 in `states`.
+    if (i === 2) {
+      Object.assign(sources[0], {
+        status: "warning",
+        message: "הגיבוי הסתיים, אך נמצאו פריטים לא תואמים",
+        errors: [],
+        exitCode: 5,
       });
     }
     return {
@@ -121,10 +148,12 @@ export function installDevMock() {
       mode: t.mode,
       startedAt: iso(-i * 300),
       finishedAt: iso(-i * 300 + 3),
-      status: i === 3 ? "failed" : "success",
+      status: i === 3 ? "failed" : i === 2 ? "warning" : "success",
       message: sources.length > 1 ? `${sources.length} תיקיות, ${sources.length} הצליחו. הועתקו 132 קבצים` : sources[0].message,
       filesCopied: sources.reduce((n, s) => n + s.filesCopied, 0),
       bytesCopied: sources.reduce((n, s) => n + s.bytesCopied, 0),
+      backupBytes: sources.reduce((n, s) => n + s.backupBytes, 0),
+      freedBytes: sources.reduce((n, s) => n + s.freedBytes, 0),
       filesDeleted: 0,
       filesFailed: sources.reduce((n, s) => n + s.filesFailed, 0),
       sources,
@@ -159,11 +188,25 @@ export function installDevMock() {
       ],
     }));
 
+  // Open with the drive-connected question showing (?prompt in the URL).
+  let drivePrompts = new URLSearchParams(location.search).has("prompt") ? ["1", "2"] : [];
+  // Open with the "task list recovered" notice (?notice in the URL).
+  let notice: Notice | null = new URLSearchParams(location.search).has("notice")
+    ? {
+        title: "רשימת המשימות שוחזרה מגיבוי",
+        message:
+          'קובץ רשימת המשימות היה פגום. הוא הועבר הצידה בשם "tasks - פגום 2026-10-03 09-12-40.json". נטען הגיבוי האחרון שלה מ-02/10/2026 21:05 (3 משימות). שינויים שנעשו אחרי הגיבוי הזה לא נשמרו - כדאי לבדוק את המשימות.',
+        path: "C:\\Users\\User\\AppData\\Roaming\\org.tovtech.backuper",
+      }
+    : null;
+
   const snapshot = (): Snapshot => ({
     tasks,
     states,
     settings,
     autostart: true,
+    drivePrompts,
+    notice,
     queue: [{ taskId: "3", mode: null, trigger: "manual" }],
     current: {
       runId: "run",
@@ -204,6 +247,8 @@ export function installDevMock() {
           ),
         );
         return null;
+      case "test_sound":
+        return null;
       case "save_settings":
         settings = a.settings as Settings;
         return null;
@@ -218,10 +263,27 @@ export function installDevMock() {
       case "preview_schedule":
         return [iso(60), iso(24 * 60 + 60), iso(48 * 60 + 60)];
       case "plugin:dialog|open":
-        // Only the Cobian file picker gets an answer (folder pickers stay cancelled).
+        // The file picker and the restore-from-folder picker get an answer (other folder pickers stay cancelled).
+        if ((a.options as { title?: string } | undefined)?.title?.includes("רשימת המשימות")) return "K:\\Backuper";
         return (a.options as { filters?: unknown[] } | undefined)?.filters ? "C:\\Users\\User\\Desktop\\cobian.lst" : null;
-      case "import_cobian":
-        return cobianImport();
+      case "plugin:dialog|save":
+        return `C:\\Users\\User\\Desktop\\${(a.options as { defaultPath: string }).defaultPath}`;
+      case "import_tasks":
+        return String(a.path).endsWith(".lst") ? { source: "cobian", tasks: cobianImport() } : snapshotImport(tasks);
+      case "export_tasks":
+        return a.ids ? (a.ids as string[]).length : tasks.length;
+      case "dismiss_notice":
+        notice = null;
+        return null;
+      case "list_task_snapshots":
+        return [5, 60 * 26, 60 * 24 * 6].map((minutesAgo, i) => ({
+          path: `${a.dir ?? "C:\\AppData"}\\task-list-backups\\tasks ${i}.json`,
+          savedAt: iso(-minutesAgo),
+          taskCount: tasks.length - i,
+        }));
+      case "answer_drive_prompts":
+        drivePrompts = drivePrompts.filter((id) => !(a.ids as string[]).includes(id));
+        return null;
       case "run_tasks":
         return (a.ids as string[]).length;
       case "plugin:app|version":
@@ -248,6 +310,7 @@ function cobianImport(): ImportedTask[] {
       warnings: [],
       error: null,
       exists: false,
+      unchanged: false,
     },
     {
       task: t("c2", "LR catalogs to K daily full", {
@@ -256,12 +319,12 @@ function cobianImport(): ImportedTask[] {
         mode: "full",
         keepCount: 5,
         schedule: { kind: "daily", time: "00:10" },
+        filters: [{ kind: "include", value: "*.lrcat" }],
       }),
-      warnings: [
-        'ב-Cobian גובו רק קבצים שתואמים ל-"\u2066*.lrcat\u2069" - כאן אין סינון "רק", ולכן יגובו כל הקבצים. אפשר להוסיף כללי החרגה במקום',
-      ],
+      warnings: [],
       error: null,
       exists: false,
+      unchanged: false,
     },
     {
       task: t("c3", "Pic folders to K bi-weekly ב-ו", {
@@ -274,6 +337,7 @@ function cobianImport(): ImportedTask[] {
       warnings: [],
       error: null,
       exists: true,
+      unchanged: false,
     },
     {
       task: t("c4", "Photos to E", {
@@ -284,7 +348,27 @@ function cobianImport(): ImportedTask[] {
       warnings: [],
       error: 'למשימות "תמונות משפחה" ו-"Photos to E" יש תיקיית מקור עם אותו שם תיקיית גיבוי (תמונות) באותו יעד - יש לשנות אחד מהם',
       exists: false,
+      unchanged: false,
     },
   ];
 }
 
+
+/** A snapshot: the current tasks (one edited since), plus one deleted since. */
+function snapshotImport(current: Task[]): ImportPreview {
+  const items: ImportedTask[] = current.map((task, i) => ({
+    task: i === 0 ? { ...task, keepCount: 3 } : task,
+    warnings: [],
+    error: null,
+    exists: true,
+    unchanged: i !== 0,
+  }));
+  items.push({
+    task: { ...newTask(), id: "deleted", name: "גיבוי מסמכים ישן", sources: [{ path: "C:\\Old", folderName: "Old" }], destination: "E:\\Backups" },
+    warnings: [],
+    error: null,
+    exists: false,
+    unchanged: false,
+  });
+  return { source: "backuper", tasks: items };
+}

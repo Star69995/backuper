@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-import type { BackupMode, ImportedTask, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task } from "./types";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import type { BackupMode, ImportPreview, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task, TaskSnapshot } from "./types";
 
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
@@ -9,6 +9,8 @@ export const api = {
   deleteTasks: (ids: string[]) => invoke<void>("delete_tasks", { ids }),
   reorderTasks: (ids: string[]) => invoke<void>("reorder_tasks", { ids }),
   runTasks: (ids: string[], mode: BackupMode | null = null) => invoke<number>("run_tasks", { ids, mode }),
+  /** Answers the drive-connected question: `run` get queued, all of `ids` stop waiting. */
+  answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   cancelTask: (id: string) => invoke<void>("cancel_task", { id }),
   history: () => invoke<RunRecord[]>("get_history"),
   clearHistory: () => invoke<void>("clear_history"),
@@ -20,7 +22,18 @@ export const api = {
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
-  importCobian: (path: string) => invoke<ImportedTask[]>("import_cobian", { path }),
+  importTasks: (path: string) => invoke<ImportPreview>("import_tasks", { path }),
+  /** All tasks when `ids` is null. Returns how many were saved. */
+  exportTasks: (path: string, ids: string[] | null = null) => invoke<number>("export_tasks", { path, ids }),
+  /** The automatic snapshots, or those in `dir` (a folder the user picked). */
+  listTaskSnapshots: (dir: string | null = null) => invoke<TaskSnapshot[]>("list_task_snapshots", { dir }),
+  dismissNotice: () => invoke<void>("dismiss_notice"),
+  /** Shows a sample notification with this sound. */
+  testSound: (sound: string) => invoke<void>("test_sound", { sound }),
+  saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
+    const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
+    return typeof r === "string" ? r : null;
+  },
   pickFile: async (title: string, filterName: string, extensions: string[]) => {
     const r = await open({ multiple: false, title, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;

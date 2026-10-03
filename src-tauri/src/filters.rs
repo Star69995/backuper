@@ -1,4 +1,4 @@
-//! User filter rules -> engine exclusions.
+//! User filter rules -> engine filters.
 
 use crate::engine::Filters;
 use crate::model::FilterRule;
@@ -13,9 +13,25 @@ fn extensions(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// "*.lrcat, *.docx;notes.txt" -> ["*.lrcat", "*.docx", "notes.txt"] (names may contain spaces).
+pub fn patterns(value: &str) -> Vec<String> {
+    value
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
     for r in rules {
         match r {
+            FilterRule::Include { value } if patterns(value).is_empty() => {
+                return Err("כלל סינון: יש להזין אילו קבצים לגבות (למשל *.lrcat)".into())
+            }
+            FilterRule::Include { value } if value.contains('\\') => {
+                return Err(format!("כלל סינון: תבנית שם קובץ לא יכולה לכלול נתיב ({value})"))
+            }
             FilterRule::Extension { value } if extensions(value).is_empty() => {
                 return Err("כלל סינון: יש להזין סיומת (למשל tmp)".into())
             }
@@ -40,6 +56,7 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
     let mut f = Filters::default();
     for r in rules {
         match r {
+            FilterRule::Include { value } => f.include_files.extend(patterns(value)),
             FilterRule::Extension { value } => f.exclude_files.extend(extensions(value)),
             FilterRule::Pattern { value } => f.exclude_files.push(value.trim().to_string()),
             FilterRule::Folder { value } => f.exclude_dirs.push(value.trim().to_string()),
@@ -52,6 +69,7 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
             FilterRule::System => f.exclude_system = true,
         }
     }
+    f.include_files.dedup();
     f.exclude_files.dedup();
     f.exclude_dirs.dedup();
     f

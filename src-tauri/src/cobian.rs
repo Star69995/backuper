@@ -4,7 +4,7 @@
 //! `Key=Value` lines. A value `{ *§* id *§* }` points at another section of the same file
 //! (sources, destination, schedule, filters...). The first section lists the tasks.
 
-use crate::model::{BackupMode, FilterRule, Schedule, Source, Task};
+use crate::model::{BackupMode, FilterRule, KeepMode, Schedule, Source, Task};
 use std::collections::HashMap;
 
 /// Days are 0 = Sunday .. 6 = Saturday, as in the app.
@@ -14,9 +14,6 @@ const DAY_NAMES: [&str; 7] = ["ראשון", "שני", "שלישי", "רביעי"
 fn ltr(s: &str) -> String {
     format!("\u{2066}{s}\u{2069}")
 }
-
-/// Cobian keeps unlimited copies with 0; the app needs a number.
-const UNLIMITED_KEEP: u32 = 30;
 
 pub struct Imported {
     pub task: Task,
@@ -202,18 +199,25 @@ fn schedule_time(s: &Schedule) -> &str {
     }
 }
 
-/// Cobian filter entries: a wildcard mask, a file/folder path or a size.
-fn convert_filter(f: Sec, include: bool, w: &mut Vec<String>) -> Option<FilterRule> {
-    let mask = f.get("FOMask").unwrap_or("").trim();
-    if include {
-        if !mask.is_empty() {
-            w.push(format!(
-                "ב-Cobian גובו רק קבצים שתואמים ל-\"{}\" - כאן אין סינון \"רק\", ולכן יגובו כל הקבצים. אפשר להוסיף כללי החרגה במקום",
-                ltr(mask)
-            ));
+/// Cobian include entries -> one "only these files" rule. Only file-name masks have an equivalent.
+fn convert_includes(filters: Vec<Sec>, w: &mut Vec<String>) -> Option<FilterRule> {
+    let mut masks = Vec::new();
+    for f in filters {
+        let mask = f.get("FOMask").unwrap_or("").trim();
+        if mask.is_empty() {
+            w.push("כלל הכללה של Cobian שאינו לפי שם קובץ (גודל/תאריך) לא נתמך - לא יובא".into());
+        } else if mask.contains('\\') {
+            w.push(format!("כלל הכללה לפי נתיב מלא ({}) לא נתמך - לא יובא", ltr(mask)));
+        } else {
+            masks.push(mask.to_string());
         }
-        return None;
     }
+    (!masks.is_empty()).then(|| FilterRule::Include { value: masks.join(", ") })
+}
+
+/// Cobian exclude entries: a wildcard mask, a file/folder path or a size.
+fn convert_filter(f: Sec, w: &mut Vec<String>) -> Option<FilterRule> {
+    let mask = f.get("FOMask").unwrap_or("").trim();
     if mask.is_empty() {
         let size = f.num("FOSize").unwrap_or(0);
         if size > 0 {
@@ -228,7 +232,11 @@ fn convert_filter(f: Sec, include: bool, w: &mut Vec<String>) -> Option<FilterRu
     }
     let last = mask.trim_end_matches('\\').rsplit('\\').next().unwrap_or(mask);
     if std::path::Path::new(mask).is_file() || (last.contains('.') && !std::path::Path::new(mask).is_dir()) {
-        w.push(format!("החרגה של קובץ לפי נתיב מלא ({}) הומרה להחרגה לפי שם הקובץ \"{}\" בכל התיקיות", ltr(mask), ltr(last)));
+        w.push(format!(
+            "החרגה של קובץ לפי נתיב מלא ({}) הומרה להחרגה לפי שם הקובץ \"{}\" בכל התיקיות",
+            ltr(mask),
+            ltr(last)
+        ));
         return Some(FilterRule::Pattern { value: last.to_string() });
     }
     Some(FilterRule::Folder { value: mask.to_string() })
@@ -237,7 +245,11 @@ fn convert_filter(f: Sec, include: bool, w: &mut Vec<String>) -> Option<FilterRu
 fn convert(t: Sec) -> Imported {
     let mut w = Vec::new();
     let mut task = Task {
-        id: t.get("TaskId").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default(),
+        id: t
+            .get("TaskId")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default(),
         name: t.get("TaskName").unwrap_or("").trim().to_string(),
         enabled: t.flag("TaskEnabled").unwrap_or(true),
         // Cobian copies empty folders unless told to ignore them.
@@ -314,24 +326,21 @@ fn convert(t: Sec) -> Imported {
     }
 
     let keep = t.num("TaskFullCopiesToKeep").unwrap_or(1);
-    task.keep_count = if keep <= 0 {
-        w.push(format!("ב-Cobian נשמרו גיבויים ללא הגבלה - נקבעו {UNLIMITED_KEEP}"));
-        UNLIMITED_KEEP
+    if keep <= 0 {
+        task.keep_mode = KeepMode::All;
     } else {
-        keep as u32
-    };
+        task.keep_count = keep as u32;
+    }
 
     if !t.flag("TaskIncludeSubdirectories").unwrap_or(true) {
         w.push("ב-Cobian לא גובו תתי-תיקיות - כאן יגובו גם תתי-התיקיות".into());
     }
-    for f in t.children("TaskIncludeFilters") {
-        convert_filter(f, true, &mut w);
-    }
-    task.filters = t
-        .children("TaskExcludeFilters")
+    task.filters = convert_includes(t.children("TaskIncludeFilters"), &mut w)
         .into_iter()
-        .filter_map(|f| convert_filter(f, false, &mut w))
         .collect();
+    for f in t.children("TaskExcludeFilters") {
+        task.filters.extend(convert_filter(f, &mut w));
+    }
 
     Imported { task, warnings: w }
 }
@@ -352,7 +361,10 @@ mod tests {
 
     fn sample() -> Vec<u8> {
         let mut s = String::new();
-        s += &section("root", &[&format!("BackupTask={}", r("t1")), &format!("BackupTask={}", r("t2"))]);
+        s += &section(
+            "root",
+            &[&format!("BackupTask={}", r("t1")), &format!("BackupTask={}", r("t2"))],
+        );
         s += &section(
             "t1",
             &[
@@ -377,7 +389,12 @@ mod tests {
         s += &section("d1", &["SDKind=1", "SDPath=K:\\cobian\\Docs"]);
         s += &section(
             "sch1",
-            &["SchSchedule=1", "SchDateAndTime=2026-10-01 23:35:18:671", "SchDaysOfWeek=0", "SchDaysOfWeek=3"],
+            &[
+                "SchSchedule=1",
+                "SchDateAndTime=2026-10-01 23:35:18:671",
+                "SchDaysOfWeek=0",
+                "SchDaysOfWeek=3",
+            ],
         );
         s += &section("f1", &["FOFilterKind=3", "FOMask=*.tmp"]);
         s += &section(
@@ -398,7 +415,12 @@ mod tests {
         s += &section("d2", &["SDKind=1", "SDPath=K:\\Cobian LR Bkp"]);
         s += &section(
             "sch2",
-            &["SchSchedule=2", "SchDateAndTime=2026-10-01 00:10:31:445", "SchDaysOfWeek=5", "SchDaysOfWeek=1"],
+            &[
+                "SchSchedule=2",
+                "SchDateAndTime=2026-10-01 00:10:31:445",
+                "SchDaysOfWeek=5",
+                "SchDaysOfWeek=1",
+            ],
         );
         s += &section("f2", &["FOFilterKind=3", "FOMask=*.lrcat"]);
         let mut bytes = vec![0xFF, 0xFE];
@@ -415,7 +437,10 @@ mod tests {
         assert_eq!(a.id, "7d7c8a4d-1704-4eed-bbc7-368049912640");
         assert_eq!(a.name, "Docs to K Daily א-ב");
         assert!(a.enabled && a.copy_empty_dirs);
-        assert_eq!(a.sources.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), ["C:\\Users\\Inbai\\Documents", "D:\\מסמכים שלי"]);
+        assert_eq!(
+            a.sources.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+            ["C:\\Users\\Inbai\\Documents", "D:\\מסמכים שלי"]
+        );
         assert_eq!(a.destination, "K:\\cobian\\Docs");
         assert_eq!(a.mode, BackupMode::Incremental);
         assert_eq!(a.schedule, Schedule::Daily { time: "23:35".into() });
@@ -442,8 +467,8 @@ mod tests {
             }
         );
         assert_eq!(b.keep_count, 5);
-        assert_eq!(list[1].warnings.len(), 1);
-        assert!(list[1].warnings[0].contains("*.lrcat"));
+        assert_eq!(b.filters, [FilterRule::Include { value: "*.lrcat".into() }]);
+        assert!(list[1].warnings.is_empty(), "{:?}", list[1].warnings);
     }
 
     #[test]

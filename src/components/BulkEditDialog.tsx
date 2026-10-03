@@ -1,11 +1,19 @@
 import { ArrowLeft, ArrowRight, Eye } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
-import { describeSchedule, KIND_LABEL, kindFields, type TaskKind, taskKind } from "../lib/format";
-import type { FilterRule, Schedule, Task } from "../types";
+import {
+  DRIVE_ACTION_LABEL,
+  describeRetention,
+  describeSchedule,
+  KIND_LABEL,
+  kindFields,
+  type TaskKind,
+  taskKind,
+} from "../lib/format";
+import type { DriveAction, FilterRule, Schedule, Task } from "../types";
 import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import ScheduleEditor from "./ScheduleEditor";
-import { PathPicker } from "./TaskEditor";
-import { Button, Checkbox, cx, Modal, NumberInput, PathText, Segmented, Toggle } from "./ui";
+import { PathPicker, RetentionEditor } from "./TaskEditor";
+import { Button, Checkbox, cx, Modal, PathText, Segmented, Toggle } from "./ui";
 
 type Key =
   | "enabled"
@@ -13,17 +21,24 @@ type Key =
   | "destination"
   | "schedule"
   | "catchUp"
-  | "keepCount"
+  | "onDriveConnect"
+  | "keepMode"
   | "deleteBefore"
   | "deleteEmptyIncrementals"
   | "reusePrevious"
   | "copyEmptyDirs"
   | "filters"
   | "useGlobalFilters";
-type Values = Pick<Task, Key | "fullSchedule">;
+type Values = Pick<Task, Key | "fullSchedule" | "keepCount" | "keepDays">;
+type Retention = Pick<Task, "keepMode" | "keepCount" | "keepDays">;
 
-/** The "mode" field covers both mode and fullSchedule (full / incremental / combined). */
-const valueOf = (k: Key, t: Values) => (k === "mode" ? { mode: t.mode, fullSchedule: t.fullSchedule } : t[k]);
+/** "mode" covers mode + fullSchedule (full / incremental / combined); "keepMode" covers all retention fields. */
+const valueOf = (k: Key, t: Values) =>
+  k === "mode"
+    ? { mode: t.mode, fullSchedule: t.fullSchedule }
+    : k === "keepMode"
+      ? { keepMode: t.keepMode, keepCount: t.keepCount, keepDays: t.keepDays }
+      : t[k];
 
 function showKind(v: Pick<Task, "mode" | "fullSchedule">) {
   const kind = taskKind(v);
@@ -38,7 +53,8 @@ const FIELDS: { key: Key; label: string; show: (v: ReturnType<typeof valueOf>) =
   { key: "destination", label: "תיקיית יעד", show: (v) => <PathText path={v as string} /> },
   { key: "schedule", label: "תזמון", show: (v) => describeSchedule(v as Schedule) },
   { key: "catchUp", label: "השלמת גיבוי שהוחמץ", show: (v) => yesNo(v as boolean) },
-  { key: "keepCount", label: "גיבויים לשמירה", show: (v) => String(v) },
+  { key: "onDriveConnect", label: "בחיבור הכונן", show: (v) => DRIVE_ACTION_LABEL[v as DriveAction] },
+  { key: "keepMode", label: "שמירת גיבויים", show: (v) => describeRetention(v as Retention) },
   { key: "deleteBefore", label: "מחיקת גיבויים לפני גיבוי מלא", show: (v) => yesNo(v as boolean) },
   { key: "deleteEmptyIncrementals", label: "מחיקת תיקיות אינקרמנטליות ריקות", show: (v) => yesNo(v as boolean) },
   { key: "reusePrevious", label: "גיבוי מלא מהיר", show: (v) => yesNo(v as boolean) },
@@ -70,7 +86,10 @@ export default function BulkEditDialog({
     destination: first.destination,
     schedule: first.schedule,
     catchUp: first.catchUp,
+    onDriveConnect: first.onDriveConnect,
+    keepMode: first.keepMode,
     keepCount: first.keepCount,
+    keepDays: first.keepDays,
     deleteBefore: first.deleteBefore,
     deleteEmptyIncrementals: first.deleteEmptyIncrementals,
     reusePrevious: first.reusePrevious,
@@ -98,7 +117,9 @@ export default function BulkEditDialog({
     () =>
       tasks.map((t) => {
         const n = { ...t };
-        active.forEach((k) => Object.assign(n, k === "mode" ? valueOf(k, values) : { [k]: values[k] }));
+        active.forEach((k) =>
+          Object.assign(n, k === "mode" || k === "keepMode" ? valueOf(k, values) : { [k]: values[k] }),
+        );
         if (active.has("filters") && filterMode === "add") {
           const extra = values.filters.filter((f) => !t.filters.some((x) => same(x, f)));
           n.filters = [...t.filters, ...extra];
@@ -157,8 +178,24 @@ export default function BulkEditDialog({
         );
       case "schedule":
         return <ScheduleEditor value={values.schedule} onChange={(v) => set("schedule", v)} />;
-      case "keepCount":
-        return <NumberInput className="w-24" min={1} max={100} value={values.keepCount} onChange={(v) => set("keepCount", v)} />;
+      case "onDriveConnect":
+        return (
+          <Segmented<DriveAction>
+            value={values.onDriveConnect}
+            onChange={(v) => set("onDriveConnect", v)}
+            options={(["off", "run", "ask"] as const).map((v) => ({ value: v, label: DRIVE_ACTION_LABEL[v] }))}
+          />
+        );
+      case "keepMode":
+        return (
+          <RetentionEditor
+            value={values}
+            onChange={(v) => {
+              setValues((x) => ({ ...x, ...v }));
+              setActive((a) => new Set(a).add("keepMode"));
+            }}
+          />
+        );
       case "filters":
         return (
           <div className="flex flex-col gap-3">

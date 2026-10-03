@@ -2,11 +2,13 @@ mod backup;
 mod cobian;
 mod commands;
 mod core;
+mod drives;
 mod engine;
 mod filters;
 mod model;
 mod schedule;
 mod store;
+mod tasklist;
 mod tray;
 
 use crate::core::Core;
@@ -42,6 +44,14 @@ pub fn run() {
             let _ = commands::apply_autostart(&handle, start_with_windows);
 
             tray::create(&handle)?;
+            // Started hidden, the window may stay closed for a while; the notice waits there too.
+            let notice = {
+                let s = core.store.lock().unwrap();
+                s.notice.clone().map(|n| (n, s.settings.sound_failure.clone()))
+            };
+            if let Some((n, sound)) = notice {
+                crate::core::toast(&handle, n.title, n.message, &sound);
+            }
             core.start();
             if !std::env::args().any(|a| a == HIDDEN_ARG) {
                 SHOW_ON_LOAD.store(true, Ordering::SeqCst);
@@ -85,7 +95,12 @@ pub fn run() {
             commands::preview_schedule,
             commands::save_settings,
             commands::set_autostart,
-            commands::import_cobian,
+            commands::import_tasks,
+            commands::export_tasks,
+            commands::list_task_snapshots,
+            commands::dismiss_notice,
+            commands::answer_drive_prompts,
+            commands::test_sound,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

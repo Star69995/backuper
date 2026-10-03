@@ -4,6 +4,7 @@
 pub mod native;
 pub mod robocopy;
 
+use crate::model::FileError;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -17,9 +18,11 @@ pub struct CopyJob {
     pub log_file: PathBuf,
 }
 
-/// Exclusions in engine terms (compiled from the user's filter rules).
+/// Filters in engine terms (compiled from the user's filter rules).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Filters {
+    /// Wildcards on file names; when not empty, only matching files are copied.
+    pub include_files: Vec<String>,
     /// Wildcards on file names.
     pub exclude_files: Vec<String>,
     /// Folder names or full paths.
@@ -66,7 +69,7 @@ pub struct CopyStats {
     pub bytes_copied: u64,
     pub files_deleted: u64,
     pub files_failed: u64,
-    pub errors: Vec<String>,
+    pub errors: Vec<FileError>,
     pub exit_code: Option<i32>,
 }
 

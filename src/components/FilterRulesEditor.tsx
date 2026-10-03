@@ -1,9 +1,14 @@
-import { CalendarX, EyeOff, FileType, Filter, FolderX, Plus, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
+import { CalendarX, EyeOff, FileCheck, FileType, Filter, FolderX, Plus, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FilterKind, FilterRule } from "../types";
 import { Button, IconButton, Menu, NumberInput, TextInput } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
+  include: {
+    label: "רק קבצים מסוג",
+    icon: <FileCheck size={15} />,
+    hint: "מגבים רק קבצים שתואמים לתבנית, כל השאר מדולגים. אפשר כמה, מופרדות בפסיק: ⁦*.lrcat, *.docx⁩",
+  },
   extension: { label: "סיומת קובץ", icon: <FileType size={15} />, hint: "אפשר כמה, מופרדות בפסיק: tmp, log, bak" },
   pattern: { label: "שם קובץ (תבנית)", icon: <Type size={15} />, hint: "* = כל רצף תווים, ? = תו אחד. למשל ~$* או Thumbs.db" },
   folder: { label: "תיקייה", icon: <FolderX size={15} />, hint: "שם תיקייה בכל מקום בעץ (node_modules) או נתיב מלא" },
@@ -15,6 +20,7 @@ const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string 
 
 const blank = (kind: FilterKind): FilterRule => {
   switch (kind) {
+    case "include":
     case "extension":
     case "pattern":
     case "folder":
@@ -49,10 +55,12 @@ const PRESETS: { label: string; rules: FilterRule[] }[] = [
 
 export function describeFilter(r: FilterRule) {
   switch (r.kind) {
+    case "include":
     case "extension":
     case "pattern":
     case "folder":
-      return `${KINDS[r.kind].label}: ${r.value}`;
+      // Isolated left-to-right, so "*.lrcat" doesn't render as "lrcat.*" inside Hebrew text.
+      return `${KINDS[r.kind].label}: ⁦${r.value}⁩`;
     case "largerThan":
       return r.mb % 1024 === 0 ? `קבצים גדולים מ-${r.mb / 1024}GB` : `קבצים גדולים מ-${r.mb}MB`;
     case "olderThan":
@@ -96,13 +104,13 @@ export default function FilterRulesEditor({
                   {k.label}
                 </span>
                 <div className="flex min-w-48 flex-1 flex-col gap-1">
-                  {(r.kind === "extension" || r.kind === "pattern" || r.kind === "folder") && (
+                  {(r.kind === "include" || r.kind === "extension" || r.kind === "pattern" || r.kind === "folder") && (
                     <TextInput
                       dir="ltr"
                       className="text-left font-mono"
                       autoFocus={!r.value}
                       value={r.value}
-                      placeholder={r.kind === "extension" ? "tmp, log" : r.kind === "pattern" ? "~$*" : "node_modules"}
+                      placeholder={r.kind === "include" ? "*.lrcat" : r.kind === "extension" ? "tmp, log" : r.kind === "pattern" ? "~$*" : "node_modules"}
                       onChange={(e) => update(i, { ...r, value: e.target.value })}
                     />
                   )}

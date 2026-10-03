@@ -2,7 +2,9 @@ import { X } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type Ref,
   type SelectHTMLAttributes,
   useEffect,
   useLayoutEffect,
@@ -322,6 +324,7 @@ export function Modal({
   footer,
   size = "md",
   dismissable = true,
+  bodyRef,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -330,6 +333,8 @@ export function Modal({
   footer?: ReactNode;
   size?: "sm" | "md" | "lg" | "xl";
   dismissable?: boolean;
+  /** The scrolling body, for content that tracks its own scroll position. */
+  bodyRef?: Ref<HTMLDivElement>;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -359,7 +364,9 @@ export function Modal({
             <X size={18} />
           </IconButton>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {children}
+        </div>
         {footer && <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-5 py-3">{footer}</div>}
       </div>
     </div>,
@@ -465,11 +472,106 @@ export function EmptyState({ icon, title, children }: { icon: ReactNode; title: 
  * Paths are LTR content inside the RTL layout. Each segment is isolated so a Hebrew
  * folder name with a date ("מסמכים 2026-09-01 03-00") keeps its own order.
  */
-export function PathText({ path, className }: { path: string; className?: string }) {
+export function PathText({ path, className, title = path }: { path: string; className?: string; title?: string }) {
   const parts = path.split(/(\\)/);
   return (
-    <bdi dir="ltr" className={cx("selectable", className)} title={path}>
+    <bdi dir="ltr" className={cx("selectable", className)} title={title}>
       {parts.map((p, i) => (p === "\\" ? p : <bdi key={i}>{p}</bdi>))}
     </bdi>
+  );
+}
+
+/** A path that opens in File Explorer on click. Clicks don't reach the row underneath. */
+export function PathLink({ path, onOpen, className }: { path: string; onOpen: (path: string) => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(path);
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+      className={cx("min-w-0 truncate rounded text-start hover:text-accent hover:underline", className)}
+    >
+      <PathText path={path} title={`${path}\nלחיצה לפתיחה בסייר הקבצים`} />
+    </button>
+  );
+}
+
+/**
+ * Drag handle on a table header cell's end edge (the cell needs `relative`). Works in RTL:
+ * dragging away from the cell widens it. Arrow keys resize, double-click resets.
+ * Starts from the cell's rendered width, so it also works on an auto-width column;
+ * `onStart` lets the table freeze its auto columns first (else they'd absorb the change).
+ */
+export function ColumnResizer({
+  onResize,
+  onReset,
+  onStart,
+  label,
+}: {
+  onResize: (w: number) => void;
+  onReset: () => void;
+  onStart?: () => void;
+  label: string;
+}) {
+  const cellWidth = (el: HTMLElement) => el.parentElement!.getBoundingClientRect().width;
+  const start = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const rtl = getComputedStyle(el).direction === "rtl";
+    const x0 = e.clientX;
+    const w0 = cellWidth(el);
+    onStart?.();
+    const move = (ev: PointerEvent) => onResize(w0 + (rtl ? x0 - ev.clientX : ev.clientX - x0));
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      document.body.style.cursor = "";
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+    document.body.style.cursor = "col-resize";
+  };
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      tabIndex={0}
+      title="גרירה לשינוי הרוחב, לחיצה כפולה לאיפוס"
+      onPointerDown={start}
+      onDoubleClick={onReset}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        const rtl = getComputedStyle(e.currentTarget).direction === "rtl";
+        // The arrow pointing away from the cell widens it.
+        const grow = rtl ? "ArrowLeft" : "ArrowRight";
+        const shrink = rtl ? "ArrowRight" : "ArrowLeft";
+        if (e.key === grow || e.key === shrink) {
+          e.preventDefault();
+          const w = cellWidth(e.currentTarget);
+          onStart?.();
+          onResize(w + (e.key === grow ? 16 : -16));
+        }
+      }}
+      className={cx(
+        "group/resize absolute inset-y-0 -end-1.5 z-10 flex w-3 cursor-col-resize touch-none items-center justify-center",
+        "focus-visible:outline-none",
+      )}
+    >
+      <span
+        className={cx(
+          "h-4 w-px rounded-full bg-line transition-all",
+          "group-hover/resize:h-full group-hover/resize:w-0.5 group-hover/resize:bg-accent",
+          "group-focus-visible/resize:h-full group-focus-visible/resize:w-0.5 group-focus-visible/resize:bg-accent",
+          "group-active/resize:h-full group-active/resize:w-0.5 group-active/resize:bg-accent",
+        )}
+      />
+    </div>
   );
 }

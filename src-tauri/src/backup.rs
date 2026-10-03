@@ -6,10 +6,10 @@
 //!   <folderName> 2026-10-02 03-00 אינקרמנטלי     only files new/changed since the previous backup
 //! A folder still being written (or that failed/was cancelled) carries a ".partial" suffix.
 //! A full backup plus the incrementals after it form a chain. When a full backup succeeds,
-//! chains beyond keep_count are deleted, and so are empty incremental folders.
+//! chains outside the task's retention (KeepMode) are deleted, and so are empty incremental folders.
 
 use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters, ListedFile, Outcome};
-use crate::model::{BackupFolder, BackupMode, RunStatus, Source, SourceBackups, SourceRun, Task};
+use crate::model::{BackupFolder, BackupMode, KeepMode, RunStatus, Source, SourceBackups, SourceRun, Task};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::collections::HashMap;
 use std::fs;
@@ -97,8 +97,10 @@ pub fn validate_task(t: &Task) -> Result<(), String> {
         }
         names.push(name);
     }
-    if t.keep_count == 0 {
-        return Err("יש לשמור לפחות גיבוי אחד".into());
+    match t.keep_mode {
+        KeepMode::Count if t.keep_count == 0 => return Err("יש לשמור לפחות גיבוי אחד".into()),
+        KeepMode::Days if t.keep_days == 0 => return Err("יש לשמור גיבויים לפחות יום אחד".into()),
+        _ => {}
     }
     if let Some(fs) = &t.full_schedule {
         if *fs == crate::model::Schedule::Manual {
@@ -211,6 +213,33 @@ fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     last
 }
 
+/// Total size of the files under `path` (unreadable parts count as 0).
+fn dir_size(path: &Path) -> u64 {
+    let Ok(rd) = fs::read_dir(path) else { return 0 };
+    rd.flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// Byte size for messages (same format as `fmtBytes` in the UI).
+pub fn fmt_bytes(n: u64) -> String {
+    if n == 0 {
+        return "0 B".into();
+    }
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let i = ((n as f64).ln() / 1024f64.ln()).floor().min(4.0) as usize;
+    let v = n as f64 / 1024f64.powi(i as i32);
+    if v >= 100.0 || i == 0 {
+        format!("{} {}", v.round(), UNITS[i])
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
+}
+
 fn has_files(path: &Path) -> bool {
     let Ok(rd) = fs::read_dir(path) else { return false };
     rd.flatten().any(|e| match e.file_type() {
@@ -220,22 +249,50 @@ fn has_files(path: &Path) -> bool {
     })
 }
 
-/// Deletes old backups of one source. Keeps the newest `keep_fulls` complete full backups
+/// Which complete full backups (and so which chains) `prune` keeps, besides the protected one.
+#[derive(Clone, Copy, Debug)]
+enum Keep {
+    /// The newest n.
+    Fulls(usize),
+    /// Every full newer than the cutoff, plus the newest one before it (its chain covers the
+    /// cutoff moment). A chain goes only once the next full is older than the cutoff too.
+    Since(DateTime<Local>),
+    All,
+}
+
+impl Keep {
+    /// `protected` = the new full backup counts as one of the kept ones.
+    fn of(task: &Task, now: DateTime<Local>, protected: bool) -> Keep {
+        match task.keep_mode {
+            KeepMode::Count => Keep::Fulls((task.keep_count as usize).saturating_sub(protected as usize)),
+            KeepMode::Days => Keep::Since(now - chrono::Duration::days(task.keep_days as i64)),
+            KeepMode::All => Keep::All,
+        }
+    }
+}
+
+/// Deletes old backups of one source. Keeps the complete full backups that `keep` selects
 /// (besides `protect`) together with their incrementals; everything else goes: older chains,
 /// partial folders, and (with `delete_empty`) incremental folders that are empty.
-fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, delete_empty: bool, notes: &mut Vec<String>) -> u64 {
+/// Returns how many backups were deleted and how many bytes that freed.
+fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_empty: bool, notes: &mut Vec<String>) -> (u64, u64) {
     let all: Vec<BackupFolder> = list_backups(dest, prefix)
         .into_iter()
         .filter(|b| Some(b.name.as_str()) != protect)
         .collect();
-    let kept_fulls: Vec<&BackupFolder> = all
-        .iter()
-        .filter(|b| b.kind == BackupMode::Full && !b.partial)
-        .take(keep_fulls)
-        .collect();
+    let fulls = all.iter().filter(|b| b.kind == BackupMode::Full && !b.partial);
+    let kept_fulls: Vec<&BackupFolder> = match keep {
+        Keep::Fulls(n) => fulls.take(n).collect(),
+        Keep::All => fulls.collect(),
+        Keep::Since(cutoff) => {
+            let (newer, older): (Vec<&BackupFolder>, Vec<&BackupFolder>) = fulls.partition(|b| b.created_at >= cutoff);
+            newer.into_iter().chain(older.into_iter().take(1)).collect()
+        }
+    };
     let oldest_kept = kept_fulls.last().map(|b| b.created_at);
     let mut removed_empty = 0;
     let mut deleted = 0;
+    let mut freed = 0;
     for b in &all {
         let keep = match b.kind {
             BackupMode::Full => kept_fulls.iter().any(|k| k.name == b.name),
@@ -248,11 +305,13 @@ fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, del
             continue;
         }
         let empty = b.kind == BackupMode::Incremental && !has_files(Path::new(&b.path));
+        let size = if empty { 0 } else { dir_size(Path::new(&b.path)) };
         match fs::remove_dir_all(&b.path) {
             Ok(()) if empty => removed_empty += 1,
             Ok(()) => {
                 deleted += 1;
-                notes.push(format!("נמחק גיבוי קודם: {}", b.name));
+                freed += size;
+                notes.push(format!("נמחק גיבוי קודם: {} ({})", b.name, fmt_bytes(size)));
             }
             Err(e) => notes.push(format!("לא ניתן למחוק את {}: {e}", b.name)),
         }
@@ -260,7 +319,7 @@ fn prune(dest: &str, prefix: &str, keep_fulls: usize, protect: Option<&str>, del
     if removed_empty > 0 {
         notes.push(format!("נמחקו {removed_empty} תיקיות אינקרמנטליות ריקות"));
     }
-    deleted
+    (deleted, freed)
 }
 
 /// Decides whether this source's run is full or incremental (incremental needs a complete full).
@@ -377,10 +436,22 @@ pub fn backup_source(
     let dest = PathBuf::from(task.destination.trim());
     let prefix = sanitize_folder_name(&src.folder_name);
     if !source.is_dir() {
-        return fail(run, format!("תיקיית המקור לא נמצאה: {}", source.display()));
+        return fail(
+            run,
+            format!(
+                "תיקיית המקור לא נמצאה: {}. ייתכן שהיא נמחקה, הועברה או ששמה שונה, או שהכונן שלה לא מחובר. חברו את הכונן, או עדכנו את הנתיב בהגדרות המשימה.",
+                source.display()
+            ),
+        );
     }
     if let Err(e) = fs::create_dir_all(&dest) {
-        return fail(run, format!("היעד לא זמין ({}): {e}", dest.display()));
+        return fail(
+            run,
+            format!(
+                "היעד לא זמין ({}): {e}. ודאו שכונן היעד מחובר ושיש הרשאה לכתוב אליו, והריצו את הגיבוי שוב.",
+                dest.display()
+            ),
+        );
     }
 
     let backups = list_backups(&task.destination, &prefix);
@@ -393,9 +464,13 @@ pub fn backup_source(
     let result = match mode {
         BackupMode::Full => {
             // Fast full: reuse the newest full folder so only differences are copied.
+            // Not with an include rule: robocopy only purges names matching it, so files that
+            // no longer match would stay in the "full" folder.
             let latest_full = backups.iter().find(|b| b.kind == BackupMode::Full && !b.partial);
             let reused = task.reuse_previous
+                && task.keep_mode == KeepMode::Count
                 && task.keep_count == 1
+                && ctx.filters.include_files.is_empty()
                 && latest_full.is_some_and(|prev| match rename_retry(Path::new(&prev.path), &work) {
                     Ok(()) => {
                         notes.push(format!("הגיבוי המלא הקודם ({}) עודכן למצב הנוכחי", prev.name));
@@ -408,21 +483,25 @@ pub fn backup_source(
                 });
             if task.delete_before {
                 on_event(EngineEvent::Phase("deleting"));
-                let deleted = prune(
+                let (deleted, freed) = prune(
                     &task.destination,
                     &prefix,
-                    task.keep_count as usize - 1,
+                    Keep::of(task, ctx.now, true),
                     Some(&file_name(&work)),
                     task.delete_empty_incrementals,
                     &mut notes,
                 );
+                run.freed_bytes += freed;
                 if deleted > 0 {
                     notes.push("הגיבויים הקודמים נמחקו לפני תחילת הגיבוי (לפי הגדרות המשימה)".into());
                 }
             }
             if !reused {
                 if let Err(e) = fs::create_dir_all(&work) {
-                    return fail(run, format!("לא ניתן ליצור את תיקיית הגיבוי: {e}"));
+                    return fail(
+                        run,
+                        format!("לא ניתן ליצור את תיקיית הגיבוי: {e}. ודאו שכונן היעד מחובר, שיש בו מקום ושיש הרשאה לכתוב אליו."),
+                    );
                 }
             }
             on_event(EngineEvent::Phase("scanning"));
@@ -451,7 +530,10 @@ pub fn backup_source(
             };
             let changed = changed_since(&source, listed, &chain_index(&backups));
             if let Err(e) = fs::create_dir_all(&work) {
-                return fail(run, format!("לא ניתן ליצור את תיקיית הגיבוי: {e}"));
+                return fail(
+                    run,
+                    format!("לא ניתן ליצור את תיקיית הגיבוי: {e}. ודאו שכונן היעד מחובר, שיש בו מקום ושיש הרשאה לכתוב אליו."),
+                );
             }
             native::copy_files(&source, &work, &changed, &log_file, ctx.cancel, &mut |e| on_event(e))
         }
@@ -469,16 +551,19 @@ pub fn backup_source(
         match rename_retry(&work, &final_path) {
             Ok(()) => {
                 run.target_folder = Some(final_path.to_string_lossy().to_string());
+                run.backup_bytes = dir_size(&final_path);
                 // Only a completed full removes older backups (unless the user chose delete-before).
-                if mode == BackupMode::Full {
-                    prune(
+                // Keeping by days also lets an incremental remove chains that have expired since.
+                if mode == BackupMode::Full || task.keep_mode == KeepMode::Days {
+                    let (_, freed) = prune(
                         &task.destination,
                         &prefix,
-                        task.keep_count as usize - 1,
+                        Keep::of(task, ctx.now, mode == BackupMode::Full),
                         Some(&file_name(&final_path)),
-                        task.delete_empty_incrementals,
+                        task.delete_empty_incrementals && mode == BackupMode::Full,
                         &mut notes,
                     );
+                    run.freed_bytes += freed;
                 }
             }
             Err(e) => {
@@ -486,6 +571,13 @@ pub fn backup_source(
                 message = format!("{message}. לא ניתן לסמן את הגיבוי כמושלם ({e})");
             }
         }
+    }
+    // An incremental with no changes stays quiet about its size.
+    if run.backup_bytes > 0 && (mode == BackupMode::Full || run.files_copied > 0) {
+        notes.push(format!("גודל הגיבוי: {}", fmt_bytes(run.backup_bytes)));
+    }
+    if run.freed_bytes > 0 {
+        notes.push(format!("פונו {} בכונן היעד", fmt_bytes(run.freed_bytes)));
     }
     if !notes.is_empty() {
         message = format!("{message}. {}", notes.join(". "));
@@ -652,6 +744,7 @@ mod tests {
         assert_eq!(env.names(&t, 0), ["מסמכים 2026-10-01 03-00 מלא"]);
         assert_eq!(env.names(&t, 1), ["Pics 2026-10-01 03-00 מלא"]);
         assert_eq!(r[0].files_copied, 2);
+        assert_eq!((r[0].backup_bytes, r[0].freed_bytes), (1 + 8, 0), "a.txt + קובץ.txt");
 
         // Incremental: a new folder with only the new/changed file.
         fs::write(docs.join("b.txt"), "b").unwrap();
@@ -677,6 +770,47 @@ mod tests {
         assert_eq!(env.names(&t, 0), ["מסמכים 2026-10-04 03-00 מלא"]);
         assert_eq!(env.names(&t, 1), ["Pics 2026-10-04 03-00 מלא"]);
         assert!(!dst.join("מסמכים 2026-10-04 03-00 מלא").join("b.txt").exists());
+        // Size of the new full, and what deleting the old chain freed (full 9 + incremental 10).
+        assert_eq!(r[0].backup_bytes, 9 + 8);
+        assert_eq!(r[0].freed_bytes, 9 + 10);
+        assert!(r[0].message.contains("פונו 19 B"), "{}", r[0].message);
+    }
+
+    /// Read-only + hidden + system files: backed up, and their backup folders can still be deleted.
+    #[test]
+    fn protected_files_are_copied_and_pruned() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        let attrib = |p: &Path, flags: [&str; 3]| {
+            let ok = std::process::Command::new("attrib").args(flags).arg(p).status().unwrap();
+            assert!(ok.success());
+        };
+        fs::write(src.join("sys.dat"), "s").unwrap();
+        attrib(&src.join("sys.dat"), ["+R", "+H", "+S"]);
+        let t = Task {
+            reuse_previous: true,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        let r = env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert!(dst.join("Src 2026-10-01 03-00 מלא").join("sys.dat").exists());
+
+        // Incremental copies a new protected file.
+        fs::write(src.join("sys2.dat"), "s2").unwrap();
+        attrib(&src.join("sys2.dat"), ["+R", "+H", "+S"]);
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!((r[0].status, r[0].files_copied), (Some(RunStatus::Success), 1), "{r:?}");
+
+        // Reused full: robocopy must delete the protected file that's gone from the source,
+        // and pruning must delete the incremental folder that holds a protected file.
+        attrib(&src.join("sys.dat"), ["-R", "-H", "-S"]);
+        fs::remove_file(src.join("sys.dat")).unwrap();
+        let r = env.run(&t, BackupMode::Full, "2026-10-03 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-03 03-00 מלא"]);
+        let full = dst.join("Src 2026-10-03 03-00 מלא");
+        assert!(!full.join("sys.dat").exists() && full.join("sys2.dat").exists());
     }
 
     #[test]
@@ -704,6 +838,72 @@ mod tests {
         );
         env.run(&t, BackupMode::Full, "2026-10-05 03:00");
         assert_eq!(env.names(&t, 0), ["Src 2026-10-04 03-00 מלא", "Src 2026-10-05 03-00 מלא"]);
+    }
+
+    #[test]
+    fn keep_all_never_deletes_chains() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = Task {
+            keep_mode: KeepMode::All,
+            reuse_previous: true, // ignored: it would overwrite the previous full
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        fs::write(src.join("b.txt"), "b").unwrap();
+        env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        env.run(&t, BackupMode::Full, "2026-10-03 03:00");
+        env.run(&t, BackupMode::Full, "2026-10-04 03:00");
+        assert_eq!(
+            env.names(&t, 0),
+            [
+                "Src 2026-10-01 03-00 מלא",
+                "Src 2026-10-02 03-00 אינקרמנטלי",
+                "Src 2026-10-03 03-00 מלא",
+                "Src 2026-10-04 03-00 מלא"
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_days_keeps_what_covers_the_window() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = Task {
+            keep_mode: KeepMode::Days,
+            keep_days: 7,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        fs::write(src.join("b.txt"), "b").unwrap();
+        env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        env.run(&t, BackupMode::Full, "2026-10-05 03:00");
+        // Cutoff 10-03: the 10-01 chain is still needed to restore 10-03 and 10-04.
+        env.run(&t, BackupMode::Full, "2026-10-10 03:00");
+        assert_eq!(
+            env.names(&t, 0),
+            [
+                "Src 2026-10-01 03-00 מלא",
+                "Src 2026-10-02 03-00 אינקרמנטלי",
+                "Src 2026-10-05 03-00 מלא",
+                "Src 2026-10-10 03-00 מלא"
+            ]
+        );
+        // Cutoff 10-06: the 10-05 full covers it, so the 10-01 chain goes - even on an incremental.
+        fs::write(src.join("c.txt"), "c").unwrap();
+        env.run(&t, BackupMode::Incremental, "2026-10-13 03:00");
+        assert_eq!(
+            env.names(&t, 0),
+            [
+                "Src 2026-10-05 03-00 מלא",
+                "Src 2026-10-10 03-00 מלא",
+                "Src 2026-10-13 03-00 אינקרמנטלי"
+            ]
+        );
     }
 
     #[test]
@@ -788,6 +988,34 @@ mod tests {
     }
 
     #[test]
+    fn fast_full_skipped_with_include_rule() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.lrcat"), "c").unwrap();
+        fs::write(src.join("big.lrdata"), "p").unwrap();
+        let t = Task {
+            reuse_previous: true,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        // The rule is added after a full backup without it.
+        let with_rule = Env {
+            root: env.root.clone(),
+            cancel: AtomicBool::new(false),
+            filters: crate::filters::compile(&[crate::model::FilterRule::Include { value: "*.lrcat".into() }]),
+        };
+        with_rule.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        let b = dst.join("Src 2026-10-02 03-00 מלא");
+        assert!(b.join("a.lrcat").exists());
+        assert!(
+            !b.join("big.lrdata").exists(),
+            "a file that no longer matches must not stay in the full backup"
+        );
+        assert_eq!(with_rule.names(&t, 0), ["Src 2026-10-02 03-00 מלא"]);
+    }
+
+    #[test]
     fn filter_rules_exclude_files() {
         let env = Env::with_filters(crate::filters::compile(&[
             crate::model::FilterRule::Extension { value: "tmp".into() },
@@ -819,5 +1047,32 @@ mod tests {
         let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
         assert_eq!(r[0].files_copied, 1, "{r:?}");
         assert!(dst.join("Src 2026-10-02 03-00 אינקרמנטלי").join("new.txt").exists());
+    }
+
+    #[test]
+    fn include_rule_backs_up_only_matching_files() {
+        let env = Env::with_filters(crate::filters::compile(&[crate::model::FilterRule::Include {
+            value: "*.lrcat, notes.txt".into(),
+        }]));
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("main.lrcat"), "c").unwrap();
+        fs::write(src.join("sub").join("old.lrcat"), "c").unwrap();
+        fs::write(src.join("sub").join("notes.txt"), "n").unwrap();
+        fs::write(src.join("preview.lrdata"), "p").unwrap();
+        fs::write(src.join("sub").join("other.txt"), "o").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        assert_eq!(r[0].files_copied, 3, "{r:?}");
+        let b = dst.join("Src 2026-10-01 03-00 מלא");
+        assert!(b.join("main.lrcat").exists() && b.join("sub").join("old.lrcat").exists());
+        assert!(b.join("sub").join("notes.txt").exists());
+        assert!(!b.join("preview.lrdata").exists() && !b.join("sub").join("other.txt").exists());
+        // The incremental listing applies the same rule.
+        fs::write(src.join("new.lrcat"), "n").unwrap();
+        fs::write(src.join("new.jpg"), "n").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].files_copied, 1, "{r:?}");
+        assert!(dst.join("Src 2026-10-02 03-00 אינקרמנטלי").join("new.lrcat").exists());
     }
 }

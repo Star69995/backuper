@@ -1,11 +1,12 @@
-import { FileText, Folder, FolderOpen, History, Search, Trash2 } from "lucide-react";
+import { CircleAlert, FileText, Folder, FolderOpen, History, Info, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
-import type { RunRecord, RunStatus, Snapshot, SourceRun } from "../types";
+import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
+import type { FileError, RunRecord, RunStatus, Snapshot, SourceRun } from "../types";
 import { useFeedback } from "./feedback";
 import { statusBadge } from "./TasksView";
-import { Badge, Button, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
+import { Badge, Button, cx, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
 
 export default function HistoryView({ snap }: { snap: Snapshot }) {
   const { toast, confirm } = useFeedback();
@@ -146,6 +147,49 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
   );
 }
 
+/** One kind of copy failure: what happened, why, what to do, and the affected files. */
+function ErrorGroup({ kind, errors }: { kind: ErrorKind; errors: FileError[] }) {
+  const bad = kind.tone === "bad";
+  return (
+    <div
+      className={cx(
+        "flex flex-col gap-1.5 rounded-lg border p-3 text-[13px] leading-relaxed",
+        bad ? "border-bad/30 bg-bad-soft/50" : "border-warn/30 bg-warn-soft/50",
+      )}
+    >
+      <div className={cx("flex items-center gap-2 font-semibold", bad ? "text-bad" : "text-warn")}>
+        {bad ? <CircleAlert size={16} className="shrink-0" /> : <Info size={16} className="shrink-0" />}
+        <span>
+          {kind.title} ({fmtNumber(errors.length)})
+        </span>
+      </div>
+      <p>
+        <span className="font-medium">למה זה קרה? </span>
+        {kind.why}
+      </p>
+      <p>
+        <span className="font-medium">מה לעשות? </span>
+        {kind.fix}
+      </p>
+      <details className="group">
+        <summary className="cursor-pointer text-xs text-muted select-none hover:text-fg">הצג את הקבצים</summary>
+        <ul className="mt-1.5 flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
+          {errors.map((e, i) => (
+            <li key={i} className="min-w-0">
+              <PathText path={e.path} className="block truncate font-mono" />
+              {kind.id === "other" && (
+                <bdi dir="ltr" className="selectable block text-left text-muted">
+                  {e.message}
+                </bdi>
+              )}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
 function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; onShowLog: (i: number) => void }) {
   const { toast } = useFeedback();
   return (
@@ -163,6 +207,16 @@ function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
         <span>הועתקו {fmtNumber(src.filesCopied)} קבצים</span>
         <bdi dir="ltr">{fmtBytes(src.bytesCopied)}</bdi>
+        {src.backupBytes > 0 && (
+          <span>
+            גודל הגיבוי <bdi dir="ltr">{fmtBytes(src.backupBytes)}</bdi>
+          </span>
+        )}
+        {src.freedBytes > 0 && (
+          <span>
+            פונו <bdi dir="ltr">{fmtBytes(src.freedBytes)}</bdi>
+          </span>
+        )}
         {src.filesDeleted > 0 && <span>נמחקו מהגיבוי {fmtNumber(src.filesDeleted)}</span>}
         {src.filesFailed > 0 && <span className="text-bad">נכשלו {fmtNumber(src.filesFailed)}</span>}
         {src.exitCode !== null && <span>קוד robocopy: {src.exitCode}</span>}
@@ -173,17 +227,13 @@ function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; 
           <PathText path={src.targetFolder} className="min-w-0 truncate" />
         </div>
       )}
-      {src.errors.length > 0 && (
-        <ul
-          className="selectable max-h-40 overflow-y-auto rounded-lg border border-bad/30 bg-bad-soft/50 p-2 font-mono text-xs leading-relaxed"
-          dir="ltr"
-        >
-          {src.errors.map((e, i) => (
-            <li key={i} className="text-left">
-              {e}
-            </li>
-          ))}
-        </ul>
+      {groupFileErrors(src.errors).map((g) => (
+        <ErrorGroup key={g.kind.id} kind={g.kind} errors={g.errors} />
+      ))}
+      {src.filesFailed > src.errors.length && src.errors.length > 0 && (
+        <p className="text-xs text-muted">
+          מוצגים {fmtNumber(src.errors.length)} מתוך {fmtNumber(src.filesFailed)} - הרשימה המלאה ביומן המפורט.
+        </p>
       )}
       <div className="flex flex-wrap gap-2">
         {src.targetFolder && (
@@ -205,7 +255,8 @@ function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; 
   );
 }
 
-function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
+/** Details of one run (per source: result, errors, full log). Also opened from the tasks table. */
+export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
   const { toast } = useFeedback();
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
   const [logFilter, setLogFilter] = useState("");
@@ -254,6 +305,8 @@ function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }
           {stat("קבצים שהועתקו", fmtNumber(r.filesCopied))}
           {stat("נפח שהועתק", <bdi dir="ltr">{fmtBytes(r.bytesCopied)}</bdi>)}
           {stat("משך", fmtDuration(r.startedAt, r.finishedAt))}
+          {stat("גודל הגיבוי", <bdi dir="ltr">{fmtBytes(r.backupBytes)}</bdi>)}
+          {stat("מקום שפונה (גיבויים קודמים)", <bdi dir="ltr">{fmtBytes(r.freedBytes)}</bdi>)}
           {stat("קבצים שנמחקו מהגיבוי", fmtNumber(r.filesDeleted))}
           {stat("קבצים שנכשלו", fmtNumber(r.filesFailed))}
           {stat("סיום", fmtDateTime(r.finishedAt))}

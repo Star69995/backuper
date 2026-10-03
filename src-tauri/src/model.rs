@@ -38,10 +38,14 @@ pub enum Schedule {
     },
 }
 
-/// A rule for files/folders that are never backed up.
+/// A rule for which files get backed up (all exclusions, except `Include`).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilterRule {
+    /// Back up only files whose name matches one of these wildcards: "*.lrcat, *.docx".
+    Include {
+        value: String,
+    },
     /// One or more extensions: "tmp", "tmp, log, .bak"
     Extension {
         value: String,
@@ -64,6 +68,31 @@ pub enum FilterRule {
     },
     Hidden,
     System,
+}
+
+/// What a task does when its drives (destination / sources) get connected.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DriveAction {
+    #[default]
+    Off,
+    /// Queue a backup right away.
+    Run,
+    /// Show the window and ask whether to back up.
+    Ask,
+}
+
+/// How long old backups are kept.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum KeepMode {
+    /// The newest `keep_count` full backups (each with its incrementals).
+    #[default]
+    Count,
+    /// Whatever is needed to restore any moment of the last `keep_days` days.
+    Days,
+    /// Nothing is deleted (except incomplete folders and, if enabled, empty incrementals).
+    All,
 }
 
 /// One source folder of a task. Each source has its own chain of dated backup folders.
@@ -90,8 +119,11 @@ pub struct Task {
     /// Combined mode (with mode = Incremental): full backups run on this schedule, incrementals on `schedule`.
     pub full_schedule: Option<Schedule>,
     pub enabled: bool,
-    /// How many full backups (each with its incrementals) to keep per source (>= 1).
+    pub keep_mode: KeepMode,
+    /// KeepMode::Count: how many full backups (each with its incrementals) to keep per source (>= 1).
     pub keep_count: u32,
+    /// KeepMode::Days: how many days back backups are kept (>= 1).
+    pub keep_days: u32,
     /// Delete old backups before a full backup starts (frees space) instead of after it succeeds.
     pub delete_before: bool,
     /// Full backup: rename the previous full folder and mirror into it instead of copying everything again.
@@ -101,6 +133,8 @@ pub struct Task {
     pub copy_empty_dirs: bool,
     /// Run a scheduled occurrence that was missed while the computer was off.
     pub catch_up: bool,
+    /// Start (or offer to start) a backup when the task's drives become available.
+    pub on_drive_connect: DriveAction,
     pub filters: Vec<FilterRule>,
     /// Also apply the global filter rules from Settings.
     pub use_global_filters: bool,
@@ -122,12 +156,15 @@ impl Default for Task {
             schedule: Schedule::Manual,
             full_schedule: None,
             enabled: true,
+            keep_mode: KeepMode::Count,
             keep_count: 1,
+            keep_days: 30,
             delete_before: false,
             reuse_previous: false,
             delete_empty_incrementals: true,
             copy_empty_dirs: false,
             catch_up: true,
+            on_drive_connect: DriveAction::Off,
             filters: Vec::new(),
             use_global_filters: true,
             source: String::new(),
@@ -176,6 +213,49 @@ pub enum Trigger {
     Manual,
     Scheduled,
     CatchUp,
+    /// The task's drive was connected.
+    DriveConnected,
+}
+
+/// One file or folder that couldn't be copied. `code` is the Win32 error code (2 = not found,
+/// 32 = in use...), which the UI turns into an explanation; `message` is the system's own text.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileError {
+    pub path: String,
+    pub code: Option<u32>,
+    pub message: String,
+}
+
+impl FileError {
+    /// Older history stored errors as "path - message" (from std: "... (os error N)").
+    fn from_legacy(s: &str) -> Self {
+        let (path, message) = s.rsplit_once(" - ").unwrap_or(("", s));
+        let code = message
+            .rsplit_once("(os error ")
+            .and_then(|(_, rest)| rest.trim_end_matches(')').parse().ok());
+        FileError {
+            path: path.to_string(),
+            code,
+            message: message.to_string(),
+        }
+    }
+}
+
+fn file_errors<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<FileError>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Full(FileError),
+        Legacy(String),
+    }
+    Ok(Vec::<Repr>::deserialize(d)?
+        .into_iter()
+        .map(|r| match r {
+            Repr::Full(e) => e,
+            Repr::Legacy(s) => FileError::from_legacy(&s),
+        })
+        .collect())
 }
 
 /// Result of one source within a run.
@@ -190,9 +270,14 @@ pub struct SourceRun {
     pub target_folder: Option<String>,
     pub files_copied: u64,
     pub bytes_copied: u64,
+    /// Size of the finished backup folder (0 if it didn't complete).
+    pub backup_bytes: u64,
+    /// Space freed by deleting older backups of this source.
+    pub freed_bytes: u64,
     pub files_deleted: u64,
     pub files_failed: u64,
-    pub errors: Vec<String>,
+    #[serde(deserialize_with = "file_errors")]
+    pub errors: Vec<FileError>,
     pub exit_code: Option<i32>,
     pub log_file: Option<String>,
 }
@@ -212,6 +297,10 @@ pub struct RunRecord {
     pub message: String,
     pub files_copied: u64,
     pub bytes_copied: u64,
+    #[serde(default)]
+    pub backup_bytes: u64,
+    #[serde(default)]
+    pub freed_bytes: u64,
     pub files_deleted: u64,
     pub files_failed: u64,
     #[serde(default)]
@@ -225,6 +314,10 @@ pub struct Settings {
     pub theme: String,
     pub notify_success: bool,
     pub notify_failure: bool,
+    /// Windows toast sound name ("Default", "IM", "Mail", "Reminder", "SMS"). Empty = silent.
+    pub sound_success: String,
+    /// Used for failures, warnings and notices.
+    pub sound_failure: String,
     pub scheduler_paused: bool,
     pub close_to_tray: bool,
     /// The user's choice; the Windows startup entry is synced to it on every launch
@@ -232,6 +325,18 @@ pub struct Settings {
     pub start_with_windows: bool,
     /// Rules applied to every task that has use_global_filters.
     pub global_filters: Vec<FilterRule>,
+    /// Folder that always holds a copy of the task list (e.g. on the backup drive). Empty = off.
+    pub task_list_copy_dir: String,
+}
+
+/// A message for the user that waits in the UI until dismissed (e.g. the task list was recovered).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub title: String,
+    pub message: String,
+    /// A file or folder the user may want to see.
+    pub path: Option<String>,
 }
 
 impl Default for Settings {
@@ -240,10 +345,13 @@ impl Default for Settings {
             theme: "system".into(),
             notify_success: true,
             notify_failure: true,
+            sound_success: "Default".into(),
+            sound_failure: "Reminder".into(),
             scheduler_paused: false,
             close_to_tray: true,
             start_with_windows: true,
             global_filters: Vec::new(),
+            task_list_copy_dir: String::new(),
         }
     }
 }
@@ -286,4 +394,23 @@ pub struct SourceBackups {
     pub source: String,
     pub folder_name: String,
     pub backups: Vec<BackupFolder>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_legacy_string_errors() {
+        let run: SourceRun = serde_json::from_str(
+            r#"{"errors": [
+                "C:\\a - b\\x.o - The system cannot find the file specified. (os error 2)",
+                {"path": "C:\\y", "code": 32, "message": "in use"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(run.errors[0].path, r"C:\a - b\x.o");
+        assert_eq!(run.errors[0].code, Some(2));
+        assert_eq!(run.errors[1].code, Some(32));
+    }
 }

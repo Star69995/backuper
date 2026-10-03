@@ -2,8 +2,9 @@
 //! and the built-in scheduler that enqueues due tasks. UI-independent apart from events.
 
 use crate::backup;
+use crate::drives::DriveWatch;
 use crate::engine::{robocopy::Robocopy, CopyEngine, EngineEvent};
-use crate::model::{BackupMode, Progress, RunRecord, RunStatus, Schedule, SourceRun, Task, Trigger};
+use crate::model::{BackupMode, DriveAction, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
 use crate::schedule;
 use crate::store::Store;
 use chrono::{Duration as ChronoDuration, Local};
@@ -82,7 +83,20 @@ fn summarize(
                 }
             }
             let copied: u64 = many.iter().map(|s| s.files_copied).sum();
-            format!("{}. הועתקו {copied} קבצים", parts.join(", "))
+            let mut msg = format!("{}. הועתקו {copied} קבצים", parts.join(", "));
+            let size: u64 = many
+                .iter()
+                .filter(|s| s.mode == Some(BackupMode::Full) || s.files_copied > 0)
+                .map(|s| s.backup_bytes)
+                .sum();
+            if size > 0 {
+                msg.push_str(&format!(". גודל הגיבוי: {}", backup::fmt_bytes(size)));
+            }
+            let freed: u64 = many.iter().map(|s| s.freed_bytes).sum();
+            if freed > 0 {
+                msg.push_str(&format!(". פונו {} בכונן היעד", backup::fmt_bytes(freed)));
+            }
+            msg
         }
     };
     RunRecord {
@@ -97,6 +111,8 @@ fn summarize(
         message,
         files_copied: sources.iter().map(|s| s.files_copied).sum(),
         bytes_copied: sources.iter().map(|s| s.bytes_copied).sum(),
+        backup_bytes: sources.iter().map(|s| s.backup_bytes).sum(),
+        freed_bytes: sources.iter().map(|s| s.freed_bytes).sum(),
         files_deleted: sources.iter().map(|s| s.files_deleted).sum(),
         files_failed: sources.iter().map(|s| s.files_failed).sum(),
         sources,
@@ -106,6 +122,7 @@ fn summarize(
 /// A scheduled time this late is treated as missed (computer was off or asleep).
 const MISSED_GRACE_MINUTES: i64 = 2;
 const SCHEDULER_TICK: Duration = Duration::from_secs(5);
+const DRIVE_TICK: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +139,8 @@ pub struct Core {
     queue_cv: Condvar,
     pub current: Mutex<Option<Progress>>,
     cancel: AtomicBool,
+    /// Tasks waiting for the user to answer "the drive was connected - back up now?".
+    drive_prompts: Mutex<Vec<String>>,
     engine: Box<dyn CopyEngine>,
     app: AppHandle,
 }
@@ -134,6 +153,7 @@ impl Core {
             queue_cv: Condvar::new(),
             current: Mutex::new(None),
             cancel: AtomicBool::new(false),
+            drive_prompts: Mutex::new(Vec::new()),
             engine: Box::new(Robocopy),
             app,
         })
@@ -144,6 +164,9 @@ impl Core {
         std::thread::spawn(move || me.worker_loop());
         let me = self.clone();
         std::thread::spawn(move || me.scheduler_loop());
+        // Its own thread: checking a disconnected network drive letter can block for a while.
+        let me = self.clone();
+        std::thread::spawn(move || me.drive_loop());
     }
 
     /// Tells the UI to refetch its snapshot.
@@ -178,6 +201,23 @@ impl Core {
         self.queue_cv.notify_one();
         self.changed();
         true
+    }
+
+    pub fn drive_prompts(&self) -> Vec<String> {
+        self.drive_prompts.lock().unwrap().clone()
+    }
+
+    /// The user's answer to the drive prompt: `run` gets queued, all of `ids` stop waiting.
+    pub fn answer_drive_prompts(&self, ids: &[String], run: &[String]) {
+        self.drive_prompts.lock().unwrap().retain(|id| !ids.contains(id));
+        for id in run {
+            self.enqueue(Job {
+                task_id: id.clone(),
+                mode: None,
+                trigger: Trigger::DriveConnected,
+            });
+        }
+        self.changed();
     }
 
     /// Cancels a queued or running task.
@@ -303,19 +343,23 @@ impl Core {
             };
             *self.current.lock().unwrap() = None;
             self.changed();
-            self.notify(&record, settings.notify_success, settings.notify_failure);
+            self.notify(&record, &settings);
         }
     }
 
-    fn notify(&self, r: &RunRecord, on_success: bool, on_failure: bool) {
-        let (show, title) = match r.status {
-            RunStatus::Success => (on_success, format!("הגיבוי הצליח: {}", r.task_name)),
-            RunStatus::Warning => (on_success || on_failure, format!("הגיבוי הסתיים עם אזהרות: {}", r.task_name)),
-            RunStatus::Failed => (on_failure, format!("הגיבוי נכשל: {}", r.task_name)),
-            RunStatus::Cancelled => (false, String::new()),
+    fn notify(&self, r: &RunRecord, settings: &Settings) {
+        let (show, title, sound) = match r.status {
+            RunStatus::Success => (settings.notify_success, format!("הגיבוי הצליח: {}", r.task_name), &settings.sound_success),
+            RunStatus::Warning => (
+                settings.notify_success || settings.notify_failure,
+                format!("הגיבוי הסתיים עם אזהרות: {}", r.task_name),
+                &settings.sound_failure,
+            ),
+            RunStatus::Failed => (settings.notify_failure, format!("הגיבוי נכשל: {}", r.task_name), &settings.sound_failure),
+            RunStatus::Cancelled => (false, String::new(), &settings.sound_success),
         };
         if show {
-            let _ = self.app.notification().builder().title(title).body(&r.message).show();
+            toast(&self.app, title, &r.message, sound);
         }
     }
 
@@ -332,6 +376,72 @@ impl Core {
         }
         if dirty {
             s.save_states();
+        }
+    }
+
+    /// Starts tasks (or asks about them) when their drives get connected.
+    fn drive_loop(&self) {
+        let mut watch = DriveWatch::default();
+        loop {
+            let (tasks, paused, notify, sound) = {
+                let s = self.store.lock().unwrap();
+                let st = &s.settings;
+                (s.tasks.clone(), st.scheduler_paused, st.notify_success, st.sound_success.clone())
+            };
+            // Polled even while paused, so unpausing doesn't fire for drives connected long ago.
+            let ready: Vec<Task> = watch
+                .poll(&tasks)
+                .into_iter()
+                .filter(|t| t.enabled && !paused)
+                .cloned()
+                .collect();
+            let mut changed = false;
+            {
+                // A question about a task that's gone, turned off, or whose drive was unplugged again is moot.
+                let mut prompts = self.drive_prompts.lock().unwrap();
+                let before = prompts.len();
+                prompts.retain(|id| {
+                    tasks
+                        .iter()
+                        .find(|t| t.id == *id)
+                        .is_some_and(|t| t.enabled && t.on_drive_connect == DriveAction::Ask && watch.all_present(t))
+                });
+                changed |= prompts.len() != before;
+            }
+            let mut ask = false;
+            for t in &ready {
+                let drives = crate::drives::task_drives(t).join(", ");
+                match t.on_drive_connect {
+                    DriveAction::Run => {
+                        let queued = self.enqueue(Job {
+                            task_id: t.id.clone(),
+                            mode: None,
+                            trigger: Trigger::DriveConnected,
+                        });
+                        if queued && notify {
+                            toast(&self.app, format!("הכונן חובר - מתחיל גיבוי: {}", t.name), drives, &sound);
+                        }
+                    }
+                    DriveAction::Ask => {
+                        let busy = self.queued().iter().any(|j| j.task_id == t.id)
+                            || self.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == t.id);
+                        let mut prompts = self.drive_prompts.lock().unwrap();
+                        if !busy && !prompts.contains(&t.id) {
+                            prompts.push(t.id.clone());
+                            ask = true;
+                        }
+                    }
+                    DriveAction::Off => {}
+                }
+            }
+            if ask || changed {
+                self.changed();
+            }
+            if ask {
+                // The question is a dialog in the main window, so bring it up (it may be in the tray).
+                crate::tray::show_main(&self.app);
+            }
+            std::thread::sleep(DRIVE_TICK);
         }
     }
 
@@ -423,4 +533,13 @@ mod tests {
         assert_eq!(next, None);
         assert!(!refresh_slot(&mut next, None, at(1, 0)));
     }
+}
+
+/// Shows a Windows notification. `sound` is a toast sound name; empty plays nothing.
+pub fn toast(app: &AppHandle, title: impl Into<String>, body: impl Into<String>, sound: &str) {
+    let mut n = app.notification().builder().title(title).body(body);
+    if !sound.is_empty() {
+        n = n.sound(sound);
+    }
+    let _ = n.show();
 }

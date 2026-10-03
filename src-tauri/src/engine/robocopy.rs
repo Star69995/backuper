@@ -2,6 +2,7 @@
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
 use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome};
+use crate::model::FileError;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -41,6 +42,14 @@ struct Args<'a> {
 
 fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
     let mut a: Vec<OsString> = vec![arg_path(x.source), arg_path(x.target)];
+    // File specs right after the paths limit the copy (and the purge) to matching names.
+    a.extend(
+        x.filters
+            .include_files
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| OsString::from(s.trim())),
+    );
     let flags: &[&str] = match (x.mirror, x.copy_empty_dirs) {
         (true, true) => &["/MIR"],
         (true, false) => &["/S", "/PURGE"],
@@ -241,6 +250,24 @@ fn is_error_line(line: &str) -> bool {
     line.contains(" ERROR ") && line.contains("(0x")
 }
 
+/// "2026/10/01 03:00:00 ERROR 32 (0x00000020) Copying File C:\src\a.db" + the next line (the
+/// reason) -> the Win32 code, the bare path (without robocopy's action words) and the reason.
+fn parse_error(line: &str, reason: &str) -> FileError {
+    let after = line.split_once(" ERROR ").map_or(line, |(_, r)| r);
+    let code = after.split_whitespace().next().and_then(|c| c.parse().ok());
+    let rest = after.split_once(')').map_or("", |(_, r)| r).trim();
+    let path = rest
+        .find(":\\")
+        .and_then(|i| i.checked_sub(1))
+        .or_else(|| rest.find("\\\\"))
+        .map_or(rest, |i| &rest[i..]);
+    FileError {
+        path: path.to_string(),
+        code,
+        message: reason.trim().to_string(),
+    }
+}
+
 fn mirror_args(job: &CopyJob, list_only: bool) -> Args<'_> {
     Args {
         source: &job.source,
@@ -339,8 +366,7 @@ impl CopyEngine for Robocopy {
                 }
                 if let Some(err) = last_error.take() {
                     // The line after an ERROR line is the human-readable reason.
-                    let path = err.split(")").skip(1).collect::<Vec<_>>().join(")").trim().to_string();
-                    let entry = format!("{path} - {}", l.trim());
+                    let entry = parse_error(&err, l);
                     if stats.errors.len() < MAX_ERRORS && !stats.errors.contains(&entry) {
                         stats.errors.push(entry);
                     }
@@ -375,7 +401,7 @@ impl CopyEngine for Robocopy {
 
         // robocopy exit codes are bit flags: 1 copied, 2 extras, 4 mismatch, 8 failures, 16 fatal.
         let (outcome, message) = if code >= 16 {
-            (Outcome::Failed, "שגיאה חמורה - ייתכן שהמקור או היעד אינם נגישים".to_string())
+            (Outcome::Failed, "שגיאה חמורה - המקור או היעד לא נגישים. ודאו ששני הכוננים מחוברים ושיש הרשאה אליהם, והריצו שוב. פרטים ביומן המפורט.".to_string())
         } else if code >= 8 {
             (Outcome::Failed, format!("{} קבצים לא הועתקו", stats.files_failed.max(1)))
         } else if code & 4 != 0 {
@@ -392,6 +418,22 @@ impl CopyEngine for Robocopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_error_lines() {
+        let e = parse_error(
+            "2026/10/01 03:00:00 ERROR 32 (0x00000020) Copying File C:\\src\\נעול.db",
+            "The process cannot access the file because it is being used by another process.",
+        );
+        assert_eq!(e.code, Some(32));
+        assert_eq!(e.path, "C:\\src\\נעול.db");
+        assert!(e.message.starts_with("The process"));
+        let e = parse_error(
+            "2026/10/01 03:00:00 ERROR 53 (0x00000035) Accessing Source Directory \\\\nas\\x\\",
+            "",
+        );
+        assert_eq!((e.code, e.path.as_str()), (Some(53), "\\\\nas\\x\\"));
+    }
 
     #[test]
     fn parses_file_lines() {

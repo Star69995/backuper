@@ -19,18 +19,30 @@ E:\Backups\Pictures  2026-10-01 03-00 מלא
   - *Fast full* (optional, keepCount = 1): renames the previous full folder to the new date and mirrors into it, so only the differences get copied.
 - **Incremental**: every run creates a **new** dated folder holding only the files that are new or changed since the previous backup (compared against the full backup plus the incrementals after it, by size and modified time). If nothing changed, the folder stays empty, so Explorer still shows the backup ran. The first backup is always full.
 - **Combined**: full backups on their own schedule (e.g. weekly on Friday) and incrementals on another (e.g. daily). When both are due at once, only the full runs. Each full starts a new chain.
-- **Retention**: a full backup plus the incrementals after it is a chain. When a full backup completes, chains beyond `keepCount` (default 1) are deleted, together with incomplete folders and (option "delete empty incremental folders", on by default) incremental folders that ended up empty.
+- **Retention** (`keepMode`): a full backup plus the incrementals after it is a chain. Three modes:
+  - *by count* (default) - when a full backup completes, chains beyond `keepCount` (default 1) are deleted.
+  - *by time* - keeps whatever is needed to restore any moment of the last `keepDays` days: a chain is deleted only once the next full is also older than that. Checked after every backup, full or incremental.
+  - *forever* - chains are never deleted (old backups are removed by hand in "manage backups"). Fast full backup and delete-before don't apply.
+
+  Incomplete folders are always deleted, and (option "delete empty incremental folders", on by default) a full backup also deletes incremental folders that ended up empty. Cobian tasks with unlimited copies import as *forever*.
+- **Sizes in the result**: after a full backup, or an incremental that copied something, the run message (and the Windows notification) gives the size of the new backup folder, and when older backups were deleted, how much space that freed (also per deleted folder). The run details show both (`backupBytes`, `freedBytes`).
 - **Delete before** (optional, per task): deletes the old backups *before* the full backup starts, to free disk space. If that backup then fails, no previous backup is left (the UI warns about this). By default old backups are deleted only after the new one succeeds.
 - A folder still being written, or one that failed or was cancelled, carries a `.partial` suffix and is never used as a full base.
 - Empty folders inside the source aren't copied unless "copy empty folders" is on (full backups only).
 
-**Filter rules** (what never gets backed up), per task and/or global (Settings): file extension, file-name wildcard (`~$*`), folder name or path (`node_modules`), files larger than N MB, files not modified for N days, hidden files, system files. `$RECYCLE.BIN` and `System Volume Information` are always skipped. Full and incremental backups apply the same rules (both come from robocopy).
+**Filter rules**, per task and/or global (Settings). "Only files of type" (`*.lrcat, *.docx`) limits the backup to matching file names. Every other rule excludes: file extension, file-name wildcard (`~$*`), folder name or path (`node_modules`), files larger than N MB, files not modified for N days, hidden files, system files. `$RECYCLE.BIN` and `System Volume Information` are always skipped. Full and incremental backups apply the same rules (both come from robocopy).
 
 **Schedules**: manual, one-time, daily, weekly (chosen weekdays), monthly (day 1-31, clamped to the month's end), every X minutes/hours. A run missed while the PC was off or asleep can be caught up on next start ("catch-up", per task).
 
-**Import from Cobian**: "ייבוא מ-Cobian" reads a Cobian Backup / Reflector task list (`.lst`) and shows a preview first. Name, enabled state, local sources/destination, schedule, full/incremental, a fixed weekly full day (imported as combined mode), copies to keep, empty folders and exclusion masks all carry over. Anything without an equivalent gets a per-task warning (include-only filters, "full every N backups", differential, FTP sources). Tasks keep Cobian's task id, so importing again offers to update them instead of duplicating them. The app doesn't recognize Cobian's existing backup folders, so each task's first run is a full backup.
+**When a drive connects** (per task, on top of the schedule): off / back up automatically / ask first. Meant for an external disk or USB stick: when all the drives of a task (its destination and sources, e.g. `E:` and `C:`) are available after one of them wasn't, the task is queued right away, or the window pops up asking "back up now?" (several tasks can be answered in one dialog). Nothing fires at startup for drives that are already connected, nor while scheduling is paused. Only drive-letter paths are watched (not `\server\share`). The drive is recognized by its letter, so another disk that gets the same letter also counts.
 
-Also included: a run log with per-source details, errors and the full log; a toast notification on success/failure; bulk edit of several tasks (choose fields, preview the diff, apply, undo); sorting the task list by name, source or destination folder (grouped by folder); a backups manager per task (per source: list, type, size, open, delete); folders picked with the Windows folder dialog (several sources at once).
+**Import from Cobian**: "ייבוא וייצוא" - import from a file reads a Cobian Backup / Reflector task list (`.lst`) and shows a preview first. Name, enabled state, local sources/destination, schedule, full/incremental, a fixed weekly full day (imported as combined mode), copies to keep, empty folders, and include/exclude masks all carry over. Anything without an equivalent gets a per-task warning (size/date/path include filters, "full every N backups", differential, FTP sources). Tasks keep Cobian's task id, so importing again offers to update them instead of duplicating them. The app doesn't recognize Cobian's existing backup folders, so each task's first run is a full backup.
+
+**Task list backup** (Settings - "גיבוי רשימת המשימות"): every change to the task list saves a dated snapshot in the app data dir (the last 50), and any snapshot can be restored through the same preview (deleted tasks are pre-checked, changed ones can be checked to revert them; tasks created later are kept). Optionally, the same dated snapshots (the last 50) are also kept in a folder of your choice (e.g. on the backup drive), in a hidden subfolder `Backuper - גיבויי רשימת משימות`, so the list survives the PC itself; "שחזור מתיקייה" lists and restores the snapshots in any folder (e.g. after reinstalling). Snapshot files and folders are hidden + system (files also read-only), so they don't show in Explorer and aren't deleted by accident - this guards against mistakes, not against someone deliberately removing them. If `tasks.json` is damaged (or missing while snapshots exist), it's renamed to `tasks - פגום <date>.json`, the newest snapshot (from the app data dir or the copy folder) is loaded, and a notice explains what happened (also as a Windows notification when the app starts hidden). An empty list saved on purpose stays empty. **Export** saves all tasks, or the selected ones, to a `.json` file; importing that file (on this or another PC) goes through the same preview. Tasks keep their ids, so importing again updates instead of duplicating.
+
+**Notification sounds** (Settings - "התראות"): Windows notifications play a sound - one for success (also used when a backup starts on drive connect) and one for failures, warnings and notices. Each can be a Windows toast sound or silent, with a button that shows a sample notification. Windows' own notification settings and Do Not Disturb still apply.
+
+Also included: an in-app help page ("עזרה") for end users - what happens in a run and the copy engine, backup types, restoring files, scheduling, drive connect, filters, managing tasks, errors and an FAQ, with search; a run log with per-source details, errors and the full log (failed files are grouped by cause - e.g. in use by another program, deleted during the backup, no permission, disk full - each with why it happened and what to do); a toast notification on success/failure; bulk edit of several tasks (choose fields, preview the diff, apply, undo); sorting the task list by name, next scheduled run (tasks with none last), source or destination folder (grouped by folder); resizable task table columns, including the task name (drag a header border, double-click to reset; remembered per machine). The name column fills the free space until a border is first dragged; a backups manager per task (per source: list, type, size, open, delete); folders picked with the Windows folder dialog (several sources at once).
 
 ## Use
 
@@ -38,7 +50,7 @@ Install with `src-tauri\target\release\bundle\nsis\Backuper_<version>_x64-setup.
 On first launch the app registers itself to start with Windows (to the tray, `--hidden`). You can change this in Settings.
 Closing the window minimizes to the tray. Right-click the tray icon to pause scheduling or exit.
 
-App data lives in `%APPDATA%\org.tovtech.backuper\`: `tasks.json`, `state.json` (next/last run), `settings.json`, `history.json`, and `logs\` (robocopy logs per run).
+App data lives in `%APPDATA%\org.tovtech.backuper\`: `tasks.json`, `state.json` (next/last run), `settings.json`, `history.json`, `logs\` (robocopy logs per run) and `task-list-backups\` (task list snapshots).
 
 ## Develop
 
@@ -49,9 +61,16 @@ npm install
 npm run app:dev        # Tauri dev (hot reload)
 npm run app:build      # release exe + NSIS installer
 npm run dev            # UI only in a browser, with fake data (src/lib/devMock.ts)
+npm run bump           # version +0.0.1 everywhere (or: npm run bump -- minor / major / 1.2.3)
 cd src-tauri && cargo test   # unit tests + end-to-end tests against real robocopy
 ```
 
 ## Not done yet
 
 - Running as a Windows service (backups without a logged-in user). The core (`core.rs`) doesn't depend on the UI, so it can be moved into a service process later.
+
+## License
+
+Copyright (C) 2026 Star
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3 of the License only. See [LICENSE](LICENSE) for the full text.

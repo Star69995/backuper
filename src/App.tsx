@@ -1,13 +1,16 @@
-import { HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
+import { CircleHelp, HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { api } from "./api";
+import DrivePromptDialog from "./components/DrivePromptDialog";
+import HelpView from "./components/HelpView";
 import HistoryView from "./components/HistoryView";
+import NoticeDialog from "./components/NoticeDialog";
 import SettingsView from "./components/SettingsView";
 import TasksView from "./components/TasksView";
 import { cx, Spinner } from "./components/ui";
 import { useSnapshot, useTheme } from "./lib/useSnapshot";
 
-type View = "tasks" | "history" | "settings";
+type View = "tasks" | "history" | "settings" | "help";
 
 export default function App() {
   const { snap, refresh } = useSnapshot();
@@ -29,6 +32,7 @@ export default function App() {
     { id: "tasks", label: "משימות", icon: <ListChecks size={18} /> },
     { id: "history", label: "יומן ריצות", icon: <History size={18} /> },
     { id: "settings", label: "הגדרות", icon: <SettingsIcon size={18} /> },
+    { id: "help", label: "עזרה", icon: <CircleHelp size={18} /> },
   ];
 
   return (
@@ -81,7 +85,10 @@ export default function App() {
         {view === "tasks" && <TasksView snap={snap} refresh={refresh} />}
         {view === "history" && <HistoryView snap={snap} />}
         {view === "settings" && <SettingsView snap={snap} refresh={refresh} />}
+        {view === "help" && <HelpView />}
       </main>
+      <DrivePromptDialog snap={snap} />
+      <NoticeDialog snap={snap} refresh={refresh} />
     </div>
   );
 }

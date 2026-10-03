@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import type { Task } from "../types";
+import type { Task, TaskState } from "../types";
+import { nextRunOf } from "./format";
 
-export type SortKey = "order" | "name" | "source" | "destination";
+export type SortKey = "order" | "name" | "nextRun" | "source" | "destination";
 export interface SortState {
   key: SortKey;
   desc: boolean;
@@ -10,6 +11,7 @@ export interface SortState {
 export const SORT_LABEL: Record<SortKey, string> = {
   order: "סדר יצירה",
   name: "שם",
+  nextRun: "הריצה הבאה",
   source: "תיקיית מקור",
   destination: "תיקיית יעד",
 };
@@ -21,9 +23,25 @@ const pathKey = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 /** The folder a task is sorted/grouped by. With several sources, the first one. */
 const folderOf = (t: Task, key: "source" | "destination") => (key === "destination" ? t.destination : (t.sources[0]?.path ?? ""));
 
-export function sortTasks(tasks: Task[], { key, desc }: SortState): Task[] {
+/** Next scheduled run as a timestamp; null = none (manual or disabled). */
+const nextAt = (t: Task, states: Record<string, TaskState>) => {
+  const n = nextRunOf(t, states[t.id]);
+  return n ? new Date(n.at).getTime() : null;
+};
+
+export function sortTasks(tasks: Task[], { key, desc }: SortState, states: Record<string, TaskState>): Task[] {
   const dir = desc ? -1 : 1;
   if (key === "order") return desc ? [...tasks].reverse() : tasks;
+  if (key === "nextRun") {
+    const at = new Map(tasks.map((t) => [t.id, nextAt(t, states)]));
+    // Tasks without a next run always go last, in either direction.
+    return [...tasks].sort((a, b) => {
+      const x = at.get(a.id)!;
+      const y = at.get(b.id)!;
+      if (x === null || y === null) return (x === null ? 1 : 0) - (y === null ? 1 : 0) || collator.compare(a.name, b.name);
+      return dir * (x - y || collator.compare(a.name, b.name));
+    });
+  }
   return [...tasks].sort((a, b) => {
     const primary =
       key === "name" ? collator.compare(a.name, b.name) : collator.compare(pathKey(folderOf(a, key)), pathKey(folderOf(b, key)));
