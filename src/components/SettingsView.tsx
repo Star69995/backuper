@@ -182,8 +182,8 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
 
   return (
     <Card title="עדכוני תוכנה" icon={<RefreshCw size={18} />}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-col gap-0.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-sm font-medium">עדכון אוטומטי</span>
           <span className="text-xs text-muted">
             {mode === "auto"
@@ -194,6 +194,7 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
           </span>
         </div>
         <Segmented
+          className="shrink-0"
           value={mode}
           onChange={(updateMode) => update({ updateMode })}
           options={[

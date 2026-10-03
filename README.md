@@ -66,11 +66,11 @@ npm run app:dev        # Tauri dev (hot reload)
 npm run app:build      # release exe + NSIS installer
 npm run dev            # UI only in a browser, with fake data (src/lib/devMock.ts)
 npm run bump           # version +0.0.1 everywhere (or: npm run bump -- minor / major / 1.2.3)
-npm run release -- notes.md   # signed build + GitHub release with latest.json (--dry = build only)
+npm run release        # signed build + GitHub release with latest.json (notes from commits, asks first; -- notes.md = own notes, --dry = build only)
 cd src-tauri && cargo test   # unit tests + end-to-end tests against real robocopy
 ```
 
-**Releasing**: `npm run bump`, commit and push, then `npm run release -- notes.md`. The script builds with the updater signing key (`TAURI_SIGNING_PRIVATE_KEY`, or `~/.tauri/backuper.key`), writes `latest.json` (version, notes, signature, installer URL) and publishes both with the installer as release `v<version>`. Installed apps read `https://github.com/Star69995/backuper/releases/latest/download/latest.json`. The public key is in `tauri.conf.json` (`plugins.updater.pubkey`); keep the private key backed up - without it, installed copies can't be updated anymore.
+**Releasing**: `npm run bump`, commit and push, then `npm run release` (or the npm scripts button in VS Code). Without a notes file it makes the notes from the commit subjects since the last release (docs/chore left out) and asks before publishing; `npm run release -- notes.md` uses your own notes. The script builds with the updater signing key (`TAURI_SIGNING_PRIVATE_KEY`, or `~/.tauri/backuper.key`), writes `latest.json` (version, notes, signature, installer URL) and publishes both with the installer as release `v<version>`. Installed apps read `https://github.com/Star69995/backuper/releases/latest/download/latest.json`. The public key is in `tauri.conf.json` (`plugins.updater.pubkey`); keep the private key backed up - without it, installed copies can't be updated anymore.
 
 **Website** (`site/`): the landing/download page at https://star69995.github.io/backuper/ - plain static HTML/CSS/JS, no build step. `.github/workflows/pages.yml` deploys it to GitHub Pages on every push to `master` that touches `site/`. The version list and the download buttons are filled in the browser from the GitHub Releases API (`site/app.js`: the `*-setup.exe` asset of each non-draft release, notes, SHA-256), so publishing a release needs no site change. Preview locally with `python -m http.server 5240 --directory site`. Screenshots in `site/img/` are taken from `npm run dev` (the mock data in `src/lib/devMock.ts`) at 1180x740, scale 1.5, WebP; `og.png` is a 1200x630 capture of the page itself.
 
