@@ -5,6 +5,8 @@ Hebrew RTL UI, dark mode, built-in scheduler, runs from the tray and starts with
 
 Backups are **plain files and folders**: no private format, no compression, no encryption. You can open a backup straight in Explorer.
 
+**Download:** https://star69995.github.io/backuper/ (Hebrew download page with screenshots and every version), or the [GitHub releases](https://github.com/Star69995/backuper/releases).
+
 ## How backups work
 
 A task has **one or more source folders**, one destination folder and a schedule. All sources of a task run together and their backup folders share the same date. Each source has its own chain of dated folders in the destination, named after the source folder (editable):
@@ -64,6 +66,8 @@ npm run dev            # UI only in a browser, with fake data (src/lib/devMock.t
 npm run bump           # version +0.0.1 everywhere (or: npm run bump -- minor / major / 1.2.3)
 cd src-tauri && cargo test   # unit tests + end-to-end tests against real robocopy
 ```
+
+**Website** (`site/`): the landing/download page at https://star69995.github.io/backuper/ - plain static HTML/CSS/JS, no build step. `.github/workflows/pages.yml` deploys it to GitHub Pages on every push to `master` that touches `site/`. The version list and the download buttons are filled in the browser from the GitHub Releases API (`site/app.js`: the `*-setup.exe` asset of each non-draft release, notes, SHA-256), so publishing a release needs no site change. Preview locally with `python -m http.server 5240 --directory site`. Screenshots in `site/img/` are taken from `npm run dev` (the mock data in `src/lib/devMock.ts`) at 1180x740, scale 1.5, WebP; `og.png` is a 1200x630 capture of the page itself.
 
 ## Not done yet
 

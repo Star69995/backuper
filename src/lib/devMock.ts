@@ -1,11 +1,32 @@
 // Dev-only: lets the UI run in a plain browser (`npm run dev`) with fake data,
 // for visual checks and screenshots. Never loaded inside the real Tauri app.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { ImportedTask, ImportPreview, Notice, RunRecord, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
+import type { ImportedTask, ImportPreview, Notice, RunRecord, Schedule, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
 import { newTask } from "../types";
 
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
 const src = (path: string, folderName: string) => ({ path, folderName });
+
+/** The next `n` times a schedule fires (or, with `back`, the previous ones), so mock times match the schedules shown. */
+function occurrences(s: Schedule, n: number, back = false): string[] {
+  if (s.kind === "interval") return Array.from({ length: n }, (_, i) => iso((back ? -1 : 1) * (i + 1) * s.minutes));
+  if (!("time" in s)) return [];
+  const [h, m] = s.time.split(":").map(Number);
+  const out: string[] = [];
+  for (let i = 0; out.length < n && i < 400; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() + (back ? -i : i));
+    d.setHours(h, m, 0, 0);
+    const fires =
+      s.kind === "daily" ||
+      (s.kind === "weekly" && s.days.includes(d.getDay())) ||
+      (s.kind === "monthly" && d.getDate() === s.day);
+    if (fires && (back ? d.getTime() < Date.now() : d.getTime() > Date.now())) out.push(d.toISOString());
+  }
+  return out;
+}
+const next = (s: Schedule) => occurrences(s, 1)[0] ?? null;
+const last = (s: Schedule) => occurrences(s, 1, true)[0] ?? null;
 
 export function installDevMock() {
   const tasks: Task[] = [
@@ -58,16 +79,16 @@ export function installDevMock() {
   ];
   const states: Record<string, TaskState> = {
     "1": {
-      nextRun: iso(9 * 60),
-      nextFullRun: iso(2 * 24 * 60),
-      lastRunAt: iso(-15 * 60),
+      nextRun: next(tasks[0].schedule),
+      nextFullRun: next(tasks[0].fullSchedule!),
+      lastRunAt: last(tasks[0].schedule),
       lastStatus: "success",
       lastMessage: "3 תיקיות, 3 הצליחו. הועתקו 132 קבצים",
     },
     "2": {
-      nextRun: iso(3 * 24 * 60),
+      nextRun: next(tasks[1].schedule),
       nextFullRun: null,
-      lastRunAt: iso(-4 * 24 * 60),
+      lastRunAt: last(tasks[1].schedule),
       lastStatus: "warning",
       lastMessage: "נמצאו פריטים לא תואמים",
     },
@@ -159,33 +180,21 @@ export function installDevMock() {
       sources,
     };
   });
+  // The task's last 3 runs as dated folders, oldest one full (all full for a full-only task).
+  const stamp = (at: string) => {
+    const d = new Date(at);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}`;
+  };
   const backupsOf = (t: Task): SourceBackups[] =>
     t.sources.map((s) => ({
       source: s.path,
       folderName: s.folderName,
-      backups: [
-        {
-          name: `${s.folderName} 2026-10-03 03-00 אינקרמנטלי`,
-          path: `E:\\Backups\\${s.folderName} 2026-10-03 03-00 אינקרמנטלי`,
-          createdAt: iso(-1 * 24 * 60),
-          kind: "incremental",
-          partial: false,
-        },
-        {
-          name: `${s.folderName} 2026-10-02 03-00 אינקרמנטלי`,
-          path: `E:\\Backups\\${s.folderName} 2026-10-02 03-00 אינקרמנטלי`,
-          createdAt: iso(-2 * 24 * 60),
-          kind: "incremental",
-          partial: false,
-        },
-        {
-          name: `${s.folderName} 2026-10-01 03-00 מלא`,
-          path: `E:\\Backups\\${s.folderName} 2026-10-01 03-00 מלא`,
-          createdAt: iso(-3 * 24 * 60),
-          kind: "full",
-          partial: false,
-        },
-      ],
+      backups: occurrences(t.schedule, 3, true).map((createdAt, i) => {
+        const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
+        const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
+        return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
+      }),
     }));
 
   // Open with the drive-connected question showing (?prompt in the URL).
@@ -257,11 +266,11 @@ export function installDevMock() {
       case "list_backups":
         return backupsOf(tasks.find((t) => t.id === a.taskId) ?? tasks[0]);
       case "folder_size":
-        return String(a.path).includes("2026-10-03") ? 0 : 12_345_678_901;
+        return String(a.path).endsWith("מלא") ? 12_345_678_901 : 48_200_000;
       case "read_log":
         return "Backuper - גיבוי אינקרמנטלי\nמקור: C:\\Users\\User\\Pictures\n\nהועתק\t1234\tC:\\Users\\User\\Pictures\\a.jpg\n";
       case "preview_schedule":
-        return [iso(60), iso(24 * 60 + 60), iso(48 * 60 + 60)];
+        return occurrences(a.schedule as Schedule, 3);
       case "plugin:dialog|open":
         // The file picker and the restore-from-folder picker get an answer (other folder pickers stay cancelled).
         if ((a.options as { title?: string } | undefined)?.title?.includes("רשימת המשימות")) return "K:\\Backuper";
