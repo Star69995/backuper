@@ -30,6 +30,10 @@ export const api = {
   dismissNotice: () => invoke<void>("dismiss_notice"),
   /** Shows a sample notification with this sound. */
   testSound: (sound: string) => invoke<void>("test_sound", { sound }),
+  /** Checks for a newer version now; true = one is available. */
+  checkUpdates: () => invoke<boolean>("check_updates"),
+  /** Downloads and installs it (the app restarts), right away or once the backups are done. */
+  installUpdate: () => invoke<void>("install_update"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;

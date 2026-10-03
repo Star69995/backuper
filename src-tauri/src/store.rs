@@ -128,6 +128,11 @@ impl Store {
         save(&path, &self.tasks);
     }
 
+    /// Written right before an update's installer runs; read (and removed) by the relaunched app.
+    pub fn after_update_marker(&self) -> PathBuf {
+        self.dir.join("after-update")
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.dir.join("logs")
     }

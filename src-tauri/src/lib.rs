@@ -10,6 +10,7 @@ mod schedule;
 mod store;
 mod tasklist;
 mod tray;
+mod updater;
 
 use crate::core::Core;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
             let store = store::Store::open(app.path().app_data_dir()?);
@@ -53,7 +55,15 @@ pub fn run() {
                 crate::core::toast(&handle, n.title, n.message, &sound);
             }
             core.start();
-            if !std::env::args().any(|a| a == HIDDEN_ARG) {
+            let updates = updater::Updates::new(handle.clone(), core.clone());
+            app.manage(updates.clone());
+            updates.start();
+            // An update installed from the tray restarts into the tray, whatever the original args.
+            let hidden = match updater::after_update(&handle, &core) {
+                Some(hidden) => hidden,
+                None => std::env::args().any(|a| a == HIDDEN_ARG),
+            };
+            if !hidden {
                 SHOW_ON_LOAD.store(true, Ordering::SeqCst);
                 tray::show_main(&handle);
             }
@@ -101,6 +111,8 @@ pub fn run() {
             commands::dismiss_notice,
             commands::answer_drive_prompts,
             commands::test_sound,
+            commands::check_updates,
+            commands::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

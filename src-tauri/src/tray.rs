@@ -65,6 +65,12 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+pub fn set_visible(app: &AppHandle, visible: bool) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_visible(visible);
+    }
+}
+
 /// Syncs the tooltip and the pause checkbox with the current state.
 pub fn refresh(app: &AppHandle) {
     let (Some(core), Some(items), Some(tray)) = (

@@ -139,6 +139,8 @@ pub struct Core {
     queue_cv: Condvar,
     pub current: Mutex<Option<Progress>>,
     cancel: AtomicBool,
+    /// The worker took a job and hasn't finished it yet (set and cleared under the queue lock).
+    working: AtomicBool,
     /// Tasks waiting for the user to answer "the drive was connected - back up now?".
     drive_prompts: Mutex<Vec<String>>,
     engine: Box<dyn CopyEngine>,
@@ -153,6 +155,7 @@ impl Core {
             queue_cv: Condvar::new(),
             current: Mutex::new(None),
             cancel: AtomicBool::new(false),
+            working: AtomicBool::new(false),
             drive_prompts: Mutex::new(Vec::new()),
             engine: Box::new(Robocopy),
             app,
@@ -229,10 +232,24 @@ impl Core {
         self.changed();
     }
 
+    /// Runs `f` only if no backup is running or queued, holding the queue so none can start meanwhile.
+    pub fn when_idle<R>(&self, f: impl FnOnce() -> R) -> Option<R> {
+        let q = self.queue.lock().unwrap();
+        if !q.is_empty() || self.working.load(Ordering::SeqCst) {
+            return None;
+        }
+        let r = f();
+        drop(q);
+        Some(r)
+    }
+
     fn next_job(&self) -> Job {
         let mut q = self.queue.lock().unwrap();
+        // Asking for the next job means the previous one is done.
+        self.working.store(false, Ordering::SeqCst);
         loop {
             if let Some(j) = q.pop_front() {
+                self.working.store(true, Ordering::SeqCst);
                 return j;
             }
             q = self.queue_cv.wait(q).unwrap();

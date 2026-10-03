@@ -1,4 +1,4 @@
-import { CircleHelp, HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
+import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { api } from "./api";
 import DrivePromptDialog from "./components/DrivePromptDialog";
@@ -27,6 +27,9 @@ export default function App() {
 
   const paused = snap.settings.schedulerPaused;
   const togglePause = () => api.saveSettings({ ...snap.settings, schedulerPaused: !paused }).then(refresh);
+
+  const u = snap.update;
+  const updateFound = u.version !== null && ["available", "downloading", "ready"].includes(u.state);
 
   const nav: { id: View; label: string; icon: ReactNode }[] = [
     { id: "tasks", label: "משימות", icon: <ListChecks size={18} /> },
@@ -63,7 +66,21 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="md:mt-auto">
+        <div className="flex gap-1 md:mt-auto md:flex-col">
+          {updateFound && (
+            <button
+              type="button"
+              onClick={() => setView("settings")}
+              title={`גרסה ${u.version} זמינה - לפרטים ולעדכון`}
+              className="flex w-full items-center gap-2 rounded-lg border border-accent/40 bg-accent-soft px-2.5 py-2 text-start text-[13px] text-accent transition-colors hover:bg-hover"
+            >
+              <Download size={16} />
+              <span className="hidden flex-col leading-tight md:flex">
+                <span className="font-medium">גרסה {u.version} זמינה</span>
+                <span className="text-xs">{u.installWaiting ? "תותקן בסיום הגיבוי" : "לחצו לעדכון"}</span>
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={togglePause}

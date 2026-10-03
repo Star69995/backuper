@@ -12,6 +12,7 @@ use tauri::State;
 use tauri_plugin_autostart::ManagerExt;
 
 type CoreState<'a> = State<'a, Arc<Core>>;
+type UpdatesState<'a> = State<'a, Arc<crate::updater::Updates>>;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,10 +26,11 @@ pub struct Snapshot {
     /// Tasks whose drive was connected, waiting for the user to say whether to back up.
     drive_prompts: Vec<String>,
     notice: Option<Notice>,
+    update: crate::model::UpdateStatus,
 }
 
 #[tauri::command]
-pub fn get_snapshot(core: CoreState, app: tauri::AppHandle) -> Snapshot {
+pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandle) -> Snapshot {
     let s = core.store.lock().unwrap();
     Snapshot {
         tasks: s.tasks.clone(),
@@ -38,6 +40,7 @@ pub fn get_snapshot(core: CoreState, app: tauri::AppHandle) -> Snapshot {
         settings: s.settings.clone(),
         drive_prompts: core.drive_prompts(),
         notice: s.notice.clone(),
+        update: updates.status(),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -414,4 +417,16 @@ pub fn test_sound(app: tauri::AppHandle, sound: String) {
 pub fn dismiss_notice(core: CoreState) {
     core.store.lock().unwrap().notice = None;
     core.changed();
+}
+
+/// Checks GitHub for a newer version now. Returns whether one is available.
+#[tauri::command]
+pub async fn check_updates(updates: UpdatesState<'_>) -> Result<bool, String> {
+    updates.check().await
+}
+
+/// Downloads and installs the newer version (the app restarts); waits for running backups first.
+#[tauri::command]
+pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
+    updates.install_now().await
 }

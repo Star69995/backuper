@@ -1,6 +1,6 @@
 [package]
 name = "backuper"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "GPL-3.0-only"
 
@@ -20,6 +20,7 @@ tauri-plugin-autostart = "2.7.0"
 tauri-plugin-dialog = "2.8.1"
 tauri-plugin-notification = "2.5.1"
 tauri-plugin-single-instance = "2.5.2"
+tauri-plugin-updater = "2"
 uuid = { version = "1.26.1", features = ["v4"] }
 
 [profile.release]

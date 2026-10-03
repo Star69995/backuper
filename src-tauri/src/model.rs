@@ -327,6 +327,8 @@ pub struct Settings {
     pub global_filters: Vec<FilterRule>,
     /// Folder that always holds a copy of the task list (e.g. on the backup drive). Empty = off.
     pub task_list_copy_dir: String,
+    /// "auto" (download, install when idle and in the tray) | "notify" | "off".
+    pub update_mode: String,
 }
 
 /// A message for the user that waits in the UI until dismissed (e.g. the task list was recovered).
@@ -352,8 +354,28 @@ impl Default for Settings {
             start_with_windows: true,
             global_filters: Vec::new(),
             task_list_copy_dir: String::new(),
+            update_mode: "auto".into(),
         }
     }
+}
+
+/// Where the app's self-update stands (not persisted).
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    pub current_version: String,
+    /// "idle" | "checking" | "upToDate" | "available" | "downloading" | "ready" | "error"
+    pub state: String,
+    /// The newer version, once one was found.
+    pub version: Option<String>,
+    /// Its release notes.
+    pub notes: Option<String>,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub checked_at: Option<DateTime<Local>>,
+    pub error: Option<String>,
+    /// The user asked to install; it waits for the running/queued backups to finish.
+    pub install_waiting: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]

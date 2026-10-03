@@ -1,8 +1,7 @@
-import { getVersion } from "@tauri-apps/api/app";
-import { Bell, Download, Filter, FolderSearch, History, Import, Monitor, Moon, Power, RotateCcw, Sun, Volume2 } from "lucide-react";
+import { Bell, Download, Filter, FolderSearch, History, Import, Monitor, Moon, Power, RefreshCw, RotateCcw, Sun, Volume2 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
-import { fmtRelative, fmtSmart } from "../lib/format";
+import { fmtBytes, fmtRelative, fmtSmart } from "../lib/format";
 import type { Settings, Snapshot, TaskSnapshot } from "../types";
 import { useFeedback } from "./feedback";
 import FilterRulesEditor from "./FilterRulesEditor";
@@ -24,11 +23,6 @@ function Card({ title, icon, children }: { title: string; icon: ReactNode; child
 
 export default function SettingsView({ snap, refresh }: { snap: Snapshot; refresh: () => void }) {
   const { toast } = useFeedback();
-  const [version, setVersion] = useState("");
-  useEffect(() => {
-    getVersion().then(setVersion);
-  }, []);
-
   const s = snap.settings;
   const update = (patch: Partial<Settings>) =>
     api
@@ -136,8 +130,104 @@ export default function SettingsView({ snap, refresh }: { snap: Snapshot; refres
         </p>
       </Card>
 
-      <p className="text-center text-xs text-muted">Backuper {version} - מנוע העתקה: robocopy</p>
+      <UpdatesCard snap={snap} update={update} />
+
+      <p className="text-center text-xs text-muted">Backuper {snap.update.currentVersion} - מנוע העתקה: robocopy</p>
     </div>
+  );
+}
+
+/** Update mode, where the self-update stands, and check/install buttons. */
+function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial<Settings>) => Promise<void> }) {
+  const { toast } = useFeedback();
+  const u = snap.update;
+  const mode = snap.settings.updateMode;
+  const busy = u.state === "checking" || u.state === "downloading";
+  const found = u.version !== null && (u.state === "available" || u.state === "ready" || u.state === "downloading");
+
+  const check = () =>
+    api
+      .checkUpdates()
+      .then((available) => {
+        if (!available) toast({ tone: "ok", title: "זו הגרסה האחרונה", message: `Backuper ${u.currentVersion}` });
+      })
+      .catch((e) => toast({ tone: "bad", title: "הבדיקה נכשלה", message: errorText(e) }));
+  const install = () =>
+    api.installUpdate().catch((e) => toast({ tone: "bad", title: "העדכון נכשל", message: errorText(e) }));
+
+  let status: ReactNode;
+  if (u.installWaiting) status = "העדכון יותקן מיד כשהגיבוי הנוכחי (והגיבויים שבתור) יסתיימו.";
+  else if (u.state === "checking") status = "בודק אם יש גרסה חדשה...";
+  else if (u.state === "downloading")
+    status = (
+      <>
+        מוריד את גרסה {u.version}... <bdi dir="ltr">{fmtBytes(u.downloaded)}</bdi>
+        {u.total ? (
+          <>
+            {" "}
+            מתוך <bdi dir="ltr">{fmtBytes(u.total)}</bdi>
+          </>
+        ) : null}
+      </>
+    );
+  else if (u.state === "ready")
+    status =
+      mode === "auto"
+        ? `גרסה ${u.version} הורדה ותותקן מעצמה כשהחלון סגור (באזור ההודעות) ואין גיבוי פעיל. אפשר גם לעדכן עכשיו.`
+        : `גרסה ${u.version} הורדה ומוכנה להתקנה.`;
+  else if (u.state === "available") status = `גרסה ${u.version} זמינה.`;
+  else if (u.state === "upToDate") status = `זו הגרסה האחרונה. נבדק ${fmtRelative(u.checkedAt)}.`;
+  else if (u.state === "error") status = <span className="text-bad">{u.error}</span>;
+  else status = mode === "off" ? "הבדיקה האוטומטית כבויה." : "הבדיקה הראשונה תתבצע דקה אחרי שהתוכנה עלתה.";
+
+  return (
+    <Card title="עדכוני תוכנה" icon={<RefreshCw size={18} />}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium">עדכון אוטומטי</span>
+          <span className="text-xs text-muted">
+            {mode === "auto"
+              ? "גרסה חדשה מורדת ומותקנת מעצמה, רק כשהחלון סגור ואין גיבוי פעיל. התוכנה עולה מחדש מיד אחרי ההתקנה."
+              : mode === "notify"
+                ? "כשיש גרסה חדשה תופיע התראה, וההתקנה רק בלחיצה על \"עדכון עכשיו\"."
+                : "לא נבדק אם יש גרסה חדשה. אפשר לבדוק ידנית."}
+          </span>
+        </div>
+        <Segmented
+          value={mode}
+          onChange={(updateMode) => update({ updateMode })}
+          options={[
+            { value: "auto", label: "אוטומטי" },
+            { value: "notify", label: "רק להודיע" },
+            { value: "off", label: "כבוי" },
+          ]}
+        />
+      </div>
+      <div className="flex flex-col gap-2 rounded-lg border border-line bg-panel2 px-3 py-2.5 text-[13px]">
+        <span>
+          הגרסה המותקנת: <bdi dir="ltr">{u.currentVersion}</bdi>
+        </span>
+        <span className="text-muted">{status}</span>
+        {found && u.notes && (
+          <details className="text-muted">
+            <summary className="cursor-pointer text-fg">מה חדש בגרסה {u.version}</summary>
+            <p dir="auto" className="mt-1.5 whitespace-pre-line">
+              {u.notes}
+            </p>
+          </details>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {found && !u.installWaiting && (
+          <Button variant="primary" icon={<Download size={16} />} disabled={busy} onClick={install}>
+            עדכון עכשיו
+          </Button>
+        )}
+        <Button icon={<RefreshCw size={16} />} disabled={busy || u.installWaiting} onClick={check}>
+          בדיקת עדכונים
+        </Button>
+      </div>
+    </Card>
   );
 }
 

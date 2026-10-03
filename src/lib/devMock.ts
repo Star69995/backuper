@@ -1,7 +1,7 @@
 // Dev-only: lets the UI run in a plain browser (`npm run dev`) with fake data,
 // for visual checks and screenshots. Never loaded inside the real Tauri app.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { ImportedTask, ImportPreview, Notice, RunRecord, Schedule, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState } from "../types";
+import type { ImportedTask, ImportPreview, Notice, RunRecord, Schedule, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState, UpdateStatus } from "../types";
 import { newTask } from "../types";
 
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
@@ -106,7 +106,22 @@ export function installDevMock() {
     startWithWindows: true,
     taskListCopyDir: "",
     globalFilters: [{ kind: "pattern", value: "~$*" }],
+    updateMode: "auto",
   };
+  // Open with a newer version available (?update in the URL).
+  const update: UpdateStatus = new URLSearchParams(location.search).has("update")
+    ? {
+        currentVersion: "0.3.4",
+        state: "available",
+        version: "0.4.0",
+        notes: "- Self-update from GitHub releases\n- Small fixes",
+        downloaded: 0,
+        total: null,
+        checkedAt: iso(-3),
+        error: null,
+        installWaiting: false,
+      }
+    : { currentVersion: "0.3.4", state: "upToDate", version: null, notes: null, downloaded: 0, total: null, checkedAt: iso(-90), error: null, installWaiting: false };
   const sourceRun = (folderName: string, source: string, i: number): SourceRun => ({
     source,
     folderName,
@@ -196,7 +211,6 @@ export function installDevMock() {
         return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
       }),
     }));
-
   // Open with the drive-connected question showing (?prompt in the URL).
   let drivePrompts = new URLSearchParams(location.search).has("prompt") ? ["1", "2"] : [];
   // Open with the "task list recovered" notice (?notice in the URL).
@@ -216,6 +230,7 @@ export function installDevMock() {
     autostart: true,
     drivePrompts,
     notice,
+    update,
     queue: [{ taskId: "3", mode: null, trigger: "manual" }],
     current: {
       runId: "run",
@@ -292,6 +307,12 @@ export function installDevMock() {
         }));
       case "answer_drive_prompts":
         drivePrompts = drivePrompts.filter((id) => !(a.ids as string[]).includes(id));
+        return null;
+      case "check_updates":
+        update.checkedAt = new Date().toISOString();
+        return update.version !== null;
+      case "install_update":
+        update.installWaiting = true;
         return null;
       case "run_tasks":
         return (a.ids as string[]).length;

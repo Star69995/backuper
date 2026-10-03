@@ -108,6 +108,23 @@ export interface Settings {
   /** Folder that also gets the task list snapshots (in a hidden subfolder). Empty = off. */
   taskListCopyDir: string;
   globalFilters: FilterRule[];
+  /** auto = download and install by itself (from the tray, between backups); notify = only say so. */
+  updateMode: "auto" | "notify" | "off";
+}
+
+/** Where the app's self-update stands. */
+export interface UpdateStatus {
+  currentVersion: string;
+  state: "idle" | "checking" | "upToDate" | "available" | "downloading" | "ready" | "error";
+  /** The newer version, once one was found. */
+  version: string | null;
+  notes: string | null;
+  downloaded: number;
+  total: number | null;
+  checkedAt: string | null;
+  error: string | null;
+  /** The user asked to install; it waits for the running/queued backups to finish. */
+  installWaiting: boolean;
 }
 
 export interface Snapshot {
@@ -121,6 +138,7 @@ export interface Snapshot {
   drivePrompts: string[];
   /** Shown until dismissed (e.g. the task list was recovered from a backup). */
   notice: Notice | null;
+  update: UpdateStatus;
 }
 
 export interface Notice {
