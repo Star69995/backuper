@@ -28,6 +28,8 @@ static SHOW_ON_LOAD: AtomicBool = AtomicBool::new(false);
 
 /// Lays the native title bar out right-to-left (icon and title on the right, buttons on the
 /// left), as on Hebrew Windows. NOINHERITLAYOUT keeps the webview child windows unmirrored.
+/// tao rewrites the extended style whenever the window is shown/hidden/maximized, so a
+/// subclass puts the two bits back into every extended-style change.
 fn mirror_title_bar(window: &tauri::WebviewWindow) {
     #[link(name = "user32")]
     extern "system" {
@@ -35,16 +37,36 @@ fn mirror_title_bar(window: &tauri::WebviewWindow) {
         fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
         fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     }
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn SetWindowSubclass(hwnd: isize, proc: SubclassProc, id: usize, data: usize) -> i32;
+        fn DefSubclassProc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+    }
+    type SubclassProc = unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize;
+    #[repr(C)]
+    struct StyleStruct {
+        old: u32,
+        new: u32,
+    }
     const GWL_EXSTYLE: i32 = -20;
-    const WS_EX_LAYOUTRTL: isize = 0x0040_0000;
-    const WS_EX_NOINHERITLAYOUT: isize = 0x0010_0000;
+    const WM_STYLECHANGING: u32 = 0x007C;
+    const RTL: u32 = 0x0040_0000 | 0x0010_0000; // WS_EX_LAYOUTRTL | WS_EX_NOINHERITLAYOUT
     // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
     const FLAGS: u32 = 0x1 | 0x2 | 0x4 | 0x10 | 0x20;
+
+    unsafe extern "system" fn keep_rtl(hwnd: isize, msg: u32, wparam: usize, lparam: isize, _: usize, _: usize) -> isize {
+        if msg == WM_STYLECHANGING && wparam as i32 == GWL_EXSTYLE {
+            (*(lparam as *mut StyleStruct)).new |= RTL;
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
     let Ok(hwnd) = window.hwnd() else { return };
     let hwnd = hwnd.0 as isize;
     unsafe {
+        SetWindowSubclass(hwnd, keep_rtl, 1, 0);
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYOUTRTL | WS_EX_NOINHERITLAYOUT);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | RTL as isize);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0, FLAGS);
     }
 }
