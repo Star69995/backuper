@@ -9,21 +9,21 @@
 //! chains outside the task's retention (KeepMode) are deleted, and so are empty incremental folders.
 
 use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters, ListedFile, Outcome};
+use crate::manifest;
 use crate::model::{BackupFolder, BackupMode, KeepMode, RunStatus, Source, SourceBackups, SourceRun, Task};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
 
 const DATE_FMT: &str = "%Y-%m-%d %H-%M";
 const DATE_FMT_SECS: &str = "%Y-%m-%d %H-%M-%S";
 const PARTIAL: &str = ".partial";
 const FULL_TAG: &str = "מלא";
 const INCREMENTAL_TAG: &str = "אינקרמנטלי";
-/// Same tolerance robocopy uses with /FFT (FAT/exFAT store times in 2-second steps).
-const MTIME_TOLERANCE_SECS: u64 = 2;
+/// Same tolerance robocopy uses with /FFT (FAT/exFAT store times in 2-second steps), in FILETIME ticks.
+const MTIME_TOLERANCE: u64 = 2 * 10_000_000;
 
 /// Characters Windows forbids in file names.
 pub fn sanitize_folder_name(name: &str) -> String {
@@ -240,13 +240,25 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-fn has_files(path: &Path) -> bool {
-    let Ok(rd) = fs::read_dir(path) else { return false };
-    rd.flatten().any(|e| match e.file_type() {
-        Ok(t) if t.is_dir() => has_files(&e.path()),
-        Ok(_) => true,
-        Err(_) => false,
-    })
+/// Whether a backup folder holds any file (its index file doesn't count).
+fn has_files(folder: &Path) -> bool {
+    fn any_file(dir: &Path, root: bool) -> bool {
+        let Ok(rd) = fs::read_dir(dir) else { return false };
+        rd.flatten().any(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => any_file(&e.path(), false),
+            Ok(_) => !(root && e.file_name().eq_ignore_ascii_case(manifest::FILE_NAME)),
+            Err(_) => false,
+        })
+    }
+    any_file(folder, true)
+}
+
+/// Size of a backup's files, from its index when it has one (no walk of the destination).
+fn backup_size(folder: &Path) -> u64 {
+    match manifest::read(folder) {
+        Some(files) => files.iter().map(|f| f.size).sum(),
+        None => dir_size(folder),
+    }
 }
 
 /// Which complete full backups (and so which chains) `prune` keeps, besides the protected one.
@@ -305,7 +317,7 @@ fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_emp
             continue;
         }
         let empty = b.kind == BackupMode::Incremental && !has_files(Path::new(&b.path));
-        let size = if empty { 0 } else { dir_size(Path::new(&b.path)) };
+        let size = if empty { 0 } else { backup_size(Path::new(&b.path)) };
         match fs::remove_dir_all(&b.path) {
             Ok(()) if empty => removed_empty += 1,
             Ok(()) => {
@@ -334,23 +346,8 @@ fn effective_mode(backups: &[BackupFolder], requested: BackupMode) -> (BackupMod
 }
 
 /// What is already backed up: rel path (lowercase) -> (size, modified), from the latest complete
-/// full backup overlaid with every incremental after it.
-fn chain_index(backups: &[BackupFolder]) -> HashMap<String, (u64, SystemTime)> {
-    fn walk(root: &Path, dir: &Path, out: &mut HashMap<String, (u64, SystemTime)>) {
-        let Ok(rd) = fs::read_dir(dir) else { return };
-        for e in rd.flatten() {
-            let Ok(ft) = e.file_type() else { continue };
-            let p = e.path();
-            if ft.is_dir() {
-                walk(root, &p, out);
-            } else if let (Ok(m), Ok(rel)) = (e.metadata(), p.strip_prefix(root)) {
-                out.insert(
-                    rel.to_string_lossy().to_lowercase(),
-                    (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
-                );
-            }
-        }
-    }
+/// full backup overlaid with every incremental after it, read from each folder's index file.
+fn chain_index(backups: &[BackupFolder]) -> HashMap<String, (u64, u64)> {
     let mut index = HashMap::new();
     let Some(base) = backups.iter().find(|b| b.kind == BackupMode::Full && !b.partial) else {
         return index;
@@ -362,27 +359,19 @@ fn chain_index(backups: &[BackupFolder]) -> HashMap<String, (u64, SystemTime)> {
     chain.push(base);
     chain.reverse(); // oldest first, so newer copies override
     for b in chain {
-        let root = Path::new(&b.path);
-        walk(root, root, &mut index);
+        for f in manifest::load_or_build(Path::new(&b.path)) {
+            index.insert(f.rel.to_lowercase(), (f.size, f.modified));
+        }
     }
     index
 }
 
-fn changed_since(source: &Path, listed: Vec<ListedFile>, index: &HashMap<String, (u64, SystemTime)>) -> Vec<ListedFile> {
+fn changed_since(listed: Vec<ListedFile>, index: &HashMap<String, (u64, u64)>) -> Vec<ListedFile> {
     listed
         .into_iter()
-        .filter(|f| {
-            let Some((size, mtime)) = index.get(&f.rel.to_lowercase()) else {
-                return true;
-            };
-            if *size != f.size {
-                return true;
-            }
-            let Ok(src_mtime) = fs::metadata(source.join(&f.rel)).and_then(|m| m.modified()) else {
-                return true;
-            };
-            let diff = src_mtime.duration_since(*mtime).or_else(|_| mtime.duration_since(src_mtime));
-            diff.map(|d| d.as_secs() > MTIME_TOLERANCE_SECS).unwrap_or(true)
+        .filter(|f| match index.get(&f.rel.to_lowercase()) {
+            None => true,
+            Some(&(size, modified)) => size != f.size || modified.abs_diff(f.modified) > MTIME_TOLERANCE,
         })
         .collect()
 }
@@ -473,6 +462,7 @@ pub fn backup_source(
                 && ctx.filters.include_files.is_empty()
                 && latest_full.is_some_and(|prev| match rename_retry(Path::new(&prev.path), &work) {
                     Ok(()) => {
+                        manifest::remove(&work);
                         notes.push(format!("הגיבוי המלא הקודם ({}) עודכן למצב הנוכחי", prev.name));
                         true
                     }
@@ -516,26 +506,43 @@ pub fn backup_source(
         }
         BackupMode::Incremental => {
             on_event(EngineEvent::Phase("scanning"));
-            let listed = match ctx
-                .engine
-                .list_files(&source, ctx.filters, &log_file.with_extension("scan.log"), ctx.cancel)
-            {
+            let listing = match native::list_files(&source, ctx.filters, ctx.cancel) {
                 Ok(Some(l)) => l,
                 Ok(None) => {
                     run.status = Some(RunStatus::Cancelled);
                     run.message = "הגיבוי בוטל על ידי המשתמש".into();
                     return run;
                 }
-                Err(e) => return fail(run, e),
+                Err(e) => {
+                    return fail(
+                        run,
+                        format!("לא ניתן לסרוק את תיקיית המקור: {e}. ודאו שהכונן מחובר ושיש הרשאה לקרוא את התיקייה, והריצו את הגיבוי שוב."),
+                    )
+                }
             };
-            let changed = changed_since(&source, listed, &chain_index(&backups));
+            let changed = changed_since(listing.files, &chain_index(&backups));
             if let Err(e) = fs::create_dir_all(&work) {
                 return fail(
                     run,
                     format!("לא ניתן ליצור את תיקיית הגיבוי: {e}. ודאו שכונן היעד מחובר, שיש בו מקום ושיש הרשאה לכתוב אליו."),
                 );
             }
-            native::copy_files(&source, &work, &changed, &log_file, ctx.cancel, &mut |e| on_event(e))
+            let mut result = native::copy_files(&source, &work, &changed, &log_file, ctx.cancel, &mut |e| on_event(e));
+            // Unreadable folders in the source: their files weren't backed up.
+            if listing.failed_dirs > 0 {
+                notes.push(match listing.failed_dirs {
+                    1 => "תיקייה אחת במקור לא נסרקה והקבצים שבה לא גובו (פירוט ברשימת השגיאות)".to_string(),
+                    n => format!("{n} תיקיות במקור לא נסרקו והקבצים שבהן לא גובו (פירוט ברשימת השגיאות)"),
+                });
+                let mut errors = listing.errors;
+                errors.append(&mut result.stats.errors);
+                errors.truncate(50);
+                result.stats.errors = errors;
+                if result.outcome == Outcome::Success {
+                    result.outcome = Outcome::Warning;
+                }
+            }
+            result
         }
     };
 
@@ -551,7 +558,11 @@ pub fn backup_source(
         match rename_retry(&work, &final_path) {
             Ok(()) => {
                 run.target_folder = Some(final_path.to_string_lossy().to_string());
-                run.backup_bytes = dir_size(&final_path);
+                let (files, complete) = manifest::scan(&final_path);
+                run.backup_bytes = files.iter().map(|f| f.size).sum();
+                if complete {
+                    manifest::write(&final_path, &files);
+                }
                 // Only a completed full removes older backups (unless the user chose delete-before).
                 // Keeping by days also lets an incremental remove chains that have expired since.
                 if mode == BackupMode::Full || task.keep_mode == KeepMode::Days {
@@ -984,7 +995,60 @@ mod tests {
         fs::write(src.join("c.txt"), "c").unwrap();
         let r = env.run(&t, BackupMode::Full, "2026-10-02 03:00");
         assert_eq!(r[0].files_copied, 1, "only the difference is copied: {r:?}");
+        assert_eq!(r[0].files_deleted, 0, "the old index file isn't reported as a deleted file");
         assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03-00 מלא"]);
+        let index = manifest::read(&dst.join("Src 2026-10-02 03-00 מלא")).unwrap();
+        assert_eq!(index.len(), 2, "the reused folder gets a fresh index");
+    }
+
+    #[test]
+    fn incrementals_use_the_backup_index() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join("sub").join("b.txt"), "b").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        assert_eq!(r[0].backup_bytes, 2, "the index file isn't counted");
+        let full = dst.join("Src 2026-10-01 03-00 מלא");
+        let mut index: Vec<String> = manifest::read(&full).unwrap().into_iter().map(|f| f.rel).collect();
+        index.sort();
+        assert_eq!(index, ["a.txt", "sub\\b.txt"]);
+
+        // A folder without an index (older version) is walked, and gets one.
+        fs::remove_file(full.join(manifest::FILE_NAME)).unwrap();
+        fs::write(src.join("c.txt"), "c").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].files_copied, 1, "{r:?}");
+        assert!(manifest::read(&full).is_some());
+        let inc = dst.join("Src 2026-10-02 03-00 אינקרמנטלי");
+        assert_eq!(manifest::read(&inc).unwrap().len(), 1);
+
+        // A cut-off index doesn't count.
+        let path = full.join(manifest::FILE_NAME);
+        let text = fs::read_to_string(&path).unwrap();
+        crate::tasklist::set_attributes(&path, crate::tasklist::NORMAL);
+        fs::write(&path, &text[..text.len() - 8]).unwrap();
+        assert!(manifest::read(&full).is_none());
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-03 03:00");
+        assert_eq!(r[0].files_copied, 0, "{r:?}");
+        assert!(manifest::read(&full).is_some(), "rebuilt");
+    }
+
+    /// A source file that happens to have the index file's name is backed up as is.
+    #[test]
+    fn source_file_named_like_the_index_is_kept() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join(manifest::FILE_NAME), "user data").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        let full = dst.join("Src 2026-10-01 03-00 מלא");
+        assert_eq!(fs::read_to_string(full.join(manifest::FILE_NAME)).unwrap(), "user data");
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! robocopy-backed engine. Progress is read by tailing robocopy's UTF-16 log (/UNILOG),
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
-use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome};
+use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
 use std::ffi::OsString;
 use std::fs::File;
@@ -14,8 +14,6 @@ use std::time::Duration;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_ERRORS: usize = 50;
-/// Folders that are never worth backing up (relevant when the source is a drive root).
-const ALWAYS_EXCLUDED_DIRS: [&str; 2] = ["$RECYCLE.BIN", "System Volume Information"];
 
 pub struct Robocopy;
 
@@ -33,8 +31,6 @@ fn arg_path(p: &Path) -> OsString {
 struct Args<'a> {
     source: &'a Path,
     target: &'a Path,
-    /// false = plain recursive copy/list (no purge).
-    mirror: bool,
     copy_empty_dirs: bool,
     filters: &'a Filters,
     list_only: bool,
@@ -50,12 +46,7 @@ fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
             .filter(|s| !s.trim().is_empty())
             .map(|s| OsString::from(s.trim())),
     );
-    let flags: &[&str] = match (x.mirror, x.copy_empty_dirs) {
-        (true, true) => &["/MIR"],
-        (true, false) => &["/S", "/PURGE"],
-        (false, true) => &["/E"],
-        (false, false) => &["/S"],
-    };
+    let flags: &[&str] = if x.copy_empty_dirs { &["/MIR"] } else { &["/S", "/PURGE"] };
     a.extend(flags.iter().map(OsString::from));
     for f in [
         "/COPY:DAT",
@@ -272,7 +263,6 @@ fn mirror_args(job: &CopyJob, list_only: bool) -> Args<'_> {
     Args {
         source: &job.source,
         target: &job.target,
-        mirror: true,
         copy_empty_dirs: job.copy_empty_dirs,
         filters: &job.filters,
         list_only,
@@ -280,44 +270,6 @@ fn mirror_args(job: &CopyJob, list_only: bool) -> Args<'_> {
 }
 
 impl CopyEngine for Robocopy {
-    fn list_files(
-        &self,
-        source: &Path,
-        filters: &Filters,
-        log_file: &Path,
-        cancel: &AtomicBool,
-    ) -> Result<Option<Vec<ListedFile>>, String> {
-        // Listing against a target that doesn't exist reports every file that passes the filters.
-        let nowhere = std::env::temp_dir().join(format!("backuper-list-{}", uuid::Uuid::new_v4()));
-        let args = Args {
-            source,
-            target: &nowhere,
-            mirror: false,
-            copy_empty_dirs: false,
-            filters,
-            list_only: true,
-        };
-        let root = arg_path(source).to_string_lossy().trim_end_matches('\\').to_string() + "\\";
-        let mut files = Vec::new();
-        let code = run_process(&build_args(&args, log_file), log_file, cancel, &mut |l| {
-            if let Line::Copy { size, path } = classify(l) {
-                let under_root = path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
-                if under_root {
-                    files.push(ListedFile {
-                        rel: path[root.len()..].to_string(),
-                        size,
-                    });
-                }
-            }
-        });
-        let _ = std::fs::remove_file(log_file);
-        match code? {
-            None => Ok(None),
-            Some(c) if c >= 8 => Err("לא ניתן לסרוק את תיקיית המקור".into()),
-            Some(_) => Ok(Some(files)),
-        }
-    }
-
     fn mirror(&self, job: &CopyJob, cancel: &AtomicBool, on_event: &mut dyn FnMut(EngineEvent)) -> CopyResult {
         let fail = |message: String| CopyResult {
             outcome: Outcome::Failed,

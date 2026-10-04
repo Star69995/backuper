@@ -5,6 +5,7 @@ mod core;
 mod drives;
 mod engine;
 mod filters;
+mod manifest;
 mod model;
 mod schedule;
 mod store;
@@ -24,6 +25,29 @@ const HIDDEN_ARG: &str = "--hidden";
 
 /// Whether the main window still has to be shown once its page has loaded (normal, non-tray start).
 static SHOW_ON_LOAD: AtomicBool = AtomicBool::new(false);
+
+/// Lays the native title bar out right-to-left (icon and title on the right, buttons on the
+/// left), as on Hebrew Windows. NOINHERITLAYOUT keeps the webview child windows unmirrored.
+fn mirror_title_bar(window: &tauri::WebviewWindow) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_LAYOUTRTL: isize = 0x0040_0000;
+    const WS_EX_NOINHERITLAYOUT: isize = 0x0010_0000;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+    const FLAGS: u32 = 0x1 | 0x2 | 0x4 | 0x10 | 0x20;
+    let Ok(hwnd) = window.hwnd() else { return };
+    let hwnd = hwnd.0 as isize;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYOUTRTL | WS_EX_NOINHERITLAYOUT);
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0, FLAGS);
+    }
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -45,6 +69,9 @@ pub fn run() {
             let start_with_windows = core.store.lock().unwrap().settings.start_with_windows;
             let _ = commands::apply_autostart(&handle, start_with_windows);
 
+            if let Some(w) = app.get_webview_window("main") {
+                mirror_title_bar(&w);
+            }
             tray::create(&handle)?;
             // Started hidden, the window may stay closed for a while; the notice waits there too.
             let notice = {

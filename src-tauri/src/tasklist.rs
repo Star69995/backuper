@@ -18,11 +18,11 @@ pub const COPY_DIR_NAME: &str = "Backuper - גיבויי רשימת משימות
 pub const OLD_COPY_FILE_NAME: &str = "Backuper - רשימת משימות.json";
 
 const READONLY: u32 = 0x1;
-const HIDDEN: u32 = 0x2;
+pub(crate) const HIDDEN: u32 = 0x2;
 const SYSTEM: u32 = 0x4;
-const NORMAL: u32 = 0x80;
+pub(crate) const NORMAL: u32 = 0x80;
 
-fn set_attributes(path: &Path, attrs: u32) -> bool {
+pub(crate) fn set_attributes(path: &Path, attrs: u32) -> bool {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     extern "system" {

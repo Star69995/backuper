@@ -1,11 +1,11 @@
-//! Copy engine abstraction. The backup logic only talks to `CopyEngine`, so robocopy
-//! can be swapped for another implementation later.
+//! Copy engine abstraction. Full backups go through `CopyEngine`, so robocopy can be swapped
+//! for another implementation later. Incrementals use `native` (list the source, copy the changes).
 
 pub mod native;
 pub mod robocopy;
 
 use crate::model::FileError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 /// Make `target` identical to `source` (a full backup).
@@ -17,6 +17,9 @@ pub struct CopyJob {
     /// Where the engine writes its detailed log (kept for the run log viewer).
     pub log_file: PathBuf,
 }
+
+/// Folders that are never worth backing up (relevant when the source is a drive root).
+pub const ALWAYS_EXCLUDED_DIRS: [&str; 2] = ["$RECYCLE.BIN", "System Volume Information"];
 
 /// Filters in engine terms (compiled from the user's filter rules).
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -35,12 +38,14 @@ pub struct Filters {
     pub exclude_system: bool,
 }
 
-/// A source file that passes the filters.
+/// A file under some root (a source that passed the filters, or a file in a backup folder).
 #[derive(Debug, Clone)]
 pub struct ListedFile {
-    /// Path relative to the source root.
+    /// Path relative to the root.
     pub rel: String,
     pub size: u64,
+    /// Last modified, as a Windows FILETIME (100ns ticks since 1601, UTC).
+    pub modified: u64,
 }
 
 pub enum EngineEvent {
@@ -82,13 +87,4 @@ pub struct CopyResult {
 pub trait CopyEngine: Send + Sync {
     /// Mirror source into target.
     fn mirror(&self, job: &CopyJob, cancel: &AtomicBool, on_event: &mut dyn FnMut(EngineEvent)) -> CopyResult;
-
-    /// Every file under `source` that passes `filters`. Ok(None) = cancelled.
-    fn list_files(
-        &self,
-        source: &Path,
-        filters: &Filters,
-        log_file: &Path,
-        cancel: &AtomicBool,
-    ) -> Result<Option<Vec<ListedFile>>, String>;
 }
