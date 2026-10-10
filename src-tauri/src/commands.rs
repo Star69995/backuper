@@ -327,7 +327,7 @@ pub struct ImportedTask {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
-    /// "backuper" (export / snapshot / tasks.json) | "cobian"
+    /// "backuper" (export / snapshot / tasks.json) | "simple" (copy_sources JSON) | "cobian"
     source: &'static str,
     tasks: Vec<ImportedTask>,
 }
@@ -347,7 +347,10 @@ pub fn import_tasks(core: CoreState, path: String) -> Result<ImportPreview, Stri
                 })
                 .collect(),
         ),
-        None => ("cobian", crate::cobian::parse_file(&bytes)?),
+        None => match crate::simpleconfig::parse(&bytes)? {
+            Some(i) => ("simple", vec![i]),
+            None => ("cobian", crate::cobian::parse_file(&bytes)?),
+        },
     };
     let existing = core.store.lock().unwrap().tasks.clone();
     let tasks = imported

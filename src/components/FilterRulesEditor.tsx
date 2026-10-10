@@ -1,21 +1,53 @@
-import { CalendarX, EyeOff, FileCheck, FileType, Filter, FolderX, Plus, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
+import { CalendarX, EyeOff, FileType, Filter, FolderX, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FilterKind, FilterRule } from "../types";
-import { Button, IconButton, Menu, NumberInput, TextInput } from "./ui";
+import { Button, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
-  include: {
-    label: "רק קבצים מסוג",
-    icon: <FileCheck size={15} />,
-    hint: "מגבים רק קבצים שתואמים לתבנית, כל השאר מדולגים. אפשר כמה, מופרדות בפסיק: ⁦*.lrcat, *.docx⁩",
+  // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
+  include: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
+  extension: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
+  pattern: { label: "סוגי קבצים ושמות", icon: <Type size={15} /> },
+  regex: {
+    label: "ביטוי רגולרי (מתקדם)",
+    icon: <Regex size={15} />,
+    hint: "הביטוי נבדק מול שם הקובץ בלבד, בלי הבחנה בין אותיות גדולות לקטנות. למשל ⁦^IMG_\\d+⁩ - שמות שמתחילים ב-IMG_ ואחריו ספרות.",
   },
-  extension: { label: "סיומת קובץ", icon: <FileType size={15} />, hint: "אפשר כמה, מופרדות בפסיק: tmp, log, bak" },
-  pattern: { label: "שם קובץ (תבנית)", icon: <Type size={15} />, hint: "* = כל רצף תווים, ? = תו אחד. למשל ~$* או Thumbs.db" },
-  folder: { label: "תיקייה", icon: <FolderX size={15} />, hint: "שם תיקייה בכל מקום בעץ (node_modules) או נתיב מלא" },
-  largerThan: { label: "קבצים גדולים מ-", icon: <Scale size={15} /> },
-  olderThan: { label: "קבצים ישנים מ-", icon: <CalendarX size={15} />, hint: "לפי תאריך השינוי האחרון של הקובץ" },
-  hidden: { label: "קבצים מוסתרים", icon: <EyeOff size={15} /> },
-  system: { label: "קבצי מערכת", icon: <ShieldOff size={15} /> },
+  folder: {
+    label: "תיקייה",
+    icon: <FolderX size={15} />,
+    hint: "התיקייה ומה שבתוכה לא יגובו. שם תיקייה בכל מקום בעץ (node_modules) או נתיב מלא.",
+  },
+  largerThan: { label: "קבצים גדולים", icon: <Scale size={15} />, hint: "קבצים גדולים מהגודל הזה לא יגובו." },
+  olderThan: {
+    label: "קבצים ישנים",
+    icon: <CalendarX size={15} />,
+    hint: "קבצים שלא שונו מעל מספר הימים הזה לא יגובו (לפי תאריך השינוי האחרון של הקובץ).",
+  },
+  hidden: { label: "קבצים מוסתרים", icon: <EyeOff size={15} />, hint: "קבצים עם התכונה \"מוסתר\" של Windows לא יגובו." },
+  system: { label: "קבצי מערכת", icon: <ShieldOff size={15} />, hint: "קבצים עם התכונה \"מערכת\" של Windows לא יגובו." },
+};
+
+/** Rules offered in the add menu. */
+const MENU: FilterKind[] = ["extension", "regex", "folder", "largerThan", "olderThan", "hidden", "system"];
+
+const isFiles = (r: FilterRule): r is Extract<FilterRule, { kind: "include" | "extension" | "pattern" }> =>
+  r.kind === "include" || r.kind === "extension" || r.kind === "pattern";
+
+/** "Only these" (back up only matches) vs "skip these". */
+const isOnly = (r: FilterRule) => r.kind === "include" || (r.kind === "regex" && r.include);
+
+const FILES_HINT = {
+  skip: "קבצים עם הסיומות או השמות האלה לא יגובו. מפרידים בפסיק, למשל tmp, log, Thumbs.db. הסימן * מייצג כל טקסט: ~$*",
+  only: "רק קבצים עם הסיומות או השמות האלה יגובו, כל השאר לא. מפרידים בפסיק, למשל docx, xlsx. הסימן * מייצג כל טקסט.",
+};
+
+const PLACEHOLDERS: Partial<Record<FilterKind, string>> = {
+  include: "docx, xlsx, jpg",
+  extension: "tmp, log, ~$*",
+  pattern: "~$*",
+  regex: "^IMG_\\d+",
+  folder: "node_modules",
 };
 
 const blank = (kind: FilterKind): FilterRule => {
@@ -25,6 +57,8 @@ const blank = (kind: FilterKind): FilterRule => {
     case "pattern":
     case "folder":
       return { kind, value: "" };
+    case "regex":
+      return { kind, value: "", include: false };
     case "largerThan":
       return { kind, mb: 1024 };
     case "olderThan":
@@ -55,12 +89,15 @@ const PRESETS: { label: string; rules: FilterRule[] }[] = [
 
 export function describeFilter(r: FilterRule) {
   switch (r.kind) {
+    // Values are isolated left-to-right, so "*.lrcat" doesn't render as "lrcat.*" inside Hebrew text.
     case "include":
     case "extension":
     case "pattern":
+      return `${isOnly(r) ? "לגבות רק" : "לדלג על"}: ⁦${r.value}⁩`;
+    case "regex":
+      return `${r.include ? "לגבות רק" : "לדלג על"} ביטוי רגולרי: ⁦${r.value}⁩`;
     case "folder":
-      // Isolated left-to-right, so "*.lrcat" doesn't render as "lrcat.*" inside Hebrew text.
-      return `${KINDS[r.kind].label}: ⁦${r.value}⁩`;
+      return `תיקייה: ⁦${r.value}⁩`;
     case "largerThan":
       return r.mb % 1024 === 0 ? `קבצים גדולים מ-${r.mb / 1024}GB` : `קבצים גדולים מ-${r.mb}MB`;
     case "olderThan":
@@ -104,13 +141,26 @@ export default function FilterRulesEditor({
                   {k.label}
                 </span>
                 <div className="flex min-w-48 flex-1 flex-col gap-1">
-                  {(r.kind === "include" || r.kind === "extension" || r.kind === "pattern" || r.kind === "folder") && (
+                  {(isFiles(r) || r.kind === "regex") && (
+                    <Segmented
+                      value={isOnly(r) ? "only" : "skip"}
+                      onChange={(v) => {
+                        if (r.kind === "regex") update(i, { ...r, include: v === "only" });
+                        else update(i, { kind: v === "only" ? "include" : r.kind === "include" ? "extension" : r.kind, value: r.value });
+                      }}
+                      options={[
+                        { value: "skip", label: "לדלג על התואמים" },
+                        { value: "only", label: "לגבות רק את התואמים" },
+                      ]}
+                    />
+                  )}
+                  {(r.kind === "include" || r.kind === "extension" || r.kind === "pattern" || r.kind === "folder" || r.kind === "regex") && (
                     <TextInput
                       dir="ltr"
                       className="text-left font-mono"
                       autoFocus={!r.value}
                       value={r.value}
-                      placeholder={r.kind === "include" ? "*.lrcat" : r.kind === "extension" ? "tmp, log" : r.kind === "pattern" ? "~$*" : "node_modules"}
+                      placeholder={PLACEHOLDERS[r.kind]}
                       onChange={(e) => update(i, { ...r, value: e.target.value })}
                     />
                   )}
@@ -126,7 +176,9 @@ export default function FilterRulesEditor({
                       <span className="text-[13px] text-muted">ימים</span>
                     </div>
                   )}
-                  {k.hint && <span className="text-xs text-muted">{k.hint}</span>}
+                  {(isFiles(r) ? FILES_HINT[isOnly(r) ? "only" : "skip"] : k.hint) && (
+                    <span className="text-xs text-muted">{isFiles(r) ? FILES_HINT[isOnly(r) ? "only" : "skip"] : k.hint}</span>
+                  )}
                 </div>
                 <IconButton label="הסרת כלל" tone="danger" onClick={() => remove(i)} className="mt-0.5">
                   <Trash2 size={15} />
@@ -143,8 +195,8 @@ export default function FilterRulesEditor({
               הוספת כלל
             </Button>
           )}
-          items={(Object.keys(KINDS) as FilterKind[]).map((kind) => ({
-            label: KINDS[kind].label.replace(/-$/, ""),
+          items={MENU.map((kind) => ({
+            label: KINDS[kind].label,
             icon: KINDS[kind].icon,
             disabled: singleton(kind),
             onClick: () => add([blank(kind)]),

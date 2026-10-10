@@ -241,6 +241,7 @@ name = "backuper"
 version = "0.3.8"
 dependencies = [
  "chrono",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

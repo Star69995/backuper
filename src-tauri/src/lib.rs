@@ -1,5 +1,6 @@
 mod backup;
 mod cobian;
+mod simpleconfig;
 mod commands;
 mod core;
 mod drives;

@@ -16,6 +16,7 @@ export type FilterRule =
   | { kind: "include"; value: string }
   | { kind: "extension"; value: string }
   | { kind: "pattern"; value: string }
+  | { kind: "regex"; value: string; include: boolean }
   | { kind: "folder"; value: string }
   | { kind: "largerThan"; mb: number }
   | { kind: "olderThan"; days: number }
@@ -224,7 +225,7 @@ export interface ImportedTask {
 }
 
 export interface ImportPreview {
-  source: "backuper" | "cobian";
+  source: "backuper" | "simple" | "cobian";
   tasks: ImportedTask[];
 }
 

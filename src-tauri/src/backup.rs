@@ -460,6 +460,7 @@ pub fn backup_source(
                 && task.keep_mode == KeepMode::Count
                 && task.keep_count == 1
                 && ctx.filters.include_files.is_empty()
+                && ctx.filters.include_regex.is_empty()
                 && latest_full.is_some_and(|prev| match rename_retry(Path::new(&prev.path), &work) {
                     Ok(()) => {
                         manifest::remove(&work);
@@ -495,11 +496,20 @@ pub fn backup_source(
                 }
             }
             on_event(EngineEvent::Phase("scanning"));
+            let filters = match native::resolve_regex(&source, ctx.filters, ctx.cancel) {
+                Ok(Some(f)) => f,
+                Ok(None) => {
+                    run.status = Some(RunStatus::Cancelled);
+                    run.message = "הגיבוי בוטל על ידי המשתמש".into();
+                    return run;
+                }
+                Err(e) => return fail(run, e),
+            };
             let job = CopyJob {
                 source: source.clone(),
                 target: work.clone(),
                 copy_empty_dirs: task.copy_empty_dirs,
-                filters: ctx.filters.clone(),
+                filters,
                 log_file: log_file.clone(),
             };
             ctx.engine.mirror(&job, ctx.cancel, &mut |e| on_event(e))
@@ -1138,5 +1148,34 @@ mod tests {
         let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
         assert_eq!(r[0].files_copied, 1, "{r:?}");
         assert!(dst.join("Src 2026-10-02 03-00 אינקרמנטלי").join("new.lrcat").exists());
+    }
+
+    #[test]
+    fn regex_rules_in_full_and_incremental() {
+        use crate::model::FilterRule::Regex;
+        for include in [false, true] {
+            let value = if include { r"^img_\d+\.jpg$" } else { r"^img_\d+\.jpg$" };
+            let env = Env::with_filters(crate::filters::compile(&[Regex {
+                value: value.into(),
+                include,
+            }]));
+            let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+            fs::create_dir_all(src.join("sub")).unwrap();
+            fs::write(src.join("IMG_001.jpg"), "a").unwrap();
+            fs::write(src.join("sub").join("img_2.jpg"), "b").unwrap();
+            fs::write(src.join("img_x.jpg"), "c").unwrap();
+            fs::write(src.join("notes.txt"), "d").unwrap();
+            let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+            let r = env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+            let b = dst.join("Src 2026-10-01 03-00 מלא");
+            // include: the two numbered images. exclude: the two other files.
+            let (kept, skipped) = if include { ("IMG_001.jpg", "img_x.jpg") } else { ("img_x.jpg", "IMG_001.jpg") };
+            assert_eq!(r[0].files_copied, 2, "{r:?}");
+            assert!(b.join(kept).exists() && !b.join(skipped).exists());
+            fs::write(src.join("img_3.jpg"), "n").unwrap();
+            fs::write(src.join("other.png"), "n").unwrap();
+            let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+            assert_eq!(r[0].files_copied, 1, "{r:?}");
+        }
     }
 }

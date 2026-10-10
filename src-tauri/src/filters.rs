@@ -1,25 +1,28 @@
 //! User filter rules -> engine filters.
 
+use crate::engine::native::compile_regex;
 use crate::engine::Filters;
 use crate::model::FilterRule;
 
-/// "tmp, .log;*.bak" -> ["*.tmp", "*.log", "*.bak"]
-fn extensions(value: &str) -> Vec<String> {
-    value
-        .split([',', ';', ' '])
-        .map(|e| e.trim().trim_start_matches('*').trim_start_matches('.'))
-        .filter(|e| !e.is_empty())
-        .map(|e| format!("*.{e}"))
-        .collect()
-}
-
-/// "*.lrcat, *.docx;notes.txt" -> ["*.lrcat", "*.docx", "notes.txt"] (names may contain spaces).
+/// "lrcat, *.docx;notes.txt" -> ["*.lrcat", "*.docx", "notes.txt"]. Used by both "only" and "skip"
+/// rules on file types/names. A bare word or ".ext" is an
+/// extension; anything with a wildcard or a dot inside is used as typed (names may contain spaces).
 pub fn patterns(value: &str) -> Vec<String> {
     value
         .split([',', ';'])
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .map(String::from)
+        .map(|p| {
+            if p.contains(['*', '?']) {
+                p.to_string()
+            } else if let Some(ext) = p.strip_prefix('.') {
+                format!("*.{ext}")
+            } else if !p.contains('.') {
+                format!("*.{p}")
+            } else {
+                p.to_string()
+            }
+        })
         .collect()
 }
 
@@ -32,8 +35,19 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
             FilterRule::Include { value } if value.contains('\\') => {
                 return Err(format!("כלל סינון: תבנית שם קובץ לא יכולה לכלול נתיב ({value})"))
             }
-            FilterRule::Extension { value } if extensions(value).is_empty() => {
-                return Err("כלל סינון: יש להזין סיומת (למשל tmp)".into())
+            FilterRule::Extension { value } if patterns(value).is_empty() => {
+                return Err("כלל סינון: יש להזין סיומת או שם קובץ (למשל tmp)".into())
+            }
+            FilterRule::Extension { value } if value.contains('\\') => {
+                return Err(format!("כלל סינון: שם קובץ לא יכול לכלול נתיב ({value})"))
+            }
+            FilterRule::Regex { value, .. } if value.trim().is_empty() => {
+                return Err("כלל סינון: יש להזין ביטוי רגולרי".into())
+            }
+            FilterRule::Regex { value, .. } => {
+                if let Err(e) = compile_regex(value.trim()) {
+                    return Err(format!("כלל סינון: הביטוי הרגולרי \"{value}\" לא תקין ({e})"));
+                }
             }
             FilterRule::Pattern { value } if value.trim().is_empty() => return Err("כלל סינון: יש להזין תבנית שם קובץ".into()),
             FilterRule::Pattern { value } if value.contains('\\') => {
@@ -57,8 +71,10 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
     for r in rules {
         match r {
             FilterRule::Include { value } => f.include_files.extend(patterns(value)),
-            FilterRule::Extension { value } => f.exclude_files.extend(extensions(value)),
+            FilterRule::Extension { value } => f.exclude_files.extend(patterns(value)),
             FilterRule::Pattern { value } => f.exclude_files.push(value.trim().to_string()),
+            FilterRule::Regex { value, include: true } => f.include_regex.push(value.trim().to_string()),
+            FilterRule::Regex { value, include: false } => f.exclude_regex.push(value.trim().to_string()),
             FilterRule::Folder { value } => f.exclude_dirs.push(value.trim().to_string()),
             FilterRule::LargerThan { mb } => {
                 let bytes = mb * 1024 * 1024;
@@ -97,6 +113,41 @@ mod tests {
         assert_eq!(f.exclude_dirs, ["node_modules"]);
         assert_eq!(f.max_size, Some(10 * 1024 * 1024));
         assert!(f.exclude_hidden && !f.exclude_system);
+    }
+
+    #[test]
+    fn include_accepts_plain_extensions() {
+        assert_eq!(
+            patterns("lrcat, .docx; *.xlsx, notes.txt, ~$*"),
+            ["*.lrcat", "*.docx", "*.xlsx", "notes.txt", "~$*"]
+        );
+    }
+
+    #[test]
+    fn regex_rules() {
+        let rules = [
+            FilterRule::Regex {
+                value: r"^\d+\.jpg$".into(),
+                include: true,
+            },
+            FilterRule::Regex {
+                value: "copy".into(),
+                include: false,
+            },
+        ];
+        assert!(validate(&rules).is_ok());
+        let f = compile(&rules);
+        assert_eq!((f.include_regex.len(), f.exclude_regex.len()), (1, 1));
+        assert!(validate(&[FilterRule::Regex {
+            value: "(".into(),
+            include: false
+        }])
+        .is_err());
+        assert!(validate(&[FilterRule::Regex {
+            value: " ".into(),
+            include: false
+        }])
+        .is_err());
     }
 
     #[test]

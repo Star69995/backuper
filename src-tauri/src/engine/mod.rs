@@ -28,6 +28,11 @@ pub struct Filters {
     pub include_files: Vec<String>,
     /// Wildcards on file names.
     pub exclude_files: Vec<String>,
+    /// Regular expressions on file names; when not empty, only files matching all of them are copied.
+    /// robocopy can't do these: `native::resolve_regex` turns them into plain names for it.
+    pub include_regex: Vec<String>,
+    /// Regular expressions on file names; matching files are skipped.
+    pub exclude_regex: Vec<String>,
     /// Folder names or full paths.
     pub exclude_dirs: Vec<String>,
     /// Skip files larger than this many bytes.

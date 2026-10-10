@@ -4,6 +4,8 @@
 
 use super::{CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
+use regex::{Regex, RegexBuilder};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -177,6 +179,8 @@ fn verbatim(p: &Path) -> io::Result<Vec<u16>> {
 struct Rules {
     include: Vec<Pattern>,
     exclude_files: Vec<Pattern>,
+    include_regex: Vec<Regex>,
+    exclude_regex: Vec<Regex>,
     exclude_dir_names: Vec<Pattern>,
     /// /XD entries with a backslash: full paths (robocopy never matches them as relative paths).
     exclude_dir_paths: Vec<Pattern>,
@@ -189,6 +193,15 @@ struct Rules {
     /// /XA: files (not folders) with any of these attributes are skipped.
     skip_attributes: u32,
     short_names: bool,
+}
+
+/// Case-insensitive like the rest of Windows. Err = the message to show the user.
+pub fn compile_regex(p: &str) -> Result<Regex, String> {
+    RegexBuilder::new(p)
+        .case_insensitive(true)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 impl Rules {
@@ -206,6 +219,9 @@ impl Rules {
         Rules {
             include: patterns(&f.include_files),
             exclude_files: patterns(&f.exclude_files),
+            // Validated when saved; a rule that still fails to compile skips nothing.
+            include_regex: f.include_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
+            exclude_regex: f.exclude_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
             exclude_dir_names: patterns(&dir_names),
             exclude_dir_paths: patterns(&dir_paths),
             base: source.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_string(),
@@ -224,13 +240,78 @@ impl Rules {
             })
     }
 
+    fn regex_ok(&self, e: &Entry) -> bool {
+        if self.include_regex.is_empty() && self.exclude_regex.is_empty() {
+            return true;
+        }
+        let name = String::from_utf16_lossy(&e.name);
+        self.include_regex.iter().all(|r| r.is_match(&name)) && !self.exclude_regex.iter().any(|r| r.is_match(&name))
+    }
+
     fn keep_file(&self, e: &Entry) -> bool {
         (self.include.is_empty() || e.matches_any(&self.include))
             && !e.matches_any(&self.exclude_files)
+            && self.regex_ok(e)
             && self.max_size.map_or(true, |m| e.size <= m)
             && self.min_modified.map_or(true, |m| e.modified >= m)
             && e.attributes & self.skip_attributes == 0
     }
+}
+
+/// Longest list of names handed to robocopy on its command line (the limit is 32,767 characters).
+const MAX_NAMES_LEN: usize = 28_000;
+
+const TOO_MANY: &str = "יותר מדי קבצים שונים תואמים לביטוי הרגולרי, ואי אפשר להעביר אותם לרובוקופי. צמצמו את הביטוי, או הוסיפו כלל שמצמצם את הקבצים (למשל סיומות).";
+
+/// robocopy has no regular expressions, so list the source once and turn the regex rules into
+/// plain file names it understands: either "skip these names" or "copy only these names",
+/// whichever list is shorter. Ok(None) = cancelled.
+pub fn resolve_regex(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result<Option<Filters>, String> {
+    if filters.include_regex.is_empty() && filters.exclude_regex.is_empty() {
+        return Ok(Some(filters.clone()));
+    }
+    let mut out = filters.clone();
+    out.include_regex.clear();
+    out.exclude_regex.clear();
+    let Some(listing) = list_files(root, &out, cancel)? else { return Ok(None) };
+    let rules = Rules::new(root, filters);
+    let mut seen = HashSet::new();
+    let (mut kept, mut dropped) = (Vec::new(), Vec::new());
+    for f in listing.files {
+        let name = f.rel.rsplit('\\').next().unwrap_or(&f.rel).to_string();
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let e = Entry {
+            name: name.encode_utf16().collect(),
+            short_name: Vec::new(),
+            attributes: 0,
+            reparse_tag: 0,
+            size: 0,
+            modified: 0,
+        };
+        if rules.regex_ok(&e) {
+            kept.push(name)
+        } else {
+            dropped.push(name)
+        }
+    }
+    let len = |v: &[String]| v.iter().map(|n| n.len() + 3).sum::<usize>();
+    if kept.is_empty() {
+        // Nothing matches.
+        out.exclude_files.push("*".into());
+    } else if len(&dropped) <= len(&kept) {
+        if len(&dropped) > MAX_NAMES_LEN {
+            return Err(TOO_MANY.into());
+        }
+        out.exclude_files.extend(dropped);
+    } else {
+        if len(&kept) > MAX_NAMES_LEN {
+            return Err(TOO_MANY.into());
+        }
+        out.include_files = kept;
+    }
+    Ok(Some(out))
 }
 
 /// A folder tree's files, plus the folders that couldn't be read.

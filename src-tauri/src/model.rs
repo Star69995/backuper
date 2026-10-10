@@ -42,7 +42,7 @@ pub enum Schedule {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilterRule {
-    /// Back up only files whose name matches one of these wildcards: "*.lrcat, *.docx".
+    /// Back up only these: extensions ("lrcat, docx") or wildcards/names ("*.lrcat", "notes.txt").
     Include {
         value: String,
     },
@@ -53,6 +53,13 @@ pub enum FilterRule {
     /// Wildcard on the file name: "~$*", "Thumbs.db", "*.part"
     Pattern {
         value: String,
+    },
+    /// Regular expression on the file name (case-insensitive, searched anywhere in the name).
+    /// `include`: back up only matching files; otherwise skip them.
+    Regex {
+        value: String,
+        #[serde(default)]
+        include: bool,
     },
     /// Folder name anywhere in the tree ("node_modules") or a full path.
     Folder {
