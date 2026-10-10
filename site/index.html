@@ -287,7 +287,7 @@
               <span class="step-num">3</span>
               <div>
                 <strong>ההתקנה מתחילה</strong>
-                <span class="muted">היא לוקחת כמה שניות ולא מבקשת הרשאות מנהל. אם תורידו מכאן גרסה חדשה בעתיד, ייתכן שהמסך יופיע שוב.</span>
+                <span class="muted">היא לוקחת כמה שניות ולא מבקשת הרשאות מנהל. התוכנה מותקנת בתיקיית המשתמש שלכם (<bdi dir="ltr">%LOCALAPPDATA%\Backuper</bdi>) ולא ב-Program Files, וזה תקין. אם תורידו מכאן גרסה חדשה בעתיד, ייתכן שהמסך יופיע שוב.</span>
               </div>
             </li>
           </ol>
@@ -390,6 +390,10 @@
         <details class="disclosure">
           <summary><svg class="ic chev"><use href="#i-chevron"/></svg>איך מעדכנים לגרסה חדשה?</summary>
           <div class="disclosure-body"><p>בגרסאות שאחרי 0.3.4 התוכנה בודקת לבד אם יש גרסה חדשה ומתעדכנת (אפשר לשנות את זה בהגדרות). בגרסה 0.3.4 או ישנה יותר, מורידים פעם אחת את הגרסה החדשה מהרשימה למעלה ומתקינים אותה מעל הקיימת. בכל מקרה המשימות, ההגדרות והיומן נשמרים.</p></div>
+        </details>
+        <details class="disclosure">
+          <summary><svg class="ic chev"><use href="#i-chevron"/></svg>איפה התוכנה מותקנת, ולמה לא ב-Program Files?</summary>
+          <div class="disclosure-body"><p>ב-<bdi dir="ltr">C:\Users\&lt;שם המשתמש&gt;\AppData\Local\Backuper</bdi>. ההתקנה היא למשתמש שלכם בלבד, כך שלא צריך הרשאות מנהל, ובזכות זה התוכנה יכולה להתעדכן לבד ברקע בלי שחלון אישור יקפוץ באמצע היום. אפשר לבחור תיקייה אחרת במסך ההתקנה, בתנאי שהיא לא דורשת הרשאות מנהל (לא Program Files). אין חובה להתקין על דיסק SSD, ודיסק קשיח רגיל יעבוד מצוין. מומלץ רק לא להתקין על דיסק חיצוני או דיסק און קי, כי כשהוא מנותק התוכנה לא תעלה. התיקייה AppData מוסתרת כברירת מחדל בסייר הקבצים. כך מותקנות גם תוכנות נפוצות אחרות, למשל Chrome ו-Discord. את הגיבויים עצמם שומרים בכונן ובתיקייה שאתם בוחרים, לא כאן.</p></div>
         </details>
         <details class="disclosure">
           <summary><svg class="ic chev"><use href="#i-chevron"/></svg>איך מסירים את התוכנה?</summary>
