@@ -390,7 +390,22 @@ Function PageLeaveReinstall
 FunctionEnd
 
 ; 5. Choose install directory page
+; Backuper: per-user install can't write to folders that need admin rights (Program Files, the
+; drive root of C: on some setups...). Warn on the page instead of failing halfway through.
+Function CheckInstallDirWritable
+  ClearErrors
+  CreateDirectory "$INSTDIR"
+  ClearErrors
+  FileOpen $0 "$INSTDIR\.write-test" w
+  ${If} ${Errors}
+    MessageBox MB_ICONEXCLAMATION "$(installDirNotWritable)"
+    Abort
+  ${EndIf}
+  FileClose $0
+  Delete "$INSTDIR\.write-test"
+FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckInstallDirWritable
 !insertmacro MUI_PAGE_DIRECTORY
 
 ; 6. Start menu shortcut page

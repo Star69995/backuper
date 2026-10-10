@@ -25,3 +25,5 @@ LangString webview2Downloading ${LANG_HEBREW} "מוריד את תוכנית הה
 LangString webview2InstallError ${LANG_HEBREW} "שגיאה: התקנת WebView2 נכשלה עם קוד יציאה $1"
 LangString webview2InstallSuccess ${LANG_HEBREW} "WebView2 הותקן בהצלחה"
 LangString deleteAppData ${LANG_HEBREW} "מחיקת נתוני התוכנה (משימות, הגדרות ויומן)"
+LangString installDirNotWritable ${LANG_HEBREW} "אי אפשר להתקין בתיקייה הזאת, כי היא דורשת הרשאות מנהל (למשל Program Files). ההתקנה היא למשתמש שלכם בלבד. בחרו תיקייה אחרת, למשל בתוך תיקיית המשתמש או בכונן אחר."
+LangString installDirNotWritable ${LANG_ENGLISH} "Can't install to this folder because it needs administrator rights (for example Program Files). This is a per-user install. Choose another folder, such as one inside your user folder or on another drive."

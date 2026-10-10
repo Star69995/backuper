@@ -52,7 +52,7 @@ Also included: an in-app help page ("עזרה") for end users - what happens in 
 
 ## Use
 
-Install with `src-tauri\target\release\bundle\nsis\Backuper_<version>_x64-setup.exe` (per-user install, no admin needed). The installer is in Hebrew. Running a newer installer over an installed version updates it in place (tasks, settings and the log are kept).
+Install with `src-tauri\target\release\bundle\nsis\Backuper_<version>_x64-setup.exe` (per-user install into `%LOCALAPPDATA%\Backuper`, no admin needed, so the self-updater never triggers a UAC prompt). The installer is in Hebrew. Running a newer installer over an installed version updates it in place (tasks, settings and the log are kept).
 On first launch the app registers itself to start with Windows (to the tray, `--hidden`). You can change this in Settings.
 Closing the window minimizes to the tray. Right-click the tray icon to pause scheduling or exit.
 
