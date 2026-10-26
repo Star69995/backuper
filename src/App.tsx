@@ -1,5 +1,5 @@
 import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { api } from "./api";
 import DrivePromptDialog from "./components/DrivePromptDialog";
 import HelpView from "./components/HelpView";
@@ -16,6 +16,10 @@ export default function App() {
   const { snap, refresh } = useSnapshot();
   const [view, setView] = useState<View>("tasks");
   useTheme(snap?.settings.theme);
+  useEffect(() => {
+    const un = api.onShowUpdate(() => setView("settings"));
+    return () => void un.then((f) => f());
+  }, []);
 
   if (!snap) {
     return (
