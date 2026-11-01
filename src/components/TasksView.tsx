@@ -12,7 +12,10 @@ import {
   Download,
   Folder,
   FolderOpen,
+  FolderInput,
+  FolderPlus,
   FolderTree,
+  History,
   HardDrive,
   Import,
   ListChecks,
@@ -28,7 +31,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "../api";
 import { describeSchedule, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind } from "../lib/format";
 import { useColumnWidths } from "../lib/useColumnWidths";
@@ -37,12 +40,29 @@ import type { BackupMode, RunRecord, RunStatus, Snapshot, Task } from "../types"
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
+import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
+import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
 import { useTaskListTransfer } from "./ImportTasksDialog";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
-import { Badge, Button, Checkbox, ColumnResizer, cx, EmptyState, IconButton, Menu, type MenuItem, PathLink, PathText, Select, Spinner, TextInput } from "./ui";
+import {
+  Badge,
+  Button,
+  Checkbox,
+  ColumnResizer,
+  cx,
+  EmptyState,
+  IconButton,
+  Menu,
+  type MenuItem,
+  PathLink,
+  PathText,
+  Select,
+  Spinner,
+  TextInput,
+} from "./ui";
 
 export const statusBadge = (s: RunStatus) =>
   ({
@@ -86,8 +106,38 @@ const runModeItems = (run: (mode: BackupMode) => void): MenuItem[] => [
   { label: "הרץ גיבוי אינקרמנטלי עכשיו", icon: <Play size={14} />, onClick: () => run("incremental") },
 ];
 
+const GROUP_KEY = "backuper.taskGroup";
+
+/** The group tab shown: null = all tasks, "" = tasks without a group. Remembered per machine. */
+function useActiveGroup() {
+  const [group, setGroup] = useState<string | null>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(GROUP_KEY) ?? "null");
+      return typeof v === "string" ? v : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(GROUP_KEY, JSON.stringify(group));
+    } catch {
+      /* ignore */
+    }
+  }, [group]);
+  return [group, setGroup] as const;
+}
+
 export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: () => void }) {
   const { toast, confirm } = useFeedback();
+  const [activeGroup, setActiveGroup] = useActiveGroup();
+  // Groups just created here that have no tasks yet (a group exists through its tasks).
+  const [newGroups, setNewGroups] = useState<string[]>([]);
+  const [groupDialog, setGroupDialog] = useState<
+    { kind: "new"; moving: Task[] | null } | { kind: "rename"; from: string } | null
+  >(null);
+  const [takeoverOf, setTakeoverOf] = useState<Task | null>(null);
+  const [manualRun, setManualRun] = useState<{ ids: string[]; mode: BackupMode | null } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Task | null>(null);
@@ -111,17 +161,34 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     CHECK_COL + MIN_ACTIONS_COL + (nameAuto ? MIN_NAME_COL : 0) + RESIZABLE.reduce((sum, k) => sum + cols.widths[k], 0);
   const nameHeader = useRef<HTMLTableCellElement>(null);
   // Once a border is dragged, every column gets a fixed width, so only the dragged border moves.
-  const freezeName = () => nameAuto && nameHeader.current && cols.setWidth("name", nameHeader.current.getBoundingClientRect().width);
+  const freezeName = () =>
+    nameAuto && nameHeader.current && cols.setWidth("name", nameHeader.current.getBoundingClientRect().width);
   const transfer = useTaskListTransfer(snap.tasks, refresh);
+
+  const usedGroups = groupNames(snap.tasks);
+  const allGroups = [...usedGroups, ...newGroups.filter((n) => !usedGroups.some((g) => sameGroup(g, n)))];
+  const ungrouped = snap.tasks.filter((t) => !groupOf(t)).length;
+  // A tab whose group no longer exists falls back to all tasks.
+  const group =
+    activeGroup === null
+      ? null
+      : activeGroup === ""
+        ? ungrouped > 0 && allGroups.length > 0
+          ? ""
+          : null
+        : (allGroups.find((g) => sameGroup(g, activeGroup)) ?? null);
+  const inGroup = (t: Task) => group === null || sameGroup(groupOf(t), group);
+  const groupTasksList = snap.tasks.filter(inGroup);
+
   const tasks = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const shown = snap.tasks.filter(inGroup);
     const found = q
-      ? snap.tasks.filter((t) =>
-          [t.name, t.destination, ...t.sources.map((s) => s.path)].some((s) => s.toLowerCase().includes(q)),
-        )
-      : snap.tasks;
+      ? shown.filter((t) => [t.name, t.destination, ...t.sources.map((s) => s.path)].some((s) => s.toLowerCase().includes(q)))
+      : shown;
     return sortTasks(found, sort, snap.states);
-  }, [snap.tasks, snap.states, query, sort]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snap.tasks, snap.states, query, sort, group]);
   const groups = useMemo(() => groupTasks(tasks, sort.key), [tasks, sort.key]);
 
   // Drop selections of tasks that no longer exist.
@@ -138,10 +205,43 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       return n;
     });
 
-  const run = async (ids: string[], mode: BackupMode | null = null) => {
+  const runNow = async (ids: string[], mode: BackupMode | null = null) => {
     const n = await api.runTasks(ids, mode);
     if (n === 0) toast({ tone: "info", title: "המשימה כבר רצה או ממתינה בתור" });
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
+  };
+
+  // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
+  // The question comes up when one is switched on, or when someone runs it by hand.
+  const run = async (ids: string[], mode: BackupMode | null = null) => {
+    const waiting = snap.tasks.filter((t) => ids.includes(t.id) && t.cobianPending).map((t) => t.id);
+    const rest = ids.filter((id) => !waiting.includes(id));
+    if (rest.length > 0) await runNow(rest, mode);
+    if (waiting.length > 0) setManualRun({ ids: waiting, mode });
+  };
+  const askCobian = snap.tasks.filter((t) => t.cobianPending && (t.enabled || manualRun?.ids.includes(t.id)));
+  const cobianDecided = () => {
+    const m = manualRun;
+    setManualRun(null);
+    refresh();
+    if (m) void runNow(m.ids, m.mode);
+  };
+  /** "Later": switched-on tasks go back to switched off (they're asked again when switched on). */
+  const cobianLater = async () => {
+    setManualRun(null);
+    const on = askCobian.filter((t) => t.enabled);
+    if (on.length === 0) return;
+    try {
+      await api.saveTasks(on.map((t) => ({ ...t, enabled: false })));
+      refresh();
+      toast({
+        tone: "info",
+        title: on.length === 1 ? "המשימה נשארה מושבתת" : `${on.length} משימות נשארו מושבתות`,
+        message: "תישאלו אם להמשיך מהגיבויים של Cobian כשתפעילו אותן.",
+      });
+    } catch (e) {
+      toast({ tone: "bad", title: "השמירה נכשלה", message: errorText(e) });
+    }
   };
 
   /** Saves tasks and offers to undo by restoring the previous versions. */
@@ -207,6 +307,65 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       sources: t.sources.map((s) => ({ ...s, folderName: `${s.folderName} (עותק)` })),
     });
 
+  /** Moves tasks into a group ("" = general). */
+  const moveToGroup = (list: Task[], to: string) =>
+    saveWithUndo(
+      list.map((t) => ({ ...t, group: to })),
+      list,
+      `${list.length === 1 ? "המשימה הועברה" : `${list.length} משימות הועברו`} ל${to ? `קבוצה "${to}"` : `${GENERAL_GROUP}`}`,
+    );
+
+  const renameGroup = (from: string, to: string) => {
+    const list = snap.tasks.filter((t) => sameGroup(groupOf(t), from));
+    setNewGroups((n) => n.map((g) => (sameGroup(g, from) ? to : g)));
+    setActiveGroup(to);
+    if (list.length > 0)
+      saveWithUndo(
+        list.map((t) => ({ ...t, group: to })),
+        list,
+        `שם הקבוצה שונה ל"${to}"`,
+      );
+  };
+
+  const dissolveGroup = async (name: string) => {
+    const list = snap.tasks.filter((t) => sameGroup(groupOf(t), name));
+    setNewGroups((n) => n.filter((g) => !sameGroup(g, name)));
+    setActiveGroup(null);
+    if (list.length === 0) return;
+    const ok = await confirm({
+      title: `לבטל את הקבוצה "${name}"?`,
+      message: `${list.length === 1 ? "המשימה שבה תעבור" : `${list.length} המשימות שבה יעברו`} לרשימה הכללית. המשימות עצמן והגיבויים שלהן לא נמחקים.`,
+      confirmLabel: "ביטול הקבוצה",
+    });
+    if (ok) moveToGroup(list, "");
+  };
+
+  /** "Move to group" entries: every other group, the general list, and a new group. `long` = for a menu with other actions. */
+  const moveItems = (list: Task[], long = false): MenuItem[] => [
+    ...allGroups
+      .filter((g) => !list.every((t) => sameGroup(groupOf(t), g)))
+      .map((g) => ({
+        label: long ? `העברה לקבוצה: ${g}` : g,
+        icon: <FolderInput size={14} />,
+        onClick: () => moveToGroup(list, g),
+      })),
+    ...(list.some((t) => groupOf(t))
+      ? [
+          {
+            label: long ? `העברה ל${GENERAL_GROUP} (ללא קבוצה)` : `${GENERAL_GROUP} (ללא קבוצה)`,
+            icon: <FolderInput size={14} />,
+            onClick: () => moveToGroup(list, ""),
+          },
+        ]
+      : []),
+    ...(long ? [] : ["separator" as const]),
+    {
+      label: long ? "העברה לקבוצה חדשה..." : "קבוצה חדשה...",
+      icon: <FolderPlus size={14} />,
+      onClick: () => setGroupDialog({ kind: "new", moving: list }),
+    },
+  ];
+
   const queuedIds = new Set(snap.queue.map((j) => j.taskId));
   const runningId = snap.current?.taskId;
 
@@ -263,6 +422,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
               </Button>
             )}
             items={[
+              { label: "ייבוא מ-Cobian Reflector / Backup", icon: <History size={14} />, onClick: transfer.importCobian },
               { label: "ייבוא משימות מקובץ (Backuper או Cobian)", icon: <Import size={14} />, onClick: transfer.importFile },
               {
                 label: "ייצוא כל המשימות לקובץ",
@@ -272,11 +432,76 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
               },
             ]}
           />
-          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing(newTask())}>
+          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing({ ...newTask(), group: group ?? "" })}>
             משימה חדשה
           </Button>
         </div>
       </header>
+
+      {snap.tasks.length > 0 && (
+        <nav aria-label="קבוצות משימות" className="flex flex-wrap items-center gap-1.5">
+          {allGroups.length > 0 && (
+            <>
+              <GroupTab
+                label="כל המשימות"
+                count={snap.tasks.length}
+                active={group === null}
+                onClick={() => setActiveGroup(null)}
+              />
+              {allGroups.map((g) => (
+                <GroupTab
+                  key={g}
+                  label={g}
+                  count={snap.tasks.filter((t) => sameGroup(groupOf(t), g)).length}
+                  active={group !== null && sameGroup(group, g)}
+                  onClick={() => setActiveGroup(g)}
+                />
+              ))}
+              {ungrouped > 0 && (
+                <GroupTab label={GENERAL_GROUP} count={ungrouped} active={group === ""} onClick={() => setActiveGroup("")} />
+              )}
+            </>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<FolderPlus size={15} />}
+            onClick={() => setGroupDialog({ kind: "new", moving: null })}
+          >
+            קבוצה חדשה
+          </Button>
+          {group && (
+            <Menu
+              trigger={(open) => (
+                <IconButton label={`פעולות על הקבוצה ${group}`} onClick={open} className="ms-auto">
+                  <MoreVertical size={16} />
+                </IconButton>
+              )}
+              items={[
+                {
+                  label: "הרצת כל המשימות הפעילות בקבוצה",
+                  icon: <Play size={14} />,
+                  disabled: !groupTasksList.some((t) => t.enabled),
+                  onClick: () => run(groupTasksList.filter((t) => t.enabled).map((t) => t.id)),
+                },
+                {
+                  label: "ייצוא הקבוצה לקובץ",
+                  icon: <Download size={14} />,
+                  disabled: groupTasksList.length === 0,
+                  onClick: () => transfer.exportTasks(groupTasksList, group),
+                },
+                "separator",
+                {
+                  label: "שינוי שם הקבוצה",
+                  icon: <Pencil size={14} />,
+                  onClick: () => setGroupDialog({ kind: "rename", from: group }),
+                },
+                { label: "ביטול הקבוצה", icon: <X size={14} />, onClick: () => dissolveGroup(group) },
+              ]}
+            />
+          )}
+        </nav>
+      )}
 
       {snap.current && <RunningCard progress={snap.current} queue={snap.queue} tasks={snap.tasks} />}
 
@@ -304,6 +529,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           <Button size="sm" variant="ghost" icon={<ListChecks size={15} />} onClick={() => setBulk(selTasks)}>
             עריכה מרובה
           </Button>
+          <Menu
+            trigger={(open) => (
+              <Button size="sm" variant="ghost" icon={<FolderInput size={15} />} onClick={open}>
+                העבר לקבוצה
+              </Button>
+            )}
+            items={moveItems(selTasks)}
+          />
           <Button size="sm" variant="ghost" icon={<Download size={15} />} onClick={() => transfer.exportTasks(selTasks)}>
             ייצוא
           </Button>
@@ -333,6 +566,20 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
               <Button icon={<Import size={16} />} onClick={transfer.importFile}>
                 ייבוא מקובץ
               </Button>
+            </div>
+          </EmptyState>
+        ) : groupTasksList.length === 0 ? (
+          <EmptyState icon={<FolderPlus size={26} />} title={`אין עדיין משימות בקבוצה "${group}"`}>
+            <p>צרו משימה חדשה בקבוצה, או סמנו משימות ברשימה של כל המשימות והעבירו אותן לכאן עם &quot;העבר לקבוצה&quot;.</p>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <Button
+                variant="primary"
+                icon={<Plus size={16} />}
+                onClick={() => setEditing({ ...newTask(), group: group ?? "" })}
+              >
+                משימה חדשה בקבוצה
+              </Button>
+              <Button onClick={() => setActiveGroup(null)}>לכל המשימות</Button>
             </div>
           </EmptyState>
         ) : tasks.length === 0 ? (
@@ -433,6 +680,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                             >
                               <span className="truncate">{t.name}</span>
                               {!t.enabled && <Badge>מושבת</Badge>}
+                              {group === null && groupOf(t) && <Badge>{groupOf(t)}</Badge>}
                             </button>
                             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted">
                               {t.sources.length === 1 ? (
@@ -558,6 +806,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   "separator",
                                   { label: "עריכה", icon: <Pencil size={14} />, onClick: () => setEditing(t) },
                                   { label: "שכפול", icon: <Copy size={14} />, onClick: () => duplicate(t) },
+                                  ...moveItems([t], true),
                                   {
                                     label: t.enabled ? "השבתה" : "הפעלה",
                                     icon: t.enabled ? <PowerOff size={14} /> : <Power size={14} />,
@@ -565,6 +814,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   },
                                   "separator",
                                   { label: "ניהול גיבויים", icon: <FolderTree size={14} />, onClick: () => setBackupsOf(t) },
+                                  { label: "המשך מגיבויי Cobian", icon: <History size={14} />, onClick: () => setTakeoverOf(t) },
                                   {
                                     label: "פתיחת תיקיית היעד",
                                     icon: <FolderOpen size={14} />,
@@ -597,6 +847,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         <TaskEditor
           task={editing}
           globalFilterCount={snap.settings.globalFilters.length}
+          groups={allGroups}
           onClose={() => setEditing(null)}
           onSaved={(saved, isNew) => {
             setEditing(null);
@@ -608,9 +859,40 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       {transfer.dialog}
       {runDetails && <RunDetails run={runDetails} onClose={() => setRunDetails(null)} />}
       {backupsOf && <BackupsDialog task={backupsOf} onClose={() => setBackupsOf(null)} />}
+      {askCobian.length > 0 && <CobianPendingDialog tasks={askCobian} onCancel={cobianLater} onResolved={cobianDecided} />}
+      {takeoverOf && (
+        <CobianTakeoverDialog
+          task={takeoverOf}
+          onClose={() => setTakeoverOf(null)}
+          onDone={() => {
+            setTakeoverOf(null);
+            refresh();
+          }}
+        />
+      )}
+      {groupDialog && (
+        <GroupNameDialog
+          title={groupDialog.kind === "rename" ? "שינוי שם הקבוצה" : "קבוצה חדשה"}
+          initial={groupDialog.kind === "rename" ? groupDialog.from : ""}
+          confirmLabel={groupDialog.kind === "rename" ? "שינוי שם" : groupDialog.moving ? "יצירה והעברה" : "יצירה"}
+          taken={allGroups}
+          onClose={() => setGroupDialog(null)}
+          onSubmit={(name) => {
+            const d = groupDialog;
+            setGroupDialog(null);
+            if (d.kind === "rename") return renameGroup(d.from, name);
+            if (d.moving) {
+              moveToGroup(d.moving, name);
+              setSelected(new Set());
+            } else setNewGroups((n) => [...n, name]);
+            setActiveGroup(name);
+          }}
+        />
+      )}
       {bulk && (
         <BulkEditDialog
           tasks={bulk}
+          groups={allGroups}
           onClose={() => setBulk(null)}
           onApply={async (next) => {
             setBulk(null);
@@ -624,4 +906,21 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   function openPath(p: string) {
     api.openPath(p).catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את התיקייה", message: errorText(e) }));
   }
+}
+
+function GroupTab({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cx(
+        "flex h-8 max-w-56 items-center gap-1.5 rounded-full border px-3 text-[13px] transition-colors",
+        active ? "border-accent/40 bg-accent-soft font-medium text-accent" : "border-line bg-panel text-fg hover:bg-hover",
+      )}
+    >
+      <bdi className="truncate">{label}</bdi>
+      <span className={cx("text-xs", active ? "text-accent/80" : "text-muted")}>{count}</span>
+    </button>
+  );
 }

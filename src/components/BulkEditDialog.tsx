@@ -11,11 +11,13 @@ import {
 } from "../lib/format";
 import type { DriveAction, FilterRule, Schedule, Task } from "../types";
 import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
+import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { PathPicker, RetentionEditor } from "./TaskEditor";
 import { Button, Checkbox, cx, Modal, PathText, Segmented, Toggle } from "./ui";
 
 type Key =
+  | "group"
   | "enabled"
   | "mode"
   | "destination"
@@ -48,6 +50,7 @@ function showKind(v: Pick<Task, "mode" | "fullSchedule">) {
 const yesNo = (v: boolean) => (v ? "כן" : "לא");
 
 const FIELDS: { key: Key; label: string; show: (v: ReturnType<typeof valueOf>) => ReactNode }[] = [
+  { key: "group", label: "קבוצה", show: (v) => (v as string).trim() || GENERAL_GROUP },
   { key: "enabled", label: "פעילה", show: (v) => yesNo(v as boolean) },
   { key: "mode", label: "סוג גיבוי", show: (v) => showKind(v as Pick<Task, "mode" | "fullSchedule">) },
   { key: "destination", label: "תיקיית יעד", show: (v) => <PathText path={v as string} /> },
@@ -71,15 +74,19 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 export default function BulkEditDialog({
   tasks,
+  groups,
   onClose,
   onApply,
 }: {
   tasks: Task[];
+  /** Existing group names, offered as suggestions. */
+  groups: string[];
   onClose: () => void;
   onApply: (next: Task[]) => void;
 }) {
   const first = tasks[0];
   const [values, setValues] = useState<Values>({
+    group: first.group,
     enabled: first.enabled,
     mode: first.mode,
     fullSchedule: first.fullSchedule,
@@ -167,6 +174,8 @@ export default function BulkEditDialog({
             )}
           </div>
         );
+      case "group":
+        return <GroupInput className="max-w-80" value={values.group} groups={groups} onChange={(v) => set("group", v)} />;
       case "destination":
         return (
           <PathPicker

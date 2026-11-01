@@ -1,7 +1,21 @@
 // Dev-only: lets the UI run in a plain browser (`npm run dev`) with fake data,
 // for visual checks and screenshots. Never loaded inside the real Tauri app.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { ImportedTask, ImportPreview, Notice, RunRecord, Schedule, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState, UpdateStatus } from "../types";
+import type {
+  AdoptPlan,
+  ImportedTask,
+  ImportPreview,
+  Notice,
+  RunRecord,
+  Schedule,
+  Settings,
+  Snapshot,
+  SourceBackups,
+  SourceRun,
+  Task,
+  TaskState,
+  UpdateStatus,
+} from "../types";
 import { newTask } from "../types";
 
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
@@ -34,6 +48,7 @@ export function installDevMock() {
       ...newTask(),
       id: "1",
       name: "מסמכים ותמונות",
+      group: "מחשב הבית",
       sources: [
         src("C:\\Users\\User\\Documents", "Documents"),
         src("C:\\Users\\User\\Pictures", "Pictures"),
@@ -47,6 +62,7 @@ export function installDevMock() {
       ...newTask(),
       id: "2",
       name: "תמונות משפחה",
+      group: "מחשב הבית",
       sources: [src("D:\\Photos", "תמונות")],
       destination: "E:\\Backups",
       mode: "full",
@@ -59,6 +75,7 @@ export function installDevMock() {
       ...newTask(),
       id: "3",
       name: "פרויקטים",
+      group: "עבודה",
       sources: [src("C:\\code", "Projects")],
       destination: "F:\\Mirror",
       schedule: { kind: "interval", minutes: 120 },
@@ -121,7 +138,17 @@ export function installDevMock() {
         error: null,
         installWaiting: false,
       }
-    : { currentVersion: "0.3.4", state: "upToDate", version: null, notes: null, downloaded: 0, total: null, checkedAt: iso(-90), error: null, installWaiting: false };
+    : {
+        currentVersion: "0.3.4",
+        state: "upToDate",
+        version: null,
+        notes: null,
+        downloaded: 0,
+        total: null,
+        checkedAt: iso(-90),
+        error: null,
+        installWaiting: false,
+      };
   const sourceRun = (folderName: string, source: string, i: number): SourceRun => ({
     source,
     folderName,
@@ -250,6 +277,8 @@ export function installDevMock() {
     },
   });
 
+  const releaseCobianPending = (ids: string[]) => tasks.forEach((t) => ids.includes(t.id) && (t.cobianPending = false));
+
   mockIPC((cmd, args) => {
     const a = args as Record<string, unknown>;
     switch (cmd) {
@@ -314,8 +343,39 @@ export function installDevMock() {
       case "install_update":
         update.installWaiting = true;
         return null;
+      case "find_cobian_lists":
+        return {
+          dir: "C:\\Program Files\\Cobian Reflector\\Lists",
+          lists: [
+            {
+              path: "C:\\Program Files\\Cobian Reflector\\Lists\\MainList.lst",
+              name: "MainList",
+              product: "Cobian Reflector",
+              modified: iso(-60 * 20),
+              taskCount: 4,
+              error: null,
+            },
+            {
+              path: "C:\\Program Files\\Cobian Reflector\\Lists\\Laptop.lst",
+              name: "Laptop",
+              product: "Cobian Reflector",
+              modified: iso(-60 * 24 * 40),
+              taskCount: 2,
+              error: null,
+            },
+          ],
+        };
+      case "plan_cobian_takeover":
+        return (a.tasks as Task[]).map((t) => cobianPlan(t));
+      case "take_over_cobian":
+        releaseCobianPending(a.ids as string[]);
+        return { renamed: (a.ids as string[]).length * 3, errors: [] };
+      case "decline_cobian_takeover":
+        releaseCobianPending(a.ids as string[]);
+        return null;
       case "run_tasks":
-        return (a.ids as string[]).length;
+        // Like the real queue: a task waiting for the Cobian decision doesn't run.
+        return (a.ids as string[]).filter((id) => !tasks.find((t) => t.id === id)?.cobianPending).length;
       case "plugin:app|version":
         return "0.2.0 (dev)";
       case "plugin:event|listen":
@@ -324,6 +384,33 @@ export function installDevMock() {
         return null;
     }
   });
+}
+
+/** Cobian's dated folders in the task's destination: a full and two incrementals per source (none for disabled tasks, unless one waits for the Cobian decision). */
+function cobianPlan(t: Task): AdoptPlan {
+  const day = (n: number) => {
+    const d = new Date(Date.now() - n * 86_400_000);
+    const p = (x: number) => String(x).padStart(2, "0");
+    return { cobian: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`, iso: d.toISOString() };
+  };
+  return {
+    taskId: t.id,
+    destination: t.destination,
+    sources: t.sources.map((s) => ({
+      source: s.path,
+      folderName: s.folderName,
+      warnings: [],
+      folders:
+        t.enabled || t.cobianPending
+          ? [3, 2, 1].map((n, i) => ({
+              from: `${s.folderName} ${day(n).cobian} 23;35;0${i}${t.mode === "full" || i === 0 ? " (Full)" : ""}`,
+              to: `${s.folderName} ${day(n).cobian} 23-35 ${t.mode === "full" || i === 0 ? "מלא" : "אינקרמנטלי"}`,
+              kind: t.mode === "full" || i === 0 ? ("full" as const) : ("incremental" as const),
+              createdAt: day(n).iso,
+            }))
+          : [],
+    })),
+  };
 }
 
 function cobianImport(): ImportedTask[] {
@@ -336,6 +423,7 @@ function cobianImport(): ImportedTask[] {
         schedule: { kind: "daily", time: "23:35" },
         fullSchedule: { kind: "weekly", days: [0], time: "23:35" },
         copyEmptyDirs: true,
+        group: "מסמכים",
       }),
       warnings: [],
       error: null,
@@ -376,13 +464,13 @@ function cobianImport(): ImportedTask[] {
         schedule: { kind: "daily", time: "01:00" },
       }),
       warnings: [],
-      error: 'למשימות "תמונות משפחה" ו-"Photos to E" יש תיקיית מקור עם אותו שם תיקיית גיבוי (תמונות) באותו יעד - יש לשנות אחד מהם',
+      error:
+        'למשימות "תמונות משפחה" ו-"Photos to E" יש תיקיית מקור עם אותו שם תיקיית גיבוי (תמונות) באותו יעד - יש לשנות אחד מהם',
       exists: false,
       unchanged: false,
     },
   ];
 }
-
 
 /** A snapshot: the current tasks (one edited since), plus one deleted since. */
 function snapshotImport(current: Task[]): ImportPreview {
@@ -394,7 +482,13 @@ function snapshotImport(current: Task[]): ImportPreview {
     unchanged: i !== 0,
   }));
   items.push({
-    task: { ...newTask(), id: "deleted", name: "גיבוי מסמכים ישן", sources: [{ path: "C:\\Old", folderName: "Old" }], destination: "E:\\Backups" },
+    task: {
+      ...newTask(),
+      id: "deleted",
+      name: "גיבוי מסמכים ישן",
+      sources: [{ path: "C:\\Old", folderName: "Old" }],
+      destination: "E:\\Backups",
+    },
     warnings: [],
     error: null,
     exists: false,

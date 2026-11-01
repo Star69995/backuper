@@ -1,5 +1,6 @@
 mod backup;
 mod cobian;
+mod cobianmigrate;
 mod simpleconfig;
 mod commands;
 mod core;
@@ -163,6 +164,10 @@ pub fn run() {
             commands::test_sound,
             commands::check_updates,
             commands::install_update,
+            commands::find_cobian_lists,
+            commands::plan_cobian_takeover,
+            commands::take_over_cobian,
+            commands::decline_cobian_takeover,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

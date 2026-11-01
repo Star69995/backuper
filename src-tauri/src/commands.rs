@@ -57,6 +57,7 @@ fn prepare(mut t: Task) -> Result<Task, String> {
         t.full_schedule = None;
     }
     t.name = t.name.trim().to_string();
+    t.group = t.group.trim().to_string();
     t.destination = t.destination.trim().to_string();
     for src in &mut t.sources {
         src.path = src.path.trim().to_string();
@@ -432,4 +433,94 @@ pub async fn check_updates(updates: UpdatesState<'_>) -> Result<bool, String> {
 #[tauri::command]
 pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
     updates.install_now().await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CobianLists {
+    lists: Vec<crate::cobianmigrate::CobianList>,
+    /// Where a file dialog for picking a list should open.
+    dir: Option<String>,
+}
+
+/// Cobian Backup / Reflector task lists found on this computer.
+#[tauri::command]
+pub async fn find_cobian_lists() -> Result<CobianLists, String> {
+    tauri::async_runtime::spawn_blocking(|| CobianLists {
+        lists: crate::cobianmigrate::find_lists(),
+        dir: crate::cobianmigrate::lists_dir(),
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The rest of the task list, with `incoming` in place of tasks that have the same id.
+fn others_with(existing: &[Task], incoming: &[Task]) -> Vec<Task> {
+    let mut all: Vec<Task> = existing.iter().filter(|t| !incoming.iter().any(|i| i.id == t.id)).cloned().collect();
+    all.extend(incoming.iter().cloned());
+    all
+}
+
+/// Which existing Cobian backup folders each task would take over (nothing is changed).
+/// `tasks` may be saved tasks or ones still in the import preview.
+#[tauri::command]
+pub async fn plan_cobian_takeover(core: CoreState<'_>, tasks: Vec<Task>) -> Result<Vec<crate::cobianmigrate::AdoptPlan>, String> {
+    let existing = core.store.lock().unwrap().tasks.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let all = others_with(&existing, &tasks);
+        tasks.iter().map(|t| crate::cobianmigrate::plan(t, &all)).collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The user has decided about the tasks' Cobian backups (took them over or declined): they may run now.
+fn clear_cobian_pending(core: &Core, ids: &[String]) {
+    {
+        let mut s = core.store.lock().unwrap();
+        let mut changed = false;
+        for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id) && t.cobian_pending) {
+            t.cobian_pending = false;
+            changed = true;
+        }
+        if changed {
+            s.save_tasks();
+        }
+    }
+    core.changed();
+}
+
+/// Renames the tasks' Cobian backup folders to this app's names, so their next run continues
+/// from Cobian's last backup. Only while no backup runs (the queue is held meanwhile).
+/// When everything was renamed, tasks waiting for this decision (`cobian_pending`) are released.
+#[tauri::command]
+pub async fn take_over_cobian(core: CoreState<'_>, ids: Vec<String>) -> Result<crate::cobianmigrate::AdoptResult, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let all = core.store.lock().unwrap().tasks.clone();
+        let tasks: Vec<&Task> = all.iter().filter(|t| ids.contains(&t.id)).collect();
+        let total = core
+            .when_idle(|| {
+                let mut total = crate::cobianmigrate::AdoptResult::default();
+                for t in &tasks {
+                    let r = crate::cobianmigrate::apply(t, &all);
+                    total.renamed += r.renamed;
+                    total.errors.extend(r.errors);
+                }
+                total
+            })
+            .ok_or_else(|| "גיבוי רץ עכשיו או ממתין בתור - נסו שוב כשהגיבויים יסתיימו".to_string())?;
+        if total.errors.is_empty() {
+            clear_cobian_pending(&core, &ids);
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "Don't continue from Cobian's backups": the tasks' first run will be a full backup, so they may run.
+#[tauri::command]
+pub fn decline_cobian_takeover(core: CoreState, ids: Vec<String>) {
+    clear_cobian_pending(&core, &ids);
 }

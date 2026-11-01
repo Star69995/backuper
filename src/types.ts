@@ -40,6 +40,10 @@ export type KeepMode = "count" | "days" | "all";
 export interface Task {
   id: string;
   name: string;
+  /** The task list (group) it belongs to; "" = the general list. */
+  group: string;
+  /** Imported from Cobian; waiting for the user to take over (or decline) Cobian's backups. Nothing runs meanwhile. */
+  cobianPending: boolean;
   sources: Source[];
   destination: string;
   /** Backup type of the main schedule. */
@@ -229,6 +233,52 @@ export interface ImportPreview {
   tasks: ImportedTask[];
 }
 
+/** A Cobian Backup / Reflector task list found on this computer. */
+export interface CobianList {
+  path: string;
+  /** File name without .lst ("MainList"). */
+  name: string;
+  /** The program folder it's in ("Cobian Reflector"). */
+  product: string;
+  modified: string | null;
+  taskCount: number | null;
+  error: string | null;
+}
+
+export interface CobianLists {
+  lists: CobianList[];
+  /** Where a file dialog for picking a list should open. */
+  dir: string | null;
+}
+
+/** One Cobian backup folder and the name it gets here (takeover = rename only). */
+export interface AdoptFolder {
+  from: string;
+  to: string;
+  kind: BackupMode;
+  createdAt: string;
+}
+
+export interface AdoptSource {
+  source: string;
+  folderName: string;
+  /** Oldest first. */
+  folders: AdoptFolder[];
+  warnings: string[];
+}
+
+/** Which Cobian backup folders a task would take over, so it continues from Cobian's last backup. */
+export interface AdoptPlan {
+  taskId: string;
+  destination: string;
+  sources: AdoptSource[];
+}
+
+export interface AdoptResult {
+  renamed: number;
+  errors: string[];
+}
+
 /** An automatic copy of the task list, taken whenever it changed. */
 export interface TaskSnapshot {
   path: string;
@@ -239,6 +289,8 @@ export interface TaskSnapshot {
 export const newTask = (): Task => ({
   id: "",
   name: "",
+  group: "",
+  cobianPending: false,
   sources: [],
   destination: "",
   mode: "incremental",

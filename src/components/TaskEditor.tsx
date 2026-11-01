@@ -35,6 +35,7 @@ import {
 } from "../lib/format";
 import type { BackupMode, DriveAction, KeepMode, Source, Task } from "../types";
 import FilterRulesEditor from "./FilterRulesEditor";
+import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { Section, type SectionInfo, SectionNav, useScrollSpy } from "./sections";
 import { Button, cx, Field, IconButton, Modal, NumberInput, Segmented, TextInput, Toggle } from "./ui";
@@ -291,11 +292,14 @@ export function DriveConnectField({ task, onChange }: { task: Task; onChange: (v
 export default function TaskEditor({
   task,
   globalFilterCount,
+  groups,
   onClose,
   onSaved,
 }: {
   task: Task;
   globalFilterCount: number;
+  /** Existing group names, offered as suggestions. */
+  groups: string[];
   onClose: () => void;
   onSaved: (t: Task, isNew: boolean) => void;
 }) {
@@ -322,9 +326,9 @@ export default function TaskEditor({
     {
       id: "general",
       title: "כללי",
-      description: "שם המשימה והאם היא פעילה",
+      description: "שם המשימה, הקבוצה שלה והאם היא פעילה",
       icon: Settings2,
-      summary: t.enabled ? "פעילה" : "מושבתת",
+      summary: `${t.enabled ? "פעילה" : "מושבתת"} · ${t.group.trim() || GENERAL_GROUP}`,
       missing: !t.name.trim(),
     },
     {
@@ -424,6 +428,9 @@ export default function TaskEditor({
             <div className="flex flex-wrap items-end gap-4">
               <Field label="שם המשימה" className="min-w-52 flex-1">
                 <TextInput autoFocus value={t.name} placeholder="למשל: מסמכים" onChange={(e) => set("name", e.target.value)} />
+              </Field>
+              <Field label="קבוצה" className="min-w-44 flex-1">
+                <GroupInput value={t.group} groups={groups} onChange={(v) => set("group", v)} />
               </Field>
               <div className="pb-2">
                 <Toggle checked={t.enabled} onChange={(v) => set("enabled", v)} label="משימה פעילה" />
