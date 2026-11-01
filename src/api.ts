@@ -51,6 +51,7 @@ export const api = {
     const r = await open({ directory: true, multiple: true, title });
     return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
   },
+  onShowUpdate: (cb: () => void) => listen("show-update", cb),
   onSnapshotChanged: (cb: () => void) => listen("snapshot-changed", cb),
   onProgress: (cb: (p: Progress) => void) => listen<Progress>("progress", (e) => cb(e.payload)),
 };
