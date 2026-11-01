@@ -116,6 +116,8 @@ pub struct Source {
 pub struct Task {
     pub id: String,
     pub name: String,
+    /// The task list (group) the task belongs to; empty = the general list.
+    pub group: String,
     /// All sources run together, on the same schedule, with the same date in their folder names.
     pub sources: Vec<Source>,
     /// Root folder that holds the dated backup folders of all sources.
@@ -157,6 +159,7 @@ impl Default for Task {
         Self {
             id: String::new(),
             name: String::new(),
+            group: String::new(),
             sources: Vec::new(),
             destination: String::new(),
             mode: BackupMode::Incremental,

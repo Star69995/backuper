@@ -1,14 +1,21 @@
 import { AlertTriangle, ArrowLeft, CheckCircle2, Filter, Info, XCircle } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { describeRetention, describeSchedule, KIND_LABEL, taskKind } from "../lib/format";
-import type { ImportPreview, Task } from "../types";
+import type { AdoptPlan, ImportPreview, Task } from "../types";
+import { CobianListsDialog, planFolderCount, TakeoverSummary, takeoverToast } from "./CobianDialogs";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
-import { Badge, Button, Checkbox, cx, Modal, PathText, Toggle } from "./ui";
+import { GroupInput, groupNames } from "./groups";
+import { Badge, Button, Checkbox, cx, Field, Modal, PathText, Spinner, Toggle } from "./ui";
 
-/** "file" = picked by the user (export or Cobian), "snapshot" = an automatic task list backup. */
-type Origin = { kind: "file" } | { kind: "snapshot"; label: string };
+/**
+ * "file" = picked by the user (export or Cobian; `listName` = the file name, offered as the group),
+ * "snapshot" = an automatic task list backup.
+ */
+type Origin = { kind: "file"; listName: string } | { kind: "snapshot"; label: string };
+
+const stem = (path: string) => path.replace(/^.*[\\/]/, "").replace(/\.[^.]*$/, "");
 
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD
 
@@ -19,6 +26,7 @@ const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD
 export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
   const { toast } = useFeedback();
   const [preview, setPreview] = useState<{ data: ImportPreview; origin: Origin } | null>(null);
+  const [cobianPicker, setCobianPicker] = useState(false);
 
   const open = async (path: string, origin: Origin) => {
     try {
@@ -30,12 +38,14 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
 
   const importFile = async () => {
     const path = await api.pickFile("בחירת קובץ משימות", "רשימת משימות (Backuper או Cobian)", ["json", "lst"]);
-    if (path) await open(path, { kind: "file" });
+    if (path) await open(path, { kind: "file", listName: stem(path) });
   };
 
-  /** All tasks, or only `list`. */
-  const exportTasks = async (list?: Task[]) => {
-    const name = list && list.length === 1 ? list[0].name : "משימות";
+  /** Picks one of the Cobian task lists found on this computer (or any .lst, from Cobian's folder). */
+  const importCobian = () => setCobianPicker(true);
+
+  /** All tasks, or only `list` (`name` = what the file is named after). */
+  const exportTasks = async (list?: Task[], name = list && list.length === 1 ? list[0].name : "משימות") => {
     const path = await api.saveFile("ייצוא משימות", `Backuper - ${name} ${today()}.json`, "רשימת משימות", ["json"]);
     if (!path) return;
     try {
@@ -46,8 +56,11 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
     }
   };
 
-  /** Saves imported tasks; undo deletes the new ones and restores the ones that were updated. */
-  const save = async (list: Task[]) => {
+  /**
+   * Saves imported tasks, then takes over the Cobian backups of `takeOver` (ids).
+   * Undo deletes the new tasks and restores the ones that were updated (renamed folders stay).
+   */
+  const save = async (list: Task[], takeOver: string[]) => {
     const before = tasks.filter((t) => list.some((n) => n.id === t.id));
     const added = list.filter((n) => !before.some((t) => t.id === n.id)).map((t) => t.id);
     try {
@@ -70,13 +83,49 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
       });
     } catch (e) {
       toast({ tone: "bad", title: "הייבוא נכשל", message: errorText(e) });
+      return;
+    }
+    if (takeOver.length === 0) return;
+    try {
+      toast(takeoverToast(await api.takeOverCobian(takeOver)));
+    } catch (e) {
+      toast({
+        tone: "warn",
+        title: "המשימות יובאו, אבל הגיבויים של Cobian לא הומרו",
+        message: `${errorText(e)}. אפשר להמיר אותם אחר כך מתפריט המשימה - "המשך מגיבויי Cobian".`,
+      });
     }
   };
 
-  const dialog = preview && (
-    <ImportTasksDialog preview={preview.data} origin={preview.origin} onClose={() => setPreview(null)} onImport={save} />
+  const dialog = (
+    <>
+      {cobianPicker && (
+        <CobianListsDialog
+          onClose={() => setCobianPicker(false)}
+          onPick={(path, listName) => {
+            setCobianPicker(false);
+            open(path, { kind: "file", listName });
+          }}
+        />
+      )}
+      {preview && (
+        <ImportTasksDialog
+          preview={preview.data}
+          origin={preview.origin}
+          groups={groupNames(tasks)}
+          onClose={() => setPreview(null)}
+          onImport={save}
+        />
+      )}
+    </>
   );
-  return { importFile, importSnapshot: (path: string, label: string) => open(path, { kind: "snapshot", label }), exportTasks, dialog };
+  return {
+    importFile,
+    importCobian,
+    importSnapshot: (path: string, label: string) => open(path, { kind: "snapshot", label }),
+    exportTasks,
+    dialog,
+  };
 }
 
 function Note({ children }: { children: ReactNode }) {
@@ -92,16 +141,36 @@ function Note({ children }: { children: ReactNode }) {
 function ImportTasksDialog({
   preview,
   origin,
+  groups,
   onClose,
   onImport,
 }: {
   preview: ImportPreview;
   origin: Origin;
+  groups: string[];
   onClose: () => void;
-  onImport: (tasks: Task[]) => void;
+  onImport: (tasks: Task[], takeOver: string[]) => void;
 }) {
   const items = preview.tasks;
   const cobian = preview.source === "cobian";
+  // Our own files carry each task's group; tasks from Cobian / a plain config go into one group,
+  // named after the list file (Cobian's default list, "MainList", means the general list).
+  const askGroup = preview.source !== "backuper";
+  const [group, setGroup] = useState(() =>
+    askGroup && origin.kind === "file" && !/^mainlist$/i.test(origin.listName) ? origin.listName : "",
+  );
+  // Cobian's existing backups in each task's destination, renamed on import so the tasks continue from them.
+  const [plans, setPlans] = useState<Record<string, AdoptPlan> | null>(null);
+  const [takeOver, setTakeOver] = useState(true);
+  useEffect(() => {
+    if (!cobian) return;
+    const valid = items.filter((i) => !i.error).map((i) => i.task);
+    api
+      .planCobianTakeover(valid)
+      .then((list) => setPlans(Object.fromEntries(list.map((p) => [p.taskId, p]))))
+      .catch(() => setPlans({}));
+  }, [cobian, items]);
+  const found = plans ? Object.values(plans).reduce((n, p) => n + planFolderCount(p), 0) : 0;
   // Existing tasks start unchecked, so an import doesn't overwrite later edits by accident.
   // Identical ones would change nothing, so they can't be picked at all.
   const [checked, setChecked] = useState<Set<string>>(
@@ -135,8 +204,17 @@ function ImportTasksDialog({
           <Button onClick={onClose}>ביטול</Button>
           <Button
             variant="primary"
-            disabled={chosen.length === 0}
-            onClick={() => onImport(chosen.map((i) => (asDisabled ? { ...i.task, enabled: false } : i.task)))}
+            disabled={chosen.length === 0 || (cobian && !plans)}
+            onClick={() =>
+              onImport(
+                chosen.map((i) => ({
+                  ...i.task,
+                  ...(asDisabled && { enabled: false }),
+                  ...(askGroup && { group: group.trim() }),
+                })),
+                cobian && takeOver ? chosen.filter((i) => planFolderCount(plans?.[i.task.id]) > 0).map((i) => i.task.id) : [],
+              )
+            }
           >
             {chosen.length === 1 ? "ייבוא משימה אחת" : `ייבוא ${chosen.length} משימות`}
           </Button>
@@ -146,8 +224,8 @@ function ImportTasksDialog({
       <div className="flex flex-col gap-4">
         {cobian && (
           <Note>
-            הגיבויים הקיימים של Cobian לא מזוהים כאן, ולכן הריצה הראשונה של כל משימה תהיה גיבוי מלא. כדי שהמשימות לא
-            ירוצו פעמיים, כדאי להשבית אותן ב-Cobian אחרי הייבוא.
+            אחרי הייבוא השביתו את המשימות ב-Cobian, כדי שלא ירוצו בשתי התוכנות. בלי המשך מהגיבויים של Cobian, הריצה
+            הראשונה של כל משימה תהיה גיבוי מלא.
           </Note>
         )}
         {origin.kind === "snapshot" && (
@@ -155,6 +233,28 @@ function ImportTasksDialog({
             משימות שנמחקו מאז מסומנות לשחזור. משימות ששונו מאז לא מסומנות - סמנו אותן כדי להחזיר אותן לגרסה הזו. משימות
             שנוצרו אחרי הגיבוי לא נמחקות.
           </Note>
+        )}
+
+        {cobian &&
+          (!plans ? (
+            <div className="flex items-center gap-2 text-[13px] text-muted">
+              <Spinner className="size-4" /> מחפש גיבויים קיימים של Cobian ביעדים...
+            </div>
+          ) : (
+            found > 0 && (
+              <Toggle
+                checked={takeOver}
+                onChange={setTakeOver}
+                label="להמשיך מהגיבויים הקיימים של Cobian"
+                description="מעבר חד-פעמי: התיקיות ש-Cobian יצר מקבלות את השמות של התוכנה הזו (בלי להעתיק דבר), והגיבוי האינקרמנטלי הבא מעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian."
+              />
+            )
+          ))}
+
+        {askGroup && (
+          <Field label="קבוצה למשימות המיובאות" hint="ריק = הרשימה הכללית. אפשר להעביר משימות בין קבוצות גם אחר כך.">
+            <GroupInput className="max-w-80" value={group} groups={groups} onChange={setGroup} />
+          </Field>
         )}
 
         <Toggle
@@ -237,6 +337,7 @@ function ImportTasksDialog({
                       <span>{t.filters.map(describeFilter).join("; ")}</span>
                     </div>
                   )}
+                  {cobian && takeOver && plans?.[t.id] && !i.error && <TakeoverSummary plan={plans[t.id]} />}
                   {i.warnings.map((w) => (
                     <div key={w} className="flex gap-1.5 text-warn">
                       <AlertTriangle size={14} className="mt-0.5 shrink-0" />

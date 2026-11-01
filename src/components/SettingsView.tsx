@@ -414,6 +414,9 @@ function TaskListBackupCard({
         <Button icon={<Import size={16} />} onClick={transfer.importFile}>
           ייבוא מקובץ (Backuper או Cobian)
         </Button>
+        <Button icon={<History size={16} />} onClick={transfer.importCobian}>
+          ייבוא מ-Cobian
+        </Button>
         <Button icon={<FolderSearch size={16} />} onClick={restoreFromFolder}>
           שחזור מתיקייה
         </Button>

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { BackupMode, ImportPreview, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task, TaskSnapshot } from "./types";
+import type { AdoptPlan, AdoptResult, BackupMode, CobianLists, ImportPreview, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task, TaskSnapshot } from "./types";
 
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
@@ -27,6 +27,12 @@ export const api = {
   exportTasks: (path: string, ids: string[] | null = null) => invoke<number>("export_tasks", { path, ids }),
   /** The automatic snapshots, or those in `dir` (a folder the user picked). */
   listTaskSnapshots: (dir: string | null = null) => invoke<TaskSnapshot[]>("list_task_snapshots", { dir }),
+  /** Cobian Backup / Reflector task lists on this computer, and the folder to open a file dialog in. */
+  findCobianLists: () => invoke<CobianLists>("find_cobian_lists"),
+  /** Which Cobian backup folders these tasks (saved or still in an import preview) would take over. */
+  planCobianTakeover: (tasks: Task[]) => invoke<AdoptPlan[]>("plan_cobian_takeover", { tasks }),
+  /** Renames the saved tasks' Cobian backup folders, so they continue from Cobian's last backup. */
+  takeOverCobian: (ids: string[]) => invoke<AdoptResult>("take_over_cobian", { ids }),
   dismissNotice: () => invoke<void>("dismiss_notice"),
   /** Shows a sample notification with this sound. */
   testSound: (sound: string) => invoke<void>("test_sound", { sound }),
@@ -38,8 +44,8 @@ export const api = {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;
   },
-  pickFile: async (title: string, filterName: string, extensions: string[]) => {
-    const r = await open({ multiple: false, title, filters: [{ name: filterName, extensions }] });
+  pickFile: async (title: string, filterName: string, extensions: string[], defaultPath?: string) => {
+    const r = await open({ multiple: false, title, defaultPath: defaultPath || undefined, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;
   },
   pickFolder: async (title: string, defaultPath?: string) => {

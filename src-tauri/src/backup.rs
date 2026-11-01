@@ -41,7 +41,7 @@ pub fn default_folder_name(path: &str) -> String {
     sanitize_folder_name(last.trim_end_matches(':'))
 }
 
-fn normalize(p: &str) -> String {
+pub fn normalize(p: &str) -> String {
     let s = p.trim().replace('/', "\\");
     let s = s.trim_end_matches('\\').to_lowercase();
     s + "\\"
@@ -112,7 +112,7 @@ pub fn validate_task(t: &Task) -> Result<(), String> {
     crate::schedule::validate(&t.schedule)
 }
 
-fn parse_folder(prefix: &str, name: &str) -> Option<(DateTime<Local>, BackupMode, bool)> {
+pub fn parse_folder(prefix: &str, name: &str) -> Option<(DateTime<Local>, BackupMode, bool)> {
     let rest = name.strip_prefix(prefix)?.strip_prefix(' ')?;
     let (rest, partial) = match rest.strip_suffix(PARTIAL) {
         Some(r) => (r, true),
@@ -180,14 +180,20 @@ pub fn delete_backup(task: &Task, folder_name: &str, name: &str) -> Result<(), S
     fs::remove_dir_all(&found.path).map_err(|e| format!("מחיקה נכשלה: {e}"))
 }
 
-fn new_folder_path(dest: &Path, prefix: &str, now: DateTime<Local>, kind: BackupMode) -> PathBuf {
+/// A dated folder's name: "<prefix> 2026-10-01 03-00 מלא" (with seconds: "... 03-00-15 מלא").
+pub fn dated_folder_name(prefix: &str, at: NaiveDateTime, kind: BackupMode, seconds: bool) -> String {
     let tag = if kind == BackupMode::Full { FULL_TAG } else { INCREMENTAL_TAG };
+    let fmt = if seconds { DATE_FMT_SECS } else { DATE_FMT };
+    format!("{prefix} {} {tag}", at.format(fmt))
+}
+
+fn new_folder_path(dest: &Path, prefix: &str, now: DateTime<Local>, kind: BackupMode) -> PathBuf {
     let taken = |n: &str| dest.join(n).exists() || dest.join(format!("{n}{PARTIAL}")).exists();
-    let name = format!("{prefix} {} {tag}", now.format(DATE_FMT));
+    let name = dated_folder_name(prefix, now.naive_local(), kind, false);
     if !taken(&name) {
         return dest.join(name);
     }
-    dest.join(format!("{prefix} {} {tag}", now.format(DATE_FMT_SECS)))
+    dest.join(dated_folder_name(prefix, now.naive_local(), kind, true))
 }
 
 fn with_partial(p: &Path) -> PathBuf {
@@ -201,7 +207,7 @@ fn file_name(p: &Path) -> String {
 }
 
 /// Windows can briefly hold a folder (indexer, antivirus); retry renames a few times.
-fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut last = Ok(());
     for i in 0..10 {
         last = fs::rename(from, to);
@@ -1044,6 +1050,42 @@ mod tests {
         let r = env.run(&t, BackupMode::Incremental, "2026-10-03 03:00");
         assert_eq!(r[0].files_copied, 0, "{r:?}");
         assert!(manifest::read(&full).is_some(), "rebuilt");
+    }
+
+    /// Cobian's folders, taken over: the next incremental copies only what changed after Cobian's last backup.
+    #[test]
+    fn continues_from_cobian_backups() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Docs"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        for f in ["a.txt", "b.txt", "sub\\c.txt"] {
+            fs::write(src.join(f), f).unwrap();
+        }
+        // What Cobian left: a full, then an incremental with b.txt changed (copies keep the file times).
+        let full = dst.join("Docs 2026-09-28 03;00;00");
+        fs::create_dir_all(full.join("sub")).unwrap();
+        for f in ["a.txt", "b.txt", "sub\\c.txt"] {
+            fs::copy(src.join(f), full.join(f)).unwrap();
+        }
+        fs::write(src.join("b.txt"), "b changed").unwrap();
+        let inc = dst.join("Docs 2026-09-29 03;00;00");
+        fs::create_dir_all(&inc).unwrap();
+        fs::copy(src.join("b.txt"), inc.join("b.txt")).unwrap();
+
+        let t = Task {
+            id: "t".into(),
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        let r = crate::cobianmigrate::apply(&t, &[]);
+        assert_eq!((r.renamed, r.errors.len()), (2, 0), "{r:?}");
+        assert_eq!(env.names(&t, 0), ["Docs 2026-09-28 03-00 מלא", "Docs 2026-09-29 03-00 אינקרמנטלי"]);
+
+        // Changed after Cobian's last backup: a new file only.
+        fs::write(src.join("d.txt"), "d").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-01 03:00");
+        assert_eq!(r[0].mode, Some(BackupMode::Incremental), "{r:?}");
+        assert_eq!(r[0].files_copied, 1, "{r:?}");
+        assert!(dst.join("Docs 2026-10-01 03-00 אינקרמנטלי").join("d.txt").exists());
     }
 
     /// A source file that happens to have the index file's name is backed up as is.
