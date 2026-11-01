@@ -40,14 +40,29 @@ import type { BackupMode, RunRecord, RunStatus, Snapshot, Task } from "../types"
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
-import { CobianTakeoverDialog } from "./CobianDialogs";
+import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
 import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
 import { useTaskListTransfer } from "./ImportTasksDialog";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
-import { Badge, Button, Checkbox, ColumnResizer, cx, EmptyState, IconButton, Menu, type MenuItem, PathLink, PathText, Select, Spinner, TextInput } from "./ui";
+import {
+  Badge,
+  Button,
+  Checkbox,
+  ColumnResizer,
+  cx,
+  EmptyState,
+  IconButton,
+  Menu,
+  type MenuItem,
+  PathLink,
+  PathText,
+  Select,
+  Spinner,
+  TextInput,
+} from "./ui";
 
 export const statusBadge = (s: RunStatus) =>
   ({
@@ -122,6 +137,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     { kind: "new"; moving: Task[] | null } | { kind: "rename"; from: string } | null
   >(null);
   const [takeoverOf, setTakeoverOf] = useState<Task | null>(null);
+  const [manualRun, setManualRun] = useState<{ ids: string[]; mode: BackupMode | null } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Task | null>(null);
@@ -145,7 +161,8 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     CHECK_COL + MIN_ACTIONS_COL + (nameAuto ? MIN_NAME_COL : 0) + RESIZABLE.reduce((sum, k) => sum + cols.widths[k], 0);
   const nameHeader = useRef<HTMLTableCellElement>(null);
   // Once a border is dragged, every column gets a fixed width, so only the dragged border moves.
-  const freezeName = () => nameAuto && nameHeader.current && cols.setWidth("name", nameHeader.current.getBoundingClientRect().width);
+  const freezeName = () =>
+    nameAuto && nameHeader.current && cols.setWidth("name", nameHeader.current.getBoundingClientRect().width);
   const transfer = useTaskListTransfer(snap.tasks, refresh);
 
   const usedGroups = groupNames(snap.tasks);
@@ -167,9 +184,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     const q = query.trim().toLowerCase();
     const shown = snap.tasks.filter(inGroup);
     const found = q
-      ? shown.filter((t) =>
-          [t.name, t.destination, ...t.sources.map((s) => s.path)].some((s) => s.toLowerCase().includes(q)),
-        )
+      ? shown.filter((t) => [t.name, t.destination, ...t.sources.map((s) => s.path)].some((s) => s.toLowerCase().includes(q)))
       : shown;
     return sortTasks(found, sort, snap.states);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -190,10 +205,43 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       return n;
     });
 
-  const run = async (ids: string[], mode: BackupMode | null = null) => {
+  const runNow = async (ids: string[], mode: BackupMode | null = null) => {
     const n = await api.runTasks(ids, mode);
     if (n === 0) toast({ tone: "info", title: "המשימה כבר רצה או ממתינה בתור" });
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
+  };
+
+  // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
+  // The question comes up when one is switched on, or when someone runs it by hand.
+  const run = async (ids: string[], mode: BackupMode | null = null) => {
+    const waiting = snap.tasks.filter((t) => ids.includes(t.id) && t.cobianPending).map((t) => t.id);
+    const rest = ids.filter((id) => !waiting.includes(id));
+    if (rest.length > 0) await runNow(rest, mode);
+    if (waiting.length > 0) setManualRun({ ids: waiting, mode });
+  };
+  const askCobian = snap.tasks.filter((t) => t.cobianPending && (t.enabled || manualRun?.ids.includes(t.id)));
+  const cobianDecided = () => {
+    const m = manualRun;
+    setManualRun(null);
+    refresh();
+    if (m) void runNow(m.ids, m.mode);
+  };
+  /** "Later": switched-on tasks go back to switched off (they're asked again when switched on). */
+  const cobianLater = async () => {
+    setManualRun(null);
+    const on = askCobian.filter((t) => t.enabled);
+    if (on.length === 0) return;
+    try {
+      await api.saveTasks(on.map((t) => ({ ...t, enabled: false })));
+      refresh();
+      toast({
+        tone: "info",
+        title: on.length === 1 ? "המשימה נשארה מושבתת" : `${on.length} משימות נשארו מושבתות`,
+        message: "תישאלו אם להמשיך מהגיבויים של Cobian כשתפעילו אותן.",
+      });
+    } catch (e) {
+      toast({ tone: "bad", title: "השמירה נכשלה", message: errorText(e) });
+    }
   };
 
   /** Saves tasks and offers to undo by restoring the previous versions. */
@@ -296,7 +344,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const moveItems = (list: Task[], long = false): MenuItem[] => [
     ...allGroups
       .filter((g) => !list.every((t) => sameGroup(groupOf(t), g)))
-      .map((g) => ({ label: long ? `העברה לקבוצה: ${g}` : g, icon: <FolderInput size={14} />, onClick: () => moveToGroup(list, g) })),
+      .map((g) => ({
+        label: long ? `העברה לקבוצה: ${g}` : g,
+        icon: <FolderInput size={14} />,
+        onClick: () => moveToGroup(list, g),
+      })),
     ...(list.some((t) => groupOf(t))
       ? [
           {
@@ -390,7 +442,12 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         <nav aria-label="קבוצות משימות" className="flex flex-wrap items-center gap-1.5">
           {allGroups.length > 0 && (
             <>
-              <GroupTab label="כל המשימות" count={snap.tasks.length} active={group === null} onClick={() => setActiveGroup(null)} />
+              <GroupTab
+                label="כל המשימות"
+                count={snap.tasks.length}
+                active={group === null}
+                onClick={() => setActiveGroup(null)}
+              />
               {allGroups.map((g) => (
                 <GroupTab
                   key={g}
@@ -405,7 +462,12 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
               )}
             </>
           )}
-          <Button size="sm" variant="ghost" icon={<FolderPlus size={15} />} onClick={() => setGroupDialog({ kind: "new", moving: null })}>
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<FolderPlus size={15} />}
+            onClick={() => setGroupDialog({ kind: "new", moving: null })}
+          >
             קבוצה חדשה
           </Button>
           {group && (
@@ -429,7 +491,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                   onClick: () => transfer.exportTasks(groupTasksList, group),
                 },
                 "separator",
-                { label: "שינוי שם הקבוצה", icon: <Pencil size={14} />, onClick: () => setGroupDialog({ kind: "rename", from: group }) },
+                {
+                  label: "שינוי שם הקבוצה",
+                  icon: <Pencil size={14} />,
+                  onClick: () => setGroupDialog({ kind: "rename", from: group }),
+                },
                 { label: "ביטול הקבוצה", icon: <X size={14} />, onClick: () => dissolveGroup(group) },
               ]}
             />
@@ -506,7 +572,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           <EmptyState icon={<FolderPlus size={26} />} title={`אין עדיין משימות בקבוצה "${group}"`}>
             <p>צרו משימה חדשה בקבוצה, או סמנו משימות ברשימה של כל המשימות והעבירו אותן לכאן עם &quot;העבר לקבוצה&quot;.</p>
             <div className="mt-4 flex flex-wrap justify-center gap-2">
-              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing({ ...newTask(), group: group ?? "" })}>
+              <Button
+                variant="primary"
+                icon={<Plus size={16} />}
+                onClick={() => setEditing({ ...newTask(), group: group ?? "" })}
+              >
                 משימה חדשה בקבוצה
               </Button>
               <Button onClick={() => setActiveGroup(null)}>לכל המשימות</Button>
@@ -789,6 +859,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       {transfer.dialog}
       {runDetails && <RunDetails run={runDetails} onClose={() => setRunDetails(null)} />}
       {backupsOf && <BackupsDialog task={backupsOf} onClose={() => setBackupsOf(null)} />}
+      {askCobian.length > 0 && <CobianPendingDialog tasks={askCobian} onCancel={cobianLater} onResolved={cobianDecided} />}
       {takeoverOf && (
         <CobianTakeoverDialog
           task={takeoverOf}

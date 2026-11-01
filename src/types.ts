@@ -42,6 +42,8 @@ export interface Task {
   name: string;
   /** The task list (group) it belongs to; "" = the general list. */
   group: string;
+  /** Imported from Cobian; waiting for the user to take over (or decline) Cobian's backups. Nothing runs meanwhile. */
+  cobianPending: boolean;
   sources: Source[];
   destination: string;
   /** Backup type of the main schedule. */
@@ -288,6 +290,7 @@ export const newTask = (): Task => ({
   id: "",
   name: "",
   group: "",
+  cobianPending: false,
   sources: [],
   destination: "",
   mode: "incremental",

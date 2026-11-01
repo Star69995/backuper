@@ -1,7 +1,21 @@
 // Dev-only: lets the UI run in a plain browser (`npm run dev`) with fake data,
 // for visual checks and screenshots. Never loaded inside the real Tauri app.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { AdoptPlan, ImportedTask, ImportPreview, Notice, RunRecord, Schedule, Settings, Snapshot, SourceBackups, SourceRun, Task, TaskState, UpdateStatus } from "../types";
+import type {
+  AdoptPlan,
+  ImportedTask,
+  ImportPreview,
+  Notice,
+  RunRecord,
+  Schedule,
+  Settings,
+  Snapshot,
+  SourceBackups,
+  SourceRun,
+  Task,
+  TaskState,
+  UpdateStatus,
+} from "../types";
 import { newTask } from "../types";
 
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
@@ -124,7 +138,17 @@ export function installDevMock() {
         error: null,
         installWaiting: false,
       }
-    : { currentVersion: "0.3.4", state: "upToDate", version: null, notes: null, downloaded: 0, total: null, checkedAt: iso(-90), error: null, installWaiting: false };
+    : {
+        currentVersion: "0.3.4",
+        state: "upToDate",
+        version: null,
+        notes: null,
+        downloaded: 0,
+        total: null,
+        checkedAt: iso(-90),
+        error: null,
+        installWaiting: false,
+      };
   const sourceRun = (folderName: string, source: string, i: number): SourceRun => ({
     source,
     folderName,
@@ -253,6 +277,8 @@ export function installDevMock() {
     },
   });
 
+  const releaseCobianPending = (ids: string[]) => tasks.forEach((t) => ids.includes(t.id) && (t.cobianPending = false));
+
   mockIPC((cmd, args) => {
     const a = args as Record<string, unknown>;
     switch (cmd) {
@@ -342,9 +368,14 @@ export function installDevMock() {
       case "plan_cobian_takeover":
         return (a.tasks as Task[]).map((t) => cobianPlan(t));
       case "take_over_cobian":
+        releaseCobianPending(a.ids as string[]);
         return { renamed: (a.ids as string[]).length * 3, errors: [] };
+      case "decline_cobian_takeover":
+        releaseCobianPending(a.ids as string[]);
+        return null;
       case "run_tasks":
-        return (a.ids as string[]).length;
+        // Like the real queue: a task waiting for the Cobian decision doesn't run.
+        return (a.ids as string[]).filter((id) => !tasks.find((t) => t.id === id)?.cobianPending).length;
       case "plugin:app|version":
         return "0.2.0 (dev)";
       case "plugin:event|listen":
@@ -355,7 +386,7 @@ export function installDevMock() {
   });
 }
 
-/** Cobian's dated folders in the task's destination: a full and two incrementals per source (none for disabled tasks). */
+/** Cobian's dated folders in the task's destination: a full and two incrementals per source (none for disabled tasks, unless one waits for the Cobian decision). */
 function cobianPlan(t: Task): AdoptPlan {
   const day = (n: number) => {
     const d = new Date(Date.now() - n * 86_400_000);
@@ -369,14 +400,15 @@ function cobianPlan(t: Task): AdoptPlan {
       source: s.path,
       folderName: s.folderName,
       warnings: [],
-      folders: t.enabled
-        ? [3, 2, 1].map((n, i) => ({
-            from: `${s.folderName} ${day(n).cobian} 23;35;0${i}${t.mode === "full" || i === 0 ? " (Full)" : ""}`,
-            to: `${s.folderName} ${day(n).cobian} 23-35 ${t.mode === "full" || i === 0 ? "מלא" : "אינקרמנטלי"}`,
-            kind: t.mode === "full" || i === 0 ? ("full" as const) : ("incremental" as const),
-            createdAt: day(n).iso,
-          }))
-        : [],
+      folders:
+        t.enabled || t.cobianPending
+          ? [3, 2, 1].map((n, i) => ({
+              from: `${s.folderName} ${day(n).cobian} 23;35;0${i}${t.mode === "full" || i === 0 ? " (Full)" : ""}`,
+              to: `${s.folderName} ${day(n).cobian} 23-35 ${t.mode === "full" || i === 0 ? "מלא" : "אינקרמנטלי"}`,
+              kind: t.mode === "full" || i === 0 ? ("full" as const) : ("incremental" as const),
+              createdAt: day(n).iso,
+            }))
+          : [],
     })),
   };
 }
@@ -391,6 +423,7 @@ function cobianImport(): ImportedTask[] {
         schedule: { kind: "daily", time: "23:35" },
         fullSchedule: { kind: "weekly", days: [0], time: "23:35" },
         copyEmptyDirs: true,
+        group: "מסמכים",
       }),
       warnings: [],
       error: null,
@@ -431,13 +464,13 @@ function cobianImport(): ImportedTask[] {
         schedule: { kind: "daily", time: "01:00" },
       }),
       warnings: [],
-      error: 'למשימות "תמונות משפחה" ו-"Photos to E" יש תיקיית מקור עם אותו שם תיקיית גיבוי (תמונות) באותו יעד - יש לשנות אחד מהם',
+      error:
+        'למשימות "תמונות משפחה" ו-"Photos to E" יש תיקיית מקור עם אותו שם תיקיית גיבוי (תמונות) באותו יעד - יש לשנות אחד מהם',
       exists: false,
       unchanged: false,
     },
   ];
 }
-
 
 /** A snapshot: the current tasks (one edited since), plus one deleted since. */
 function snapshotImport(current: Task[]): ImportPreview {
@@ -449,7 +482,13 @@ function snapshotImport(current: Task[]): ImportPreview {
     unchanged: i !== 0,
   }));
   items.push({
-    task: { ...newTask(), id: "deleted", name: "גיבוי מסמכים ישן", sources: [{ path: "C:\\Old", folderName: "Old" }], destination: "E:\\Backups" },
+    task: {
+      ...newTask(),
+      id: "deleted",
+      name: "גיבוי מסמכים ישן",
+      sources: [{ path: "C:\\Old", folderName: "Old" }],
+      destination: "E:\\Backups",
+    },
     warnings: [],
     error: null,
     exists: false,

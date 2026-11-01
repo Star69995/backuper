@@ -179,6 +179,109 @@ export function TakeoverSummary({ plan, defaultOpen = false }: { plan: AdoptPlan
   );
 }
 
+/**
+ * Tasks imported from Cobian that wait for the decision about Cobian's backups, and are now switched on
+ * (or about to be run by hand). Nothing runs for them until it's made. Tasks with no Cobian backups in
+ * their destination (any more) have nothing to decide and are released silently.
+ * `onCancel` = decide later; `onResolved` = every listed task may run now.
+ */
+export function CobianPendingDialog({
+  tasks,
+  onCancel,
+  onResolved,
+}: {
+  tasks: Task[];
+  onCancel: () => void;
+  onResolved: () => void;
+}) {
+  const { toast } = useFeedback();
+  const [plans, setPlans] = useState<Record<string, AdoptPlan> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const key = tasks.map((t) => t.id).join(",");
+  useEffect(() => {
+    setPlans(null);
+    api
+      .planCobianTakeover(tasks)
+      .then((list) => setPlans(Object.fromEntries(list.map((p) => [p.taskId, p]))))
+      .catch(() => setPlans({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const found = plans ? tasks.filter((t) => planFolderCount(plans[t.id]) > 0) : [];
+  useEffect(() => {
+    if (!plans) return;
+    const none = tasks.filter((t) => planFolderCount(plans[t.id]) === 0).map((t) => t.id);
+    if (none.length === 0) return;
+    api
+      .declineCobianTakeover(none)
+      .then(() => found.length === 0 && onResolved())
+      .catch((e) => toast({ tone: "bad", title: "העדכון נכשל", message: errorText(e) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plans]);
+  if (!plans || found.length === 0) return null;
+
+  const ids = found.map((t) => t.id);
+  const answer = async (takeOver: boolean) => {
+    setBusy(true);
+    try {
+      if (takeOver) {
+        const r = await api.takeOverCobian(ids);
+        toast(takeoverToast(r));
+        if (r.errors.length > 0) return setBusy(false);
+      } else {
+        await api.declineCobianTakeover(ids);
+      }
+      onResolved();
+    } catch (e) {
+      toast({ tone: "bad", title: takeOver ? "ההמרה נכשלה" : "העדכון נכשל", message: errorText(e) });
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="להמשיך מהגיבויים של Cobian?"
+      subtitle={found.length === 1 ? found[0].name : `${found.length} משימות`}
+      size="lg"
+      onClose={onCancel}
+      footer={
+        <>
+          <Button onClick={onCancel} disabled={busy}>
+            ביטול
+          </Button>
+          <Button disabled={busy} onClick={() => answer(false)}>
+            בלי להמשיך
+          </Button>
+          <Button variant="primary" disabled={busy} onClick={() => answer(true)}>
+            {busy ? "ממיר..." : "המשך מגיבויי Cobian"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 text-[13px]">
+        <p>
+          {found.length === 1 ? "המשימה יובאה" : "המשימות יובאו"} מ-Cobian, וביעד {found.length === 1 ? "שלה" : "שלהן"} נמצאו
+          גיבויים ש-Cobian כבר יצר. אם ממשיכים מהם, התיקיות מקבלות את השמות של התוכנה הזו (רק שינוי שם, בלי להעתיק דבר), והגיבוי
+          האינקרמנטלי הבא מעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian. בלי להמשיך, הגיבוי הראשון יהיה מלא והתיקיות של Cobian לא
+          ייגעו.
+        </p>
+        <p className="text-muted">
+          ביטול משאיר את {found.length === 1 ? "המשימה" : "המשימות"} מושבתות, ותישאלו שוב כשתפעילו{" "}
+          {found.length === 1 ? "אותה" : "אותן"}. אחרי ההמשך מהגיבויים Cobian כבר לא מזהה את התיקיות - השביתו את המשימות ב-Cobian,
+          כדי שלא ירוצו בשתי התוכנות.
+        </p>
+        <ul className="flex flex-col gap-2">
+          {found.map((t) => (
+            <li key={t.id} className="flex flex-col gap-1.5 rounded-lg border border-line p-3">
+              <span className="text-sm font-medium">{t.name}</span>
+              <TakeoverSummary plan={plans[t.id]} />
+            </li>
+          ))}
+        </ul>
+      </div>
+    </Modal>
+  );
+}
+
 /** For a saved task: finds its Cobian backups in the destination and takes them over. */
 export function CobianTakeoverDialog({ task, onClose, onDone }: { task: Task; onClose: () => void; onDone: () => void }) {
   const { toast } = useFeedback();

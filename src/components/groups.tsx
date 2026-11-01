@@ -1,6 +1,7 @@
-import { useEffect, useId, useState } from "react";
+import { Check, ChevronDown, List, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { Task } from "../types";
-import { Button, Field, Modal, TextInput } from "./ui";
+import { Button, cx, Field, IconButton, inputCls, Menu, type MenuItem, Modal, TextInput } from "./ui";
 
 /** Name shown for the tasks that aren't in any group. */
 export const GENERAL_GROUP = "כללי";
@@ -16,7 +17,11 @@ export const groupNames = (tasks: Task[]) =>
 
 export const sameGroup = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
-/** Free text with the existing groups as suggestions; empty = general list. */
+/**
+ * Picks the general list or one of the existing groups from a dropdown menu; "קבוצה חדשה..." swaps the
+ * menu for a text field (with a button back to the list). With no groups yet it is just the text field.
+ * Empty value = general list.
+ */
 export function GroupInput({
   value,
   onChange,
@@ -28,22 +33,65 @@ export function GroupInput({
   groups: string[];
   className?: string;
 }) {
-  const listId = useId();
+  const [adding, setAdding] = useState(false);
+  const name = value.trim();
+  const existing = groups.find((g) => sameGroup(g, name));
+  if (adding || groups.length === 0) {
+    return (
+      <div className={cx("flex min-w-0 items-center gap-1.5", className)}>
+        <TextInput
+          className="min-w-0 flex-1"
+          autoFocus={adding}
+          value={value}
+          placeholder="שם הקבוצה החדשה"
+          onChange={(e) => onChange(e.target.value)}
+        />
+        {groups.length > 0 && (
+          <IconButton label="בחירה מהקבוצות הקיימות" onClick={() => setAdding(false)}>
+            <List size={16} />
+          </IconButton>
+        )}
+      </div>
+    );
+  }
+  const current = existing ?? name;
+  const choice = (label: string, v: string): MenuItem => ({
+    label,
+    icon: current === v ? <Check size={14} /> : undefined,
+    onClick: () => onChange(v),
+  });
   return (
-    <>
-      <TextInput
-        className={className}
-        value={value}
-        list={listId}
-        placeholder={`${GENERAL_GROUP} (ללא קבוצה)`}
-        onChange={(e) => onChange(e.target.value)}
+    <div className={cx("min-w-0", className)}>
+      <Menu
+        fill
+        items={[
+          choice(`${GENERAL_GROUP} (ללא קבוצה)`, ""),
+          ...groups.map((g) => choice(g, g)),
+          // A name typed earlier (or taken from the list file) that no task uses yet.
+          ...(name && !existing ? [choice(`${name} (חדשה)`, name)] : []),
+          "separator",
+          {
+            label: "קבוצה חדשה...",
+            icon: <Plus size={14} />,
+            onClick: () => {
+              setAdding(true);
+              onChange("");
+            },
+          },
+        ]}
+        trigger={(open) => (
+          <button
+            type="button"
+            aria-haspopup="menu"
+            onClick={open}
+            className={cx(inputCls, "flex w-full cursor-pointer items-center justify-between gap-2 text-start")}
+          >
+            <span className="truncate">{current || `${GENERAL_GROUP} (ללא קבוצה)`}</span>
+            <ChevronDown size={14} className="shrink-0 text-muted" />
+          </button>
+        )}
       />
-      <datalist id={listId}>
-        {groups.map((g) => (
-          <option key={g} value={g} />
-        ))}
-      </datalist>
-    </>
+    </div>
   );
 }
 

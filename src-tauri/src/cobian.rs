@@ -252,6 +252,8 @@ fn convert(t: Sec) -> Imported {
             .unwrap_or_default(),
         name: t.get("TaskName").unwrap_or("").trim().to_string(),
         enabled: t.flag("TaskEnabled").unwrap_or(true),
+        // Cobian's own task group; empty = none (the import dialog then offers the list file's name).
+        group: t.get("TaskGroup").unwrap_or("").trim().to_string(),
         // Cobian copies empty folders unless told to ignore them.
         copy_empty_dirs: !t.flag("TaskIgnoreEmptyDirectories").unwrap_or(false),
         ..Task::default()
@@ -370,6 +372,7 @@ mod tests {
             &[
                 "TaskId=7d7c8a4d-1704-4eed-bbc7-368049912640",
                 "TaskName=Docs to K Daily א-ב",
+                "TaskGroup= מסמכים ",
                 "TaskEnabled=True",
                 "TaskBackupType=1",
                 &format!("TaskSource={}", r("s1")),
@@ -402,6 +405,7 @@ mod tests {
             &[
                 "TaskId=f7e7a81f",
                 "TaskName=LR catalogs",
+                "TaskGroup=",
                 "TaskEnabled=False",
                 "TaskBackupType=0",
                 &format!("TaskSource={}", r("s3")),
@@ -436,6 +440,7 @@ mod tests {
         let a = &list[0].task;
         assert_eq!(a.id, "7d7c8a4d-1704-4eed-bbc7-368049912640");
         assert_eq!(a.name, "Docs to K Daily א-ב");
+        assert_eq!(a.group, "מסמכים");
         assert!(a.enabled && a.copy_empty_dirs);
         assert_eq!(
             a.sources.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
@@ -456,6 +461,7 @@ mod tests {
         assert!(list[0].warnings.is_empty(), "{:?}", list[0].warnings);
 
         let b = &list[1].task;
+        assert_eq!(b.group, "");
         assert!(!b.enabled);
         assert_eq!(b.mode, BackupMode::Full);
         assert_eq!(b.full_schedule, None);

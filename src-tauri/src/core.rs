@@ -184,6 +184,18 @@ impl Core {
 
     /// Returns false if the task is already queued or running.
     pub fn enqueue(&self, job: Job) -> bool {
+        // A task imported from Cobian waits for the user's answer about Cobian's existing backups:
+        // a first run now would write a full backup next to them instead of continuing from them.
+        if self
+            .store
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|t| t.id == job.task_id && t.cobian_pending)
+        {
+            return false;
+        }
         let running = self.current.lock().unwrap().as_ref().map(|p| p.task_id.clone());
         let mut q = self.queue.lock().unwrap();
         if running.as_deref() == Some(job.task_id.as_str()) {

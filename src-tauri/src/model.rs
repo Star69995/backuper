@@ -128,6 +128,9 @@ pub struct Task {
     /// Combined mode (with mode = Incremental): full backups run on this schedule, incrementals on `schedule`.
     pub full_schedule: Option<Schedule>,
     pub enabled: bool,
+    /// Imported from Cobian whose existing backups in the destination haven't been taken over or
+    /// declined yet. Nothing runs (scheduled, drive-connect or manual) until the user decides.
+    pub cobian_pending: bool,
     pub keep_mode: KeepMode,
     /// KeepMode::Count: how many full backups (each with its incrementals) to keep per source (>= 1).
     pub keep_count: u32,
@@ -166,6 +169,7 @@ impl Default for Task {
             schedule: Schedule::Manual,
             full_schedule: None,
             enabled: true,
+            cobian_pending: false,
             keep_mode: KeepMode::Count,
             keep_count: 1,
             keep_days: 30,

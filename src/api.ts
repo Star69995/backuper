@@ -1,7 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { AdoptPlan, AdoptResult, BackupMode, CobianLists, ImportPreview, Progress, RunRecord, Schedule, Settings, Snapshot, SourceBackups, Task, TaskSnapshot } from "./types";
+import type {
+  AdoptPlan,
+  AdoptResult,
+  BackupMode,
+  CobianLists,
+  ImportPreview,
+  Progress,
+  RunRecord,
+  Schedule,
+  Settings,
+  Snapshot,
+  SourceBackups,
+  Task,
+  TaskSnapshot,
+} from "./types";
 
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
@@ -33,6 +47,8 @@ export const api = {
   planCobianTakeover: (tasks: Task[]) => invoke<AdoptPlan[]>("plan_cobian_takeover", { tasks }),
   /** Renames the saved tasks' Cobian backup folders, so they continue from Cobian's last backup. */
   takeOverCobian: (ids: string[]) => invoke<AdoptResult>("take_over_cobian", { ids }),
+  /** "Don't continue from Cobian's backups" for tasks waiting for that decision: they may run now. */
+  declineCobianTakeover: (ids: string[]) => invoke<void>("decline_cobian_takeover", { ids }),
   dismissNotice: () => invoke<void>("dismiss_notice"),
   /** Shows a sample notification with this sound. */
   testSound: (sound: string) => invoke<void>("test_sound", { sound }),
@@ -45,7 +61,12 @@ export const api = {
     return typeof r === "string" ? r : null;
   },
   pickFile: async (title: string, filterName: string, extensions: string[], defaultPath?: string) => {
-    const r = await open({ multiple: false, title, defaultPath: defaultPath || undefined, filters: [{ name: filterName, extensions }] });
+    const r = await open({
+      multiple: false,
+      title,
+      defaultPath: defaultPath || undefined,
+      filters: [{ name: filterName, extensions }],
+    });
     return typeof r === "string" ? r : null;
   },
   pickFolder: async (title: string, defaultPath?: string) => {

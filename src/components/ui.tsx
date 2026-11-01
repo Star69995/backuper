@@ -101,7 +101,7 @@ export function Field({
 /** Inputs fill their container unless the caller gives them a width class. */
 const withWidth = (className?: string) => cx(!/(^|\s)(w-|max-w-|flex-1)/.test(className ?? "") && "w-full", className);
 
-const inputCls =
+export const inputCls =
   "h-9 rounded-lg border border-line bg-panel px-3 text-base text-fg placeholder:text-muted/70 " +
   "focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:opacity-60";
 
@@ -292,6 +292,41 @@ export function Segmented<T extends string>({
   );
 }
 
+/** A choice between a few options, each with a title and an explanation. */
+export function ChoiceCards<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; title: string; text: string }[];
+}) {
+  return (
+    <div role="radiogroup" className="flex flex-col gap-2">
+      {options.map((o) => {
+        const on = value === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            onClick={() => onChange(o.value)}
+            className={cx(
+              "flex flex-col gap-0.5 rounded-lg border p-3 text-start",
+              on ? "border-accent/40 bg-accent-soft/50" : "border-line hover:bg-panel2",
+            )}
+          >
+            <span className="text-sm font-medium">{o.title}</span>
+            <span className="text-[13px] text-muted">{o.text}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Spinner({ className }: { className?: string }) {
   return (
     <span
@@ -377,8 +412,11 @@ export function Modal({
 export type MenuItem =
   { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean } | "separator";
 
-/** Dropdown menu rendered in a portal (so tables with overflow don't clip it). */
-export function Menu({ trigger, items }: { trigger: (open: () => void) => ReactNode; items: MenuItem[] }) {
+/**
+ * Dropdown menu rendered in a portal (so tables with overflow don't clip it).
+ * `fill`: the trigger spans its container and the menu is at least as wide (a form field that picks from a list).
+ */
+export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => ReactNode; items: MenuItem[]; fill?: boolean }) {
   const anchor = useRef<HTMLSpanElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
@@ -417,7 +455,7 @@ export function Menu({ trigger, items }: { trigger: (open: () => void) => ReactN
 
   return (
     <>
-      <span ref={anchor} className="inline-flex">
+      <span ref={anchor} className={fill ? "flex w-full" : "inline-flex"}>
         {trigger(openMenu)}
       </span>
       {pos &&
@@ -425,8 +463,8 @@ export function Menu({ trigger, items }: { trigger: (open: () => void) => ReactN
           <div
             ref={menu}
             role="menu"
-            className="fixed z-50 min-w-48 rounded-lg border border-line bg-panel p-1 shadow-xl"
-            style={{ top: pos.top, left: pos.left }}
+            className="fixed z-50 max-h-72 min-w-48 overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl"
+            style={{ top: pos.top, left: pos.left, ...(fill && { minWidth: anchor.current?.offsetWidth }) }}
           >
             {items.map((it, i) =>
               it === "separator" ? (
