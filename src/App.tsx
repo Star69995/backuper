@@ -15,9 +15,14 @@ type View = "tasks" | "history" | "settings" | "help";
 export default function App() {
   const { snap, refresh } = useSnapshot();
   const [view, setView] = useState<View>("tasks");
+  // Set by a click on the "new version" notification: Settings scrolls to the updates card once.
+  const [jumpToUpdates, setJumpToUpdates] = useState(false);
   useTheme(snap?.settings.theme);
   useEffect(() => {
-    const un = api.onShowUpdate(() => setView("settings"));
+    const un = api.onShowUpdate(() => {
+      setView("settings");
+      setJumpToUpdates(true);
+    });
     return () => void un.then((f) => f());
   }, []);
 
@@ -105,7 +110,7 @@ export default function App() {
       <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         {view === "tasks" && <TasksView snap={snap} refresh={refresh} />}
         {view === "history" && <HistoryView snap={snap} />}
-        {view === "settings" && <SettingsView snap={snap} refresh={refresh} />}
+        {view === "settings" && <SettingsView snap={snap} refresh={refresh} jumpToUpdates={jumpToUpdates} onJumped={() => setJumpToUpdates(false)} />}
         {view === "help" && <HelpView />}
       </main>
       <DrivePromptDialog snap={snap} />
