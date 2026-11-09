@@ -121,7 +121,7 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
           </span>
         </div>
         {p.currentFile && (
-          <div className="truncate text-xs text-muted">
+          <div dir="ltr" className="truncate text-xs text-muted">
             <PathText path={p.currentFile} />
           </div>
         )}
