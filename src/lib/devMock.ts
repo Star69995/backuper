@@ -439,11 +439,14 @@ function cobianPlan(t: Task): AdoptPlan {
   return {
     taskId: t.id,
     destination: t.destination,
-    sources: t.sources.map((s) => ({
+    sources: t.sources.map((s, i) => ({
       source: s.path,
       folderName: s.folderName,
       warnings: [],
-      notes: t.mode === "incremental" && (t.enabled || t.cobianPending) ? [`4 גיבויים אינקרמנטליים ישנים (מ-${day(9).cobian.split("-").reverse().join("/")} עד ${day(4).cobian.split("-").reverse().join("/")}) שייכים לגיבוי מלא ש-Cobian כבר מחק - הם נשארים ביעד כמו שהם`] : [],
+      leftovers:
+        t.mode === "incremental" && (t.enabled || t.cobianPending)
+          ? { count: 4, first: day(9 + i).iso, last: day(4).iso }
+          : null,
       folders:
         t.enabled || t.cobianPending
           ? [3, 2, 1].map((n, i) => ({

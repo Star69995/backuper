@@ -290,8 +290,14 @@ export interface AdoptSource {
   folders: AdoptFolder[];
   /** Something is wrong or can't be taken over. */
   warnings: string[];
-  /** Plain information, nothing to act on (old incrementals Cobian left without their full). */
-  notes: string[];
+  /** Old incrementals Cobian left without their full (normal). Not taken over; one note per task in the UI. */
+  leftovers: Leftovers | null;
+}
+
+export interface Leftovers {
+  count: number;
+  first: string;
+  last: string;
 }
 
 /** Which Cobian backup folders a task would take over, so it continues from Cobian's last backup. */

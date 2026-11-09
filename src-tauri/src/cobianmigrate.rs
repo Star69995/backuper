@@ -141,8 +141,17 @@ pub struct AdoptSource {
     pub folders: Vec<AdoptFolder>,
     /// Something is wrong or can't be taken over.
     pub warnings: Vec<String>,
-    /// Plain information, nothing to act on (old incrementals Cobian left without their full).
-    pub notes: Vec<String>,
+    /// Old incrementals Cobian left without their full (normal: its "full copies to keep" deletes
+    /// old fulls only). Not taken over, left as they are. The UI sums them into one note per task.
+    pub leftovers: Option<Leftovers>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Leftovers {
+    pub count: usize,
+    pub first: DateTime<Local>,
+    pub last: DateTime<Local>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -306,24 +315,6 @@ fn to_local(at: NaiveDateTime) -> DateTime<Local> {
 /// Archive files Cobian writes when it compresses (can't be continued from).
 const ARCHIVES: [&str; 5] = ["zip", "7z", "sqx", "exe", "enc"];
 
-/// One note for all the incrementals with no full before them. That's normal: Cobian's "full copies
-/// to keep" deletes old fulls but leaves their incrementals. Not a warning - nothing is wrong.
-fn orphans_note(orphans: &[(String, NaiveDateTime)]) -> Option<String> {
-    match orphans {
-        [] => None,
-        [(_, at)] => Some(format!(
-            "גיבוי אינקרמנטלי ישן אחד ({}) שייך לגיבוי מלא ש-Cobian כבר מחק - הוא נשאר ביעד כמו שהוא",
-            at.format("%d/%m/%Y")
-        )),
-        [(_, first), .., (_, last)] => Some(format!(
-            "{} גיבויים אינקרמנטליים ישנים (מ-{} עד {}) שייכים לגיבוי מלא ש-Cobian כבר מחק - הם נשארים ביעד כמו שהם",
-            orphans.len(),
-            first.format("%d/%m/%Y"),
-            last.format("%d/%m/%Y"),
-        )),
-    }
-}
-
 /// What the takeover would rename for `task`. `others` = the rest of the task list (existing and
 /// being imported): a Cobian name two sources share in the same destination is ambiguous and skipped.
 pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
@@ -353,7 +344,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
             folder_name: folder_name.clone(),
             folders: Vec::new(),
             warnings: Vec::new(),
-            notes: Vec::new(),
+            leftovers: None,
         };
         let short = cobian_short_name(&src.path);
         if short.is_empty() {
@@ -423,7 +414,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
         let only_full = task.mode == BackupMode::Full;
         let mut have_full = false;
         // Incrementals older than every full left: Cobian's retention deleted their full and kept them.
-        let mut orphans: Vec<(String, NaiveDateTime)> = Vec::new();
+        let mut orphans: Vec<NaiveDateTime> = Vec::new();
         for (name, at, kind) in found {
             let kind = match kind {
                 Some(k) if !only_full => k,
@@ -433,7 +424,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
             };
             // An incremental with no full before it has nothing to sit on.
             if kind == BackupMode::Incremental && !have_full {
-                orphans.push((name, at));
+                orphans.push(at);
                 continue;
             }
             have_full |= kind == BackupMode::Full;
@@ -453,7 +444,13 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
                 created_at: to_local(at),
             });
         }
-        out.notes.extend(orphans_note(&orphans));
+        if let (Some(first), Some(last)) = (orphans.first(), orphans.last()) {
+            out.leftovers = Some(Leftovers {
+                count: orphans.len(),
+                first: to_local(*first),
+                last: to_local(*last),
+            });
+        }
         sources.push(out);
     }
     AdoptPlan {
@@ -612,9 +609,10 @@ mod tests {
         let p = plan(&t, &[]);
         assert_eq!(p.folder_count(), 2);
         assert!(p.sources[0].warnings.is_empty(), "{:?}", p.sources[0].warnings);
-        assert_eq!(p.sources[0].notes.len(), 1, "{:?}", p.sources[0].notes);
-        let w = &p.sources[0].notes[0];
-        assert!(w.starts_with("3 ") && w.contains("03/10/2026") && w.contains("05/11/2026"), "{w}");
+        let l = p.sources[0].leftovers.as_ref().expect("leftovers");
+        assert_eq!(l.count, 3);
+        assert_eq!(l.first.naive_local(), dt("2026-10-03 01:58:50"));
+        assert_eq!(l.last.naive_local(), dt("2026-11-05 01:58:00"));
     }
 
     #[test]
