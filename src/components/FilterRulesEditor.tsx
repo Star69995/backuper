@@ -139,8 +139,15 @@ const same = (a: FilterRule, b: FilterRule) => JSON.stringify(a) === JSON.string
  * Under a regex rule: whether it is valid (and why not), what it says piece by piece, and a try-out
  * field. Parsing and wording come from the backend, so the reading is exactly what the engine does.
  */
-function RegexCheckPanel({ rule }: { rule: Extract<FilterRule, { kind: "regex" }> }) {
-  const [sample, setSample] = useState("");
+function RegexCheckPanel({
+  rule,
+  sample,
+  setSample,
+}: {
+  rule: Extract<FilterRule, { kind: "regex" }>;
+  sample: string;
+  setSample: (s: string) => void;
+}) {
   const id = useId();
   const [check, setCheck] = useState<RegexCheck | null>(null);
   const pattern = rule.value;
@@ -225,14 +232,22 @@ function RegexCheckPanel({ rule }: { rule: Extract<FilterRule, { kind: "regex" }
 
 /** One rule on one line; its explanation sits behind the info button so a long list stays compact. */
 function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: (r: FilterRule) => void; onRemove: () => void }) {
+  // For a regex rule the explanation + live check open while its field is being edited, close when focus
+  // leaves the row, and the info button brings them back. The try-out name outlives the panel.
   const [showHint, setShowHint] = useState(false);
+  const [sample, setSample] = useState("");
+  const isRegex = r.kind === "regex";
   const k = KINDS[r.kind];
   const hint = hintOf(r);
   // Switches without a field have nothing but the explanation to show, so it goes on the line itself.
   const inline = !hasText(r) && r.kind !== "largerThan" && r.kind !== "olderThan";
   const folders = r.kind === "regex" && r.folders;
   return (
-    <li className="rounded-lg border border-line bg-panel2 px-3 py-1.5">
+    <li
+      className="rounded-lg border border-line bg-panel2 px-3 py-1.5"
+      onFocus={isRegex ? (e) => e.target instanceof HTMLInputElement && setShowHint(true) : undefined}
+      onBlur={isRegex ? (e) => !e.currentTarget.contains(e.relatedTarget) && setShowHint(false) : undefined}
+    >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
         <span className="flex w-36 shrink-0 items-center gap-2 text-[13px] font-medium">
           <span className="text-muted">{k.icon}</span>
@@ -297,7 +312,7 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
           <Trash2 size={15} />
         </IconButton>
       </div>
-      {r.kind === "regex" && <RegexCheckPanel rule={r} />}
+      {r.kind === "regex" && showHint && <RegexCheckPanel rule={r} sample={sample} setSample={setSample} />}
       {/* A rule that was just added shows its explanation until it has a value. */}
       {!inline && hint && (showHint || (hasText(r) && !r.value)) && <p className="pb-1 pt-1.5 text-xs text-muted">{hint}</p>}
     </li>
