@@ -35,6 +35,9 @@ pub struct Filters {
     pub exclude_regex: Vec<String>,
     /// Folder names or full paths.
     pub exclude_dirs: Vec<String>,
+    /// Regular expressions on folder names; matching folders are skipped with their contents.
+    /// robocopy can't do these either: `native::resolve_regex` turns them into plain folder names.
+    pub exclude_dir_regex: Vec<String>,
     /// Skip files larger than this many bytes.
     pub max_size: Option<u64>,
     /// Skip files last modified more than this many days ago.

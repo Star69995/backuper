@@ -503,7 +503,7 @@ export default function TaskEditor({
             {t.deleteBefore && t.keepMode !== "all" && (
               <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
                 <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-                שימו לב: אם הגיבוי המלא ייכשל או יבוטל באמצע, לא יישאר גיבוי שלם קודם.
+                שימו לב: אם הגיבוי המלא ייכשל או ייעצר באמצע, לא יישאר גיבוי שלם קודם (אפשר להמשיך אותו מאותה נקודה).
               </div>
             )}
             {kind !== "full" && (

@@ -268,14 +268,20 @@ export function Segmented<T extends string>({
   onChange,
   options,
   className,
+  compact,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: { value: T; label: ReactNode; icon?: ReactNode }[];
   className?: string;
+  /** Tighter padding, for toolbars and rows of a list. */
+  compact?: boolean;
 }) {
   return (
-    <div className={cx("inline-flex flex-wrap gap-1 rounded-lg border border-line bg-panel2 p-1", className)} role="radiogroup">
+    <div
+      className={cx("inline-flex flex-wrap rounded-lg border border-line bg-panel2", compact ? "gap-0.5 p-0.5" : "gap-1 p-1", className)}
+      role="radiogroup"
+    >
       {options.map((o) => (
         <button
           key={o.value}
@@ -284,7 +290,8 @@ export function Segmented<T extends string>({
           aria-checked={value === o.value}
           onClick={() => onChange(o.value)}
           className={cx(
-            "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
+            "inline-flex items-center gap-1.5 rounded-md text-[13px] font-medium transition-colors",
+            compact ? "px-2.5 py-1" : "px-3 py-1.5",
             value === o.value ? "bg-panel text-fg shadow-sm ring-1 ring-line" : "text-muted hover:text-fg",
           )}
         >

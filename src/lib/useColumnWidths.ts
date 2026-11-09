@@ -34,6 +34,24 @@ export function useColumnWidths<K extends string>(storageKey: string, defaults: 
   }, [storageKey, widths]);
 
   const setWidth = (k: K, w: number) => setWidths((s) => ({ ...s, [k]: Math.max(MIN_COLUMN_WIDTH, Math.round(w)) }));
+  const setMany = (m: Partial<Record<K, number>>) => setWidths((s) => ({ ...s, ...m }));
   const reset = (k: K) => setWidths((s) => ({ ...s, [k]: defaults[k] }));
-  return { widths, setWidth, reset };
+  return { widths, setWidth, setMany, reset };
+}
+
+/**
+ * Shrinks column widths so their sum fits `room` (px), so a table never needs sideways scrolling.
+ * Each column goes from its wanted width towards its floor by the same fraction (0 = every column at its floor).
+ * Without a measured `room` (0) the wanted widths are returned as they are.
+ */
+export function fitColumns<K extends string>(wanted: Record<K, number>, floors: Record<K, number>, room: number): Record<K, number> {
+  const keys = Object.keys(wanted) as K[];
+  const total = keys.reduce((s, k) => s + wanted[k], 0);
+  if (room <= 0 || total <= room) return wanted;
+  const floorTotal = keys.reduce((s, k) => s + floors[k], 0);
+  const slack = total - floorTotal;
+  const f = slack > 0 ? Math.max(0, Math.min(1, (room - floorTotal) / slack)) : 0;
+  const out = { ...wanted };
+  for (const k of keys) out[k] = Math.floor(floors[k] + Math.max(0, wanted[k] - floors[k]) * f);
+  return out;
 }

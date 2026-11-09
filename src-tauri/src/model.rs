@@ -56,10 +56,14 @@ pub enum FilterRule {
     },
     /// Regular expression on the file name (case-insensitive, searched anywhere in the name).
     /// `include`: back up only matching files; otherwise skip them.
+    /// `folders`: match folder names instead; a matching folder is skipped with everything in it
+    /// (skipping is the only mode for folders, so `include` must be false).
     Regex {
         value: String,
         #[serde(default)]
         include: bool,
+        #[serde(default)]
+        folders: bool,
     },
     /// Folder name anywhere in the tree ("node_modules") or a full path.
     Folder {
@@ -209,6 +213,8 @@ pub struct TaskState {
     pub last_run_at: Option<DateTime<Local>>,
     pub last_status: Option<RunStatus>,
     pub last_message: Option<String>,
+    /// The last run was paused and its folder is still there: the next run continues in it.
+    pub resumable: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

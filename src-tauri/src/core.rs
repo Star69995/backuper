@@ -139,6 +139,8 @@ pub struct Core {
     queue_cv: Condvar,
     pub current: Mutex<Option<Progress>>,
     cancel: AtomicBool,
+    /// Set with `cancel` for a full stop: the half-done backup folder is deleted (a pause keeps it).
+    discard: AtomicBool,
     /// The worker took a job and hasn't finished it yet (set and cleared under the queue lock).
     working: AtomicBool,
     /// Tasks waiting for the user to answer "the drive was connected - back up now?".
@@ -155,6 +157,7 @@ impl Core {
             queue_cv: Condvar::new(),
             current: Mutex::new(None),
             cancel: AtomicBool::new(false),
+            discard: AtomicBool::new(false),
             working: AtomicBool::new(false),
             drive_prompts: Mutex::new(Vec::new()),
             engine: Box::new(Robocopy),
@@ -235,10 +238,12 @@ impl Core {
         self.changed();
     }
 
-    /// Cancels a queued or running task.
-    pub fn cancel(&self, task_id: &str) {
+    /// Cancels a queued or running task. A running one is paused (its folder is kept, the next run
+    /// continues in it), or with `discard` stopped for good.
+    pub fn cancel(&self, task_id: &str, discard: bool) {
         self.queue.lock().unwrap().retain(|j| j.task_id != task_id);
         if self.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == task_id) {
+            self.discard.store(discard, Ordering::SeqCst);
             self.cancel.store(true, Ordering::SeqCst);
         }
         self.changed();
@@ -296,6 +301,7 @@ impl Core {
                 current_file: String::new(),
             };
             self.cancel.store(false, Ordering::SeqCst);
+            self.discard.store(false, Ordering::SeqCst);
             *self.current.lock().unwrap() = Some(progress.clone());
             self.changed();
 
@@ -309,6 +315,7 @@ impl Core {
                 filters: &filters,
                 now: started_at,
                 cancel: &self.cancel,
+                discard: &self.discard,
             };
             let mut pending_size = 0u64;
             let mut last_emit = Instant::now();
@@ -366,6 +373,8 @@ impl Core {
                 st.last_run_at = Some(record.finished_at);
                 st.last_status = Some(record.status);
                 st.last_message = Some(record.message.clone());
+                // A paused run left a folder to continue in; a full stop deleted it.
+                st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(&task);
                 s.save_states();
                 s.add_history(record.clone());
                 s.settings.clone()

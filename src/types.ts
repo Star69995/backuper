@@ -16,7 +16,8 @@ export type FilterRule =
   | { kind: "include"; value: string }
   | { kind: "extension"; value: string }
   | { kind: "pattern"; value: string }
-  | { kind: "regex"; value: string; include: boolean }
+  /** `folders`: matches folder names (always skipped, with their contents) instead of file names. */
+  | { kind: "regex"; value: string; include: boolean; folders: boolean }
   | { kind: "folder"; value: string }
   | { kind: "largerThan"; mb: number }
   | { kind: "olderThan"; days: number }
@@ -74,6 +75,8 @@ export interface TaskState {
   lastRunAt: string | null;
   lastStatus: RunStatus | null;
   lastMessage: string | null;
+  /** The last run was paused and its folder is still there: the next run continues in it. */
+  resumable?: boolean;
 }
 
 export interface Progress {

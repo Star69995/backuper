@@ -23,9 +23,12 @@ export const api = {
   deleteTasks: (ids: string[]) => invoke<void>("delete_tasks", { ids }),
   reorderTasks: (ids: string[]) => invoke<void>("reorder_tasks", { ids }),
   runTasks: (ids: string[], mode: BackupMode | null = null) => invoke<number>("run_tasks", { ids, mode }),
+  /** Continues a task whose last run was stopped (false = already queued or running). */
+  resumeTask: (id: string) => invoke<boolean>("resume_task", { id }),
   /** Answers the drive-connected question: `run` get queued, all of `ids` stop waiting. */
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
-  cancelTask: (id: string) => invoke<void>("cancel_task", { id }),
+  /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
+  cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
   history: () => invoke<RunRecord[]>("get_history"),
   clearHistory: () => invoke<void>("clear_history"),
   readLog: (runId: string, sourceIndex: number) => invoke<string>("read_log", { runId, sourceIndex }),

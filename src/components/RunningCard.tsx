@@ -1,11 +1,13 @@
-import { Square } from "lucide-react";
+import { Pause, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { fmtBytes, fmtDuration, fmtNumber, MODE_LABEL } from "../lib/format";
 import type { Job, Progress, Task } from "../types";
+import { useStopTask } from "./stopTask";
 import { Button, PathText, ProgressBar, Spinner } from "./ui";
 
 export default function RunningCard({ progress: p, queue, tasks }: { progress: Progress; queue: Job[]; tasks: Task[] }) {
+  const stopTask = useStopTask();
   // Re-render every second for the elapsed timer.
   const [, tick] = useState(0);
   useEffect(() => {
@@ -43,15 +45,20 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
             </div>
           </div>
         </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="text-bad"
-          icon={<Square size={14} />}
-          onClick={() => api.cancelTask(p.taskId)}
-        >
-          עצור
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="secondary" icon={<Pause size={14} />} onClick={() => api.cancelTask(p.taskId)}>
+            השהה
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="text-bad"
+            icon={<Square size={14} />}
+            onClick={() => stopTask(p.taskId, p.taskName)}
+          >
+            עצור
+          </Button>
+        </div>
       </div>
       <div className="mt-4 flex flex-col gap-2">
         {p.sourceCount > 1 && (

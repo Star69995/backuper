@@ -106,7 +106,7 @@ export const STATUS_LABEL: Record<RunStatus, string> = {
   success: "הצליח",
   warning: "אזהרות",
   failed: "נכשל",
-  cancelled: "בוטל",
+  cancelled: "הופסק",
 };
 
 export const TRIGGER_LABEL: Record<Trigger, string> = {

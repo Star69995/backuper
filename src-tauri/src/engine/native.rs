@@ -5,7 +5,7 @@
 use super::{CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
 use regex::{Regex, RegexBuilder};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -181,6 +181,7 @@ struct Rules {
     exclude_files: Vec<Pattern>,
     include_regex: Vec<Regex>,
     exclude_regex: Vec<Regex>,
+    exclude_dir_regex: Vec<Regex>,
     exclude_dir_names: Vec<Pattern>,
     /// /XD entries with a backslash: full paths (robocopy never matches them as relative paths).
     exclude_dir_paths: Vec<Pattern>,
@@ -222,6 +223,7 @@ impl Rules {
             // Validated when saved; a rule that still fails to compile skips nothing.
             include_regex: f.include_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
             exclude_regex: f.exclude_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
+            exclude_dir_regex: f.exclude_dir_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
             exclude_dir_names: patterns(&dir_names),
             exclude_dir_paths: patterns(&dir_paths),
             base: source.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_string(),
@@ -238,6 +240,15 @@ impl Rules {
                 let full: Vec<u16> = format!("{}\\{rel}", self.base).encode_utf16().collect();
                 self.exclude_dir_paths.iter().any(|p| p.matches(&full))
             })
+    }
+
+    /// The folder's name when a folder regex matches it (the folder is skipped).
+    fn regex_skips_dir(&self, e: &Entry) -> Option<String> {
+        if self.exclude_dir_regex.is_empty() {
+            return None;
+        }
+        let name = String::from_utf16_lossy(&e.name);
+        self.exclude_dir_regex.iter().any(|r| r.is_match(&name)).then_some(name)
     }
 
     fn regex_ok(&self, e: &Entry) -> bool {
@@ -261,19 +272,31 @@ impl Rules {
 /// Longest list of names handed to robocopy on its command line (the limit is 32,767 characters).
 const MAX_NAMES_LEN: usize = 28_000;
 
-const TOO_MANY: &str = "יותר מדי קבצים שונים תואמים לביטוי הרגולרי, ואי אפשר להעביר אותם לרובוקופי. צמצמו את הביטוי, או הוסיפו כלל שמצמצם את הקבצים (למשל סיומות).";
+const TOO_MANY: &str = "יותר מדי שמות שונים תואמים לביטוי הרגולרי, ואי אפשר להעביר אותם לרובוקופי. צמצמו את הביטוי, או הוסיפו כלל שמצמצם את הקבצים (למשל סיומות).";
 
 /// robocopy has no regular expressions, so list the source once and turn the regex rules into
-/// plain file names it understands: either "skip these names" or "copy only these names",
-/// whichever list is shorter. Ok(None) = cancelled.
+/// plain names it understands. Folder regexes become folder names to skip (a regex matches the
+/// name only, so every folder with a matching name is skipped anyway). File regexes become either
+/// "skip these names" or "copy only these names", whichever list is shorter. Ok(None) = cancelled.
 pub fn resolve_regex(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result<Option<Filters>, String> {
-    if filters.include_regex.is_empty() && filters.exclude_regex.is_empty() {
+    if filters.include_regex.is_empty() && filters.exclude_regex.is_empty() && filters.exclude_dir_regex.is_empty() {
         return Ok(Some(filters.clone()));
     }
     let mut out = filters.clone();
     out.include_regex.clear();
     out.exclude_regex.clear();
+    // Skips the folders matching a folder regex and notes their names.
     let Some(listing) = list_files(root, &out, cancel)? else { return Ok(None) };
+    out.exclude_dir_regex.clear();
+    let dirs_len = listing.regex_dirs.iter().map(|n| n.len() + 3).sum::<usize>();
+    if dirs_len > MAX_NAMES_LEN {
+        return Err(TOO_MANY.into());
+    }
+    out.exclude_dirs.extend(listing.regex_dirs);
+    if filters.include_regex.is_empty() && filters.exclude_regex.is_empty() {
+        return Ok(Some(out));
+    }
+    let budget = MAX_NAMES_LEN - dirs_len;
     let rules = Rules::new(root, filters);
     let mut seen = HashSet::new();
     let (mut kept, mut dropped) = (Vec::new(), Vec::new());
@@ -301,12 +324,12 @@ pub fn resolve_regex(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Res
         // Nothing matches.
         out.exclude_files.push("*".into());
     } else if len(&dropped) <= len(&kept) {
-        if len(&dropped) > MAX_NAMES_LEN {
+        if len(&dropped) > budget {
             return Err(TOO_MANY.into());
         }
         out.exclude_files.extend(dropped);
     } else {
-        if len(&kept) > MAX_NAMES_LEN {
+        if len(&kept) > budget {
             return Err(TOO_MANY.into());
         }
         out.include_files = kept;
@@ -321,6 +344,8 @@ pub struct Listing {
     /// The first MAX_ERRORS of the unreadable folders.
     pub errors: Vec<FileError>,
     pub failed_dirs: u64,
+    /// Names of the folders skipped by a folder regex (for `resolve_regex`).
+    pub regex_dirs: BTreeSet<String>,
 }
 
 /// Every file under `root` that passes `filters`, as robocopy's own listing would have it
@@ -367,8 +392,14 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
             let name = String::from_utf16_lossy(&e.name);
             let child = if rel.is_empty() { name } else { format!("{rel}\\{name}") };
             if e.attributes & ATTR_DIRECTORY != 0 {
-                if !rules.skip_dir(&e, &child) {
-                    pending.push(child);
+                if rules.skip_dir(&e, &child) {
+                    continue;
+                }
+                match rules.regex_skips_dir(&e) {
+                    Some(name) => {
+                        out.regex_dirs.insert(name);
+                    }
+                    None => pending.push(child),
                 }
             } else if rules.keep_file(&e) {
                 out.files.push(ListedFile {

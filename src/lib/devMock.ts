@@ -377,6 +377,8 @@ export function installDevMock() {
       case "run_tasks":
         // Like the real queue: a task waiting for the Cobian decision doesn't run.
         return (a.ids as string[]).filter((id) => !tasks.find((t) => t.id === id)?.cobianPending).length;
+      case "resume_task":
+        return !tasks.find((t) => t.id === a.id)?.cobianPending;
       case "plugin:app|version":
         return "0.2.0 (dev)";
       case "plugin:event|listen":

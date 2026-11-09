@@ -17,9 +17,18 @@ interface ConfirmOpts {
   danger?: boolean;
 }
 
+interface ChooseOpts<T extends string> {
+  title: string;
+  message?: ReactNode;
+  /** One button each, after "ביטול". */
+  options: { value: T; label: string; danger?: boolean }[];
+}
+
 interface Feedback {
   toast: (t: Omit<Toast, "id">) => void;
   confirm: (o: ConfirmOpts) => Promise<boolean>;
+  /** Like `confirm`, with several answers. null = cancelled. */
+  choose: <T extends string>(o: ChooseOpts<T>) => Promise<T | null>;
 }
 
 const Ctx = createContext<Feedback>(null!);
@@ -35,6 +44,7 @@ const toneIcon: Record<ToastTone, ReactNode> = {
 export function FeedbackProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirmState, setConfirm] = useState<(ConfirmOpts & { resolve: (v: boolean) => void }) | null>(null);
+  const [chooseState, setChoose] = useState<(ChooseOpts<string> & { resolve: (v: string | null) => void }) | null>(null);
   const nextId = useRef(1);
 
   const dismiss = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
@@ -50,13 +60,23 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
 
   const confirm = useCallback((o: ConfirmOpts) => new Promise<boolean>((resolve) => setConfirm({ ...o, resolve })), []);
 
+  const choose = useCallback(
+    <T extends string,>(o: ChooseOpts<T>) =>
+      new Promise<T | null>((resolve) => setChoose({ ...o, resolve: resolve as (v: string | null) => void })),
+    [],
+  );
+
   const finish = (v: boolean) => {
     confirmState?.resolve(v);
     setConfirm(null);
   };
+  const finishChoice = (v: string | null) => {
+    chooseState?.resolve(v);
+    setChoose(null);
+  };
 
   return (
-    <Ctx.Provider value={{ toast, confirm }}>
+    <Ctx.Provider value={{ toast, confirm, choose }}>
       {children}
       <div className="pointer-events-none fixed bottom-4 left-4 z-[60] flex w-[min(380px,calc(100vw-32px))] flex-col gap-2">
         {toasts.map((t) => (
@@ -102,6 +122,25 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
           }
         >
           <div className={cx("text-sm leading-relaxed")}>{confirmState.message}</div>
+        </Modal>
+      )}
+      {chooseState && (
+        <Modal
+          size="sm"
+          title={chooseState.title}
+          onClose={() => finishChoice(null)}
+          footer={
+            <>
+              <Button onClick={() => finishChoice(null)}>ביטול</Button>
+              {chooseState.options.map((o) => (
+                <Button key={o.value} variant={o.danger ? "danger" : "primary"} onClick={() => finishChoice(o.value)}>
+                  {o.label}
+                </Button>
+              ))}
+            </>
+          }
+        >
+          <div className="text-sm leading-relaxed">{chooseState.message}</div>
         </Modal>
       )}
     </Ctx.Provider>

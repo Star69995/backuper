@@ -44,6 +44,9 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
             FilterRule::Regex { value, .. } if value.trim().is_empty() => {
                 return Err("כלל סינון: יש להזין ביטוי רגולרי".into())
             }
+            FilterRule::Regex { value, include: true, folders: true } => {
+                return Err(format!("כלל סינון: אפשר רק לדלג על תיקיות לפי ביטוי רגולרי, לא לגבות רק אותן ({value})"))
+            }
             FilterRule::Regex { value, .. } => {
                 if let Err(e) = compile_regex(value.trim()) {
                     return Err(format!("כלל סינון: הביטוי הרגולרי \"{value}\" לא תקין ({e})"));
@@ -73,8 +76,9 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
             FilterRule::Include { value } => f.include_files.extend(patterns(value)),
             FilterRule::Extension { value } => f.exclude_files.extend(patterns(value)),
             FilterRule::Pattern { value } => f.exclude_files.push(value.trim().to_string()),
-            FilterRule::Regex { value, include: true } => f.include_regex.push(value.trim().to_string()),
-            FilterRule::Regex { value, include: false } => f.exclude_regex.push(value.trim().to_string()),
+            FilterRule::Regex { value, folders: true, .. } => f.exclude_dir_regex.push(value.trim().to_string()),
+            FilterRule::Regex { value, include: true, .. } => f.include_regex.push(value.trim().to_string()),
+            FilterRule::Regex { value, include: false, .. } => f.exclude_regex.push(value.trim().to_string()),
             FilterRule::Folder { value } => f.exclude_dirs.push(value.trim().to_string()),
             FilterRule::LargerThan { mb } => {
                 let bytes = mb * 1024 * 1024;
@@ -129,25 +133,54 @@ mod tests {
             FilterRule::Regex {
                 value: r"^\d+\.jpg$".into(),
                 include: true,
+                folders: false,
             },
             FilterRule::Regex {
                 value: "copy".into(),
                 include: false,
+                folders: false,
+            },
+            FilterRule::Regex {
+                value: "^build".into(),
+                include: false,
+                folders: true,
             },
         ];
         assert!(validate(&rules).is_ok());
         let f = compile(&rules);
-        assert_eq!((f.include_regex.len(), f.exclude_regex.len()), (1, 1));
+        assert_eq!((f.include_regex.len(), f.exclude_regex.len(), f.exclude_dir_regex.len()), (1, 1, 1));
         assert!(validate(&[FilterRule::Regex {
             value: "(".into(),
-            include: false
+            include: false,
+            folders: true
         }])
         .is_err());
         assert!(validate(&[FilterRule::Regex {
             value: " ".into(),
-            include: false
+            include: false,
+            folders: false
         }])
         .is_err());
+        // Folders can only be skipped.
+        assert!(validate(&[FilterRule::Regex {
+            value: "x".into(),
+            include: true,
+            folders: true
+        }])
+        .is_err());
+    }
+
+    #[test]
+    fn regex_rule_without_folders_field_loads_as_files() {
+        let r: FilterRule = serde_json::from_str(r#"{"kind":"regex","value":"a","include":true}"#).unwrap();
+        assert_eq!(
+            r,
+            FilterRule::Regex {
+                value: "a".into(),
+                include: true,
+                folders: false
+            }
+        );
     }
 
     #[test]

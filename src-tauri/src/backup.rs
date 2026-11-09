@@ -4,7 +4,8 @@
 //! Layout, per source, inside the task's destination:
 //!   <folderName> 2026-10-01 03-00 מלא            full backup: identical to the source
 //!   <folderName> 2026-10-02 03-00 אינקרמנטלי     only files new/changed since the previous backup
-//! A folder still being written (or that failed/was cancelled) carries a ".partial" suffix.
+//! A folder still being written (or that failed/was stopped) carries a ".partial" suffix.
+//! The next run of the same kind carries on in it instead of starting over (see `backup_source`).
 //! A full backup plus the incrementals after it form a chain. When a full backup succeeds,
 //! chains outside the task's retention (KeepMode) are deleted, and so are empty incremental folders.
 
@@ -12,7 +13,7 @@ use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters
 use crate::manifest;
 use crate::model::{BackupFolder, BackupMode, KeepMode, RunStatus, Source, SourceBackups, SourceRun, Task};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,6 +156,13 @@ pub fn list_backups(dest: &str, folder_name: &str) -> Vec<BackupFolder> {
         .collect();
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.name.cmp(&a.name)));
     out
+}
+
+/// Whether any of the task's sources has a folder left over from a paused or failed run.
+pub fn has_partial(task: &Task) -> bool {
+    task.sources
+        .iter()
+        .any(|s| list_backups(&task.destination, &s.folder_name).iter().any(|b| b.partial))
 }
 
 pub fn list_task_backups(task: &Task) -> Vec<SourceBackups> {
@@ -360,7 +368,7 @@ fn chain_index(backups: &[BackupFolder]) -> HashMap<String, (u64, u64)> {
     };
     let mut chain: Vec<&BackupFolder> = backups
         .iter()
-        .filter(|b| b.kind == BackupMode::Incremental && b.created_at > base.created_at)
+        .filter(|b| b.kind == BackupMode::Incremental && !b.partial && b.created_at > base.created_at)
         .collect();
     chain.push(base);
     chain.reverse(); // oldest first, so newer copies override
@@ -380,6 +388,66 @@ fn changed_since(listed: Vec<ListedFile>, index: &HashMap<String, (u64, u64)>) -
             Some(&(size, modified)) => size != f.size || modified.abs_diff(f.modified) > MTIME_TOLERANCE,
         })
         .collect()
+}
+
+/// Resuming an incremental in its partial folder: files already there that match the source are
+/// done (returned count); anything else in it (an older version, a file that no longer counts as
+/// changed) is removed, so the finished folder holds exactly the changes.
+fn skip_done(folder: &Path, changed: Vec<ListedFile>) -> (Vec<ListedFile>, u64) {
+    let (present, _) = manifest::scan(folder);
+    let wanted: HashMap<String, (u64, u64)> = changed
+        .iter()
+        .map(|f| (f.rel.to_lowercase(), (f.size, f.modified)))
+        .collect();
+    let mut done = HashSet::new();
+    for f in present {
+        let key = f.rel.to_lowercase();
+        match wanted.get(&key) {
+            Some(&(size, modified)) if size == f.size && modified.abs_diff(f.modified) <= MTIME_TOLERANCE => {
+                done.insert(key);
+            }
+            _ => {
+                let path = folder.join(&f.rel);
+                crate::tasklist::set_attributes(&path, crate::tasklist::NORMAL);
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    let count = done.len() as u64;
+    let left = changed.into_iter().filter(|f| !done.contains(&f.rel.to_lowercase())).collect();
+    (left, count)
+}
+
+/// robocopy gives the backup folder the attributes of the source folder, and a drive root is
+/// hidden + system: Explorer would not show the backup folder at all. Clear them.
+fn unhide(folder: &Path) {
+    if folder.is_dir() {
+        crate::tasklist::set_attributes(folder, crate::tasklist::NORMAL);
+    }
+}
+
+/// A full stop (as opposed to a pause) throws the half-done folder away, so there is nothing to
+/// continue. Not when `safe` is false: that folder is then the last complete backup, a previous
+/// full updated in place. Returns whether the folder is gone.
+fn discard_stopped(ctx: &RunContext, work: &Path, safe: bool) -> bool {
+    if !safe || !ctx.discard.load(Ordering::SeqCst) {
+        return false;
+    }
+    if work.exists() {
+        let _ = fs::remove_dir_all(work);
+    }
+    !work.exists()
+}
+
+/// What a stopped run says. When its folder is left behind, the next run continues in it.
+fn stopped_message(work: &Path, discarded: bool) -> String {
+    if discarded {
+        "הגיבוי נעצר. ההעתקה החלקית נמחקה".into()
+    } else if work.is_dir() {
+        "הגיבוי הושהה. ההפעלה הבאה תמשיך מאותה נקודה".into()
+    } else {
+        "הגיבוי הושהה".into()
+    }
 }
 
 fn status_of(o: Outcome) -> RunStatus {
@@ -406,6 +474,8 @@ pub struct RunContext<'a> {
     /// The same timestamp for every source of the run (folder names share the date).
     pub now: DateTime<Local>,
     pub cancel: &'a AtomicBool,
+    /// With `cancel`: stop for good (delete the half-done folder) instead of pausing.
+    pub discard: &'a AtomicBool,
 }
 
 /// Backs up one source of a task into its own chain of dated folders.
@@ -454,15 +524,28 @@ pub fn backup_source(
     run.mode = Some(mode);
     let mut notes: Vec<String> = note.into_iter().collect();
     let final_path = new_folder_path(&dest, &prefix, ctx.now, mode);
-    let work = with_partial(&final_path);
+    // A folder left by a stopped or failed run of the same kind: carry on in it instead of starting
+    // over. It keeps its name until the run completes, and only then gets the new date.
+    let resume = backups.iter().find(|b| b.partial && b.kind == mode);
+    let work = match resume {
+        Some(b) => PathBuf::from(&b.path),
+        None => with_partial(&final_path),
+    };
+    if let Some(b) = resume {
+        notes.push(format!("הגיבוי המשיך מגיבוי שנעצר באמצע ({})", b.name));
+    }
 
+    // Whether a full stop may delete `work`: always for an incremental (it holds new files only).
+    // For a full, set below.
+    let mut discard_safe = mode == BackupMode::Incremental;
     let result = match mode {
         BackupMode::Full => {
             // Fast full: reuse the newest full folder so only differences are copied.
             // Not with an include rule: robocopy only purges names matching it, so files that
             // no longer match would stay in the "full" folder.
             let latest_full = backups.iter().find(|b| b.kind == BackupMode::Full && !b.partial);
-            let reused = task.reuse_previous
+            let reused = resume.is_none()
+                && task.reuse_previous
                 && task.keep_mode == KeepMode::Count
                 && task.keep_count == 1
                 && ctx.filters.include_files.is_empty()
@@ -478,6 +561,9 @@ pub fn backup_source(
                         false
                     }
                 });
+            // Not safe when `work` is the previous full, updated in place, or may be (a resumed
+            // folder with no complete full next to it).
+            discard_safe = !reused && (resume.is_none() || latest_full.is_some());
             if task.delete_before {
                 on_event(EngineEvent::Phase("deleting"));
                 let (deleted, freed) = prune(
@@ -506,7 +592,7 @@ pub fn backup_source(
                 Ok(Some(f)) => f,
                 Ok(None) => {
                     run.status = Some(RunStatus::Cancelled);
-                    run.message = "הגיבוי בוטל על ידי המשתמש".into();
+                    run.message = stopped_message(&work, discard_stopped(ctx, &work, discard_safe));
                     return run;
                 }
                 Err(e) => return fail(run, e),
@@ -518,7 +604,16 @@ pub fn backup_source(
                 filters,
                 log_file: log_file.clone(),
             };
-            ctx.engine.mirror(&job, ctx.cancel, &mut |e| on_event(e))
+            // robocopy applies the attributes when copying starts: clear them right then, so the
+            // folder is visible during the run, and again below once it has finished.
+            let mut unhidden = false;
+            ctx.engine.mirror(&job, ctx.cancel, &mut |e| {
+                if !unhidden && matches!(e, EngineEvent::File { .. }) {
+                    unhide(&work);
+                    unhidden = true;
+                }
+                on_event(e)
+            })
         }
         BackupMode::Incremental => {
             on_event(EngineEvent::Phase("scanning"));
@@ -526,7 +621,7 @@ pub fn backup_source(
                 Ok(Some(l)) => l,
                 Ok(None) => {
                     run.status = Some(RunStatus::Cancelled);
-                    run.message = "הגיבוי בוטל על ידי המשתמש".into();
+                    run.message = stopped_message(&work, discard_stopped(ctx, &work, true));
                     return run;
                 }
                 Err(e) => {
@@ -536,7 +631,14 @@ pub fn backup_source(
                     )
                 }
             };
-            let changed = changed_since(listing.files, &chain_index(&backups));
+            let mut changed = changed_since(listing.files, &chain_index(&backups));
+            if resume.is_some() {
+                let (left, done) = skip_done(&work, changed);
+                changed = left;
+                if done > 0 {
+                    notes.push(format!("{done} קבצים כבר הועתקו קודם ולא הועתקו שוב"));
+                }
+            }
             if let Err(e) = fs::create_dir_all(&work) {
                 return fail(
                     run,
@@ -562,10 +664,17 @@ pub fn backup_source(
         }
     };
 
+    unhide(&work);
     let mut status = status_of(result.outcome);
-    let mut message = result.message;
+    let mut message = if result.outcome == Outcome::Cancelled {
+        stopped_message(&work, discard_stopped(ctx, &work, discard_safe))
+    } else {
+        result.message
+    };
     apply_stats(&mut run, result.stats);
-    run.target_folder = Some(work.to_string_lossy().to_string());
+    if work.exists() {
+        run.target_folder = Some(work.to_string_lossy().to_string());
+    }
     if log_file.exists() {
         run.log_file = Some(log_file.to_string_lossy().to_string());
     }
@@ -600,7 +709,7 @@ pub fn backup_source(
         }
     }
     // An incremental with no changes stays quiet about its size.
-    if run.backup_bytes > 0 && (mode == BackupMode::Full || run.files_copied > 0) {
+    if run.backup_bytes > 0 && (mode == BackupMode::Full || run.files_copied > 0 || resume.is_some()) {
         notes.push(format!("גודל הגיבוי: {}", fmt_bytes(run.backup_bytes)));
     }
     if run.freed_bytes > 0 {
@@ -698,6 +807,7 @@ mod tests {
     struct Env {
         root: PathBuf,
         cancel: AtomicBool,
+        discard: AtomicBool,
         filters: Filters,
     }
 
@@ -711,6 +821,7 @@ mod tests {
             Env {
                 root,
                 cancel: AtomicBool::new(false),
+                discard: AtomicBool::new(false),
                 filters,
             }
         }
@@ -726,6 +837,7 @@ mod tests {
                 filters: &self.filters,
                 now,
                 cancel: &self.cancel,
+                discard: &self.discard,
             };
             let logs = self.root.clone();
             run_task(
@@ -735,6 +847,17 @@ mod tests {
                 &|i| logs.join(format!("{}-{i}.log", uuid::Uuid::new_v4())),
                 on_event,
             )
+        }
+        /// A run that is stopped as soon as it starts scanning (before any file is copied).
+        fn run_stopped(&self, t: &Task, mode: BackupMode, at: &str) -> Vec<SourceRun> {
+            self.cancel.store(false, Ordering::SeqCst);
+            let r = self.run_with(t, mode, at, &mut |_, e| {
+                if matches!(e, EngineEvent::Phase("scanning")) {
+                    self.cancel.store(true, Ordering::SeqCst);
+                }
+            });
+            self.cancel.store(false, Ordering::SeqCst);
+            r
         }
         fn names(&self, t: &Task, i: usize) -> Vec<String> {
             let mut v: Vec<String> = list_backups(&t.destination, &t.sources[i].folder_name)
@@ -1103,6 +1226,201 @@ mod tests {
         assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
     }
 
+    /// Stopping an incremental midway keeps its folder; the next run finishes it instead of starting over.
+    #[test]
+    fn stopped_incremental_resumes_in_its_folder() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("base.txt"), "base").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        for i in 1..=5 {
+            fs::write(src.join(format!("new{i}.txt")), format!("n{i}")).unwrap();
+        }
+
+        // Stop when the third file starts: it and the two before it get copied.
+        let mut started = 0;
+        let r = env.run_with(&t, BackupMode::Incremental, "2026-10-02 03:00", &mut |_, e| {
+            if let EngineEvent::File { .. } = e {
+                started += 1;
+                if started == 3 {
+                    env.cancel.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        env.cancel.store(false, Ordering::SeqCst);
+        assert_eq!(r[0].status, Some(RunStatus::Cancelled), "{r:?}");
+        assert!(r[0].message.contains("תמשיך"), "{}", r[0].message);
+        let partial = dst.join("Src 2026-10-02 03-00 אינקרמנטלי.partial");
+        assert!(partial.is_dir());
+        let done = fs::read_dir(&partial).unwrap().count();
+        assert_eq!(done, 3);
+        // Left over from an older state of the source: must not end up in the finished backup.
+        fs::write(partial.join("stale.txt"), "old").unwrap();
+
+        // Next day: the same folder is finished, and only the missing files are copied.
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-03 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(r[0].files_copied, 2, "{r:?}");
+        assert!(r[0].message.contains("3 קבצים כבר הועתקו"), "{}", r[0].message);
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-01 03-00 מלא", "Src 2026-10-03 03-00 אינקרמנטלי"]);
+        let inc = dst.join("Src 2026-10-03 03-00 אינקרמנטלי");
+        for i in 1..=5 {
+            assert!(inc.join(format!("new{i}.txt")).exists());
+        }
+        assert!(!inc.join("stale.txt").exists());
+        assert_eq!(manifest::read(&inc).unwrap().len(), 5);
+    }
+
+    /// A full stop deletes the half-done folder (a pause keeps it), but never the last complete backup.
+    #[test]
+    fn full_stop_discards_the_partial_folder() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        fs::write(src.join("b.txt"), "b").unwrap();
+
+        // Stopped for good: the new full's folder goes, the old full stays.
+        env.discard.store(true, Ordering::SeqCst);
+        let r = env.run_stopped(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Cancelled), "{r:?}");
+        assert!(r[0].message.contains("נמחקה"), "{}", r[0].message);
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-01 03-00 מלא"]);
+        assert!(!has_partial(&t));
+
+        // Paused: the folder stays, and says the next run continues in it.
+        env.discard.store(false, Ordering::SeqCst);
+        let r = env.run_stopped(&t, BackupMode::Full, "2026-10-03 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Cancelled), "{r:?}");
+        assert!(r[0].message.contains("תמשיך"), "{}", r[0].message);
+        assert!(has_partial(&t));
+
+        // The paused folder is resumed, then stopped for good: a complete full exists, so it goes.
+        env.discard.store(true, Ordering::SeqCst);
+        env.run_stopped(&t, BackupMode::Full, "2026-10-04 03:00");
+        assert!(!has_partial(&t));
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-01 03-00 מלא"]);
+    }
+
+    /// With "reuse the previous full" the half-done folder IS the previous full: a full stop keeps it.
+    #[test]
+    fn full_stop_keeps_a_reused_previous_full() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = Task {
+            reuse_previous: true,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        env.discard.store(true, Ordering::SeqCst);
+        let r = env.run_stopped(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Cancelled), "{r:?}");
+        let partial = dst.join("Src 2026-10-02 03-00 מלא.partial");
+        assert!(partial.join("a.txt").exists(), "the previous backup must not be deleted");
+        assert!(r[0].message.contains("תמשיך"), "{}", r[0].message);
+    }
+
+    /// A full stop of an incremental deletes its half-done folder.
+    #[test]
+    fn full_stop_of_an_incremental() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("base.txt"), "base").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        for i in 1..=4 {
+            fs::write(src.join(format!("new{i}.txt")), "n").unwrap();
+        }
+        let mut started = 0;
+        let r = env.run_with(&t, BackupMode::Incremental, "2026-10-02 03:00", &mut |_, e| {
+            if let EngineEvent::File { .. } = e {
+                started += 1;
+                if started == 2 {
+                    env.discard.store(true, Ordering::SeqCst);
+                    env.cancel.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        assert_eq!(r[0].status, Some(RunStatus::Cancelled), "{r:?}");
+        assert!(!has_partial(&t));
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-01 03-00 מלא"]);
+    }
+
+    /// A drive root is hidden + system, and robocopy copies that onto the backup folder: it must stay visible.
+    #[test]
+    fn backup_folder_of_a_hidden_system_source_is_visible() {
+        use std::os::windows::fs::MetadataExt;
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let ok = std::process::Command::new("attrib").args(["+H", "+S"]).arg(&src).status().unwrap();
+        assert!(ok.success());
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let mut during = None;
+        let r = env.run_with(&t, BackupMode::Full, "2026-10-01 03:00", &mut |_, e| {
+            if matches!(e, EngineEvent::File { .. }) {
+                std::thread::sleep(std::time::Duration::from_millis(300)); // let the attributes land
+                during = fs::metadata(dst.join("Src 2026-10-01 03-00 מלא.partial")).ok().map(|m| m.file_attributes());
+            }
+        });
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        let hidden_or_system = |a: u32| a & 0x6 != 0;
+        let full = fs::metadata(dst.join("Src 2026-10-01 03-00 מלא")).unwrap().file_attributes();
+        assert!(!hidden_or_system(full), "finished folder: {full:#x}");
+        assert!(during.is_some_and(|a| !hidden_or_system(a)), "folder during the copy: {during:?}");
+        let _ = std::process::Command::new("attrib").args(["-H", "-S"]).arg(&src).status();
+    }
+
+    /// A partial full folder is finished by the next full run: robocopy skips what is already there.
+    #[test]
+    fn partial_full_is_continued() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        let partial = dst.join("Src 2026-10-01 03-00 מלא.partial");
+        fs::create_dir_all(&partial).unwrap();
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(src.join(f), f).unwrap();
+        }
+        // Two of the three were copied before the stop (a copy keeps the file times).
+        for f in ["a.txt", "b.txt"] {
+            fs::copy(src.join(f), partial.join(f)).unwrap();
+        }
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = env.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(r[0].files_copied, 1, "only the missing file is copied: {r:?}");
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03-00 מלא"]);
+        let full = dst.join("Src 2026-10-02 03-00 מלא");
+        assert!(["a.txt", "b.txt", "c.txt"].iter().all(|f| full.join(f).exists()));
+        assert_eq!(r[0].backup_bytes, 15);
+    }
+
+    /// A partial folder of the other kind isn't touched by a run (it's cleaned up with the next full).
+    #[test]
+    fn partial_of_the_other_kind_is_not_resumed() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        let other = dst.join("Src 2026-10-01 12-00 אינקרמנטלי.partial");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("x.txt"), "x").unwrap();
+        let r = env.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03-00 מלא"], "the old partial is pruned by the full");
+    }
+
     #[test]
     fn fast_full_skipped_with_include_rule() {
         let env = Env::new();
@@ -1119,6 +1437,7 @@ mod tests {
         let with_rule = Env {
             root: env.root.clone(),
             cancel: AtomicBool::new(false),
+            discard: AtomicBool::new(false),
             filters: crate::filters::compile(&[crate::model::FilterRule::Include { value: "*.lrcat".into() }]),
         };
         with_rule.run(&t, BackupMode::Full, "2026-10-02 03:00");
@@ -1200,6 +1519,7 @@ mod tests {
             let env = Env::with_filters(crate::filters::compile(&[Regex {
                 value: value.into(),
                 include,
+                folders: false,
             }]));
             let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
             fs::create_dir_all(src.join("sub")).unwrap();
@@ -1219,5 +1539,34 @@ mod tests {
             let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
             assert_eq!(r[0].files_copied, 1, "{r:?}");
         }
+    }
+
+    #[test]
+    fn folder_regex_rules_in_full_and_incremental() {
+        use crate::model::FilterRule::Regex;
+        // A folder regex skips matching folders at any depth, with everything inside. A file regex
+        // on the same name pattern must not touch folders (and vice versa).
+        let env = Env::with_filters(crate::filters::compile(&[Regex {
+            value: r"^(build|cache)\d*$".into(),
+            include: false,
+            folders: true,
+        }]));
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        for p in ["keep.txt", r"build\a.txt", r"build\deep\b.txt", r"sub\Cache2\c.txt", r"sub\ok\d.txt", r"rebuild\e.txt"] {
+            fs::create_dir_all(src.join(p).parent().unwrap()).unwrap();
+            fs::write(src.join(p), "x").unwrap();
+        }
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        let b = dst.join("Src 2026-10-01 03-00 מלא");
+        assert_eq!(r[0].files_copied, 3, "{r:?}");
+        assert!(b.join("keep.txt").exists() && b.join("sub").join("ok").join("d.txt").exists());
+        assert!(b.join("rebuild").join("e.txt").exists());
+        assert!(!b.join("build").exists() && !b.join("sub").join("Cache2").exists());
+        fs::write(src.join(r"build\new.txt"), "n").unwrap();
+        fs::write(src.join(r"sub\ok\new.txt"), "n").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].files_copied, 1, "{r:?}");
+        assert!(dst.join("Src 2026-10-02 03-00 אינקרמנטלי").join("sub").join("ok").join("new.txt").exists());
     }
 }

@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Archive,
   ArrowDownAZ,
   ArrowDownUp,
   ArrowLeft,
@@ -9,6 +10,7 @@ import {
   CircleSlash,
   Clock,
   Copy,
+  Diff,
   Download,
   Folder,
   FolderOpen,
@@ -18,7 +20,9 @@ import {
   History,
   HardDrive,
   Import,
+  Layers,
   ListChecks,
+  Minimize2,
   MoreVertical,
   Pencil,
   Play,
@@ -26,15 +30,16 @@ import {
   Power,
   PowerOff,
   Search,
+  Pause,
   Square,
   Trash2,
   X,
   XCircle,
 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "../api";
-import { describeSchedule, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind } from "../lib/format";
-import { useColumnWidths } from "../lib/useColumnWidths";
+import { describeSchedule, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind, type TaskKind } from "../lib/format";
+import { fitColumns, useColumnWidths } from "../lib/useColumnWidths";
 import { groupTasks, SORT_LABEL, type SortKey, sortTasks, useTaskSort } from "../lib/sortTasks";
 import type { BackupMode, RunRecord, RunStatus, Snapshot, Task } from "../types";
 import { newTask } from "../types";
@@ -44,6 +49,7 @@ import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
 import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
+import { useStopTask } from "./stopTask";
 import { useTaskListTransfer } from "./ImportTasksDialog";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
@@ -65,7 +71,8 @@ import {
   Toggle,
 } from "./ui";
 
-export const statusBadge = (s: RunStatus) =>
+/** `resumable` (only matters for a stopped run): paused with a folder to continue in, or stopped for good. */
+export const statusBadge = (s: RunStatus, resumable = false) =>
   ({
     success: (
       <Badge tone="ok" icon={<CheckCircle2 size={12} />}>
@@ -82,7 +89,11 @@ export const statusBadge = (s: RunStatus) =>
         נכשל
       </Badge>
     ),
-    cancelled: <Badge icon={<CircleSlash size={12} />}>בוטל</Badge>,
+    cancelled: resumable ? (
+      <Badge icon={<Pause size={12} />}>מושהה</Badge>
+    ) : (
+      <Badge icon={<CircleSlash size={12} />}>הופסק</Badge>
+    ),
   })[s];
 
 type ColumnKey = "name" | "enabled" | "kind" | "schedule" | "next" | "last";
@@ -98,7 +109,38 @@ const COLUMN_LABEL: Record<ColumnKey, string> = {
 /** name 0 = auto: fills the free space until the user resizes any column. */
 const DEFAULT_WIDTHS: Record<ColumnKey, number> = { name: 0, enabled: 120, kind: 112, schedule: 176, next: 128, last: 128 };
 const MIN_NAME_COL = 220;
+/** How narrow columns may get when the window is too small for their wanted widths. */
+const MIN_NAME_FLOOR = 140;
+const MIN_COL_FLOOR = 56;
 const CHECK_COL = 40;
+/** Compact view: "מצב" and "סוג" show only a toggle / an icon, so they get a fixed narrow width. */
+const COMPACT_COLS: Partial<Record<ColumnKey, number>> = { enabled: 64, kind: 64 };
+const KIND_ICON: Record<TaskKind, ReactNode> = {
+  full: <Archive size={14} />,
+  incremental: <Diff size={14} />,
+  combined: <Layers size={14} />,
+};
+
+const COMPACT_KEY = "backuper.taskCompact";
+
+/** Compact table view (no text next to the status toggle / kind), remembered per machine. */
+function useCompactView() {
+  const [compact, setCompact] = useState(() => {
+    try {
+      return localStorage.getItem(COMPACT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(COMPACT_KEY, compact ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [compact]);
+  return [compact, setCompact] as const;
+}
 /** The actions column also takes any leftover width, so a dragged border follows the mouse exactly. */
 const MIN_ACTIONS_COL = 96;
 
@@ -132,6 +174,7 @@ function useActiveGroup() {
 
 export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: () => void }) {
   const { toast, confirm } = useFeedback();
+  const stopTask = useStopTask();
   const [activeGroup, setActiveGroup] = useActiveGroup();
   // Groups just created here that have no tasks yet (a group exists through its tasks).
   const [newGroups, setNewGroups] = useState<string[]>([]);
@@ -156,15 +199,41 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     });
 
   const [sort, setSort] = useTaskSort();
+  const [compact, setCompact] = useCompactView();
   const cols = useColumnWidths("backuper.taskColumns", DEFAULT_WIDTHS);
-  // Wider than the view: the table scrolls sideways.
+  const colWidth = (k: ColumnKey) => (compact ? COMPACT_COLS[k] : undefined) ?? cols.widths[k];
   const nameAuto = cols.widths.name === 0;
-  const tableMinWidth =
-    CHECK_COL + MIN_ACTIONS_COL + (nameAuto ? MIN_NAME_COL : 0) + RESIZABLE.reduce((sum, k) => sum + cols.widths[k], 0);
+  // The table never scrolls sideways: its width is measured and the columns shrink to fit (see fitColumns).
+  const [tableWrap, setTableWrap] = useState<HTMLDivElement | null>(null);
+  const [availWidth, setAvailWidth] = useState(0);
+  useEffect(() => {
+    if (!tableWrap) return;
+    const ro = new ResizeObserver(() => setAvailWidth(Math.floor(tableWrap.clientWidth)));
+    ro.observe(tableWrap);
+    return () => ro.disconnect();
+  }, [tableWrap]);
+  const room = availWidth - CHECK_COL - MIN_ACTIONS_COL;
   const nameHeader = useRef<HTMLTableCellElement>(null);
-  // Once a border is dragged, every column gets a fixed width, so only the dragged border moves.
-  const freezeName = () =>
-    nameAuto && nameHeader.current && cols.setWidth("name", nameHeader.current.getBoundingClientRect().width);
+  const fitted = fitColumns(
+    Object.fromEntries(RESIZABLE.map((k) => [k, k === "name" && nameAuto ? MIN_NAME_COL : colWidth(k)])) as Record<ColumnKey, number>,
+    Object.fromEntries(RESIZABLE.map((k) => [k, k === "name" ? MIN_NAME_FLOOR : MIN_COL_FLOOR])) as Record<ColumnKey, number>,
+    room,
+  );
+  /** The width a column really has on screen (the auto name column fills what's left). */
+  const shownWidth = (k: ColumnKey) =>
+    k === "name" && nameAuto ? (nameHeader.current?.getBoundingClientRect().width ?? fitted.name) : fitted[k];
+  // Once a border is dragged, every column gets a fixed width (what's shown now), so only the dragged border moves.
+  const freezeColumns = () => {
+    const now: Partial<Record<ColumnKey, number>> = {};
+    for (const k of RESIZABLE) if (!(compact && COMPACT_COLS[k])) now[k] = Math.floor(shownWidth(k));
+    cols.setMany(now);
+  };
+  /** Dragging may not make the columns wider than the table. */
+  const resizeColumn = (k: ColumnKey, w: number) => {
+    if (availWidth <= 0) return cols.setWidth(k, w);
+    const others = RESIZABLE.filter((j) => j !== k).reduce((s, j) => s + shownWidth(j), 0);
+    cols.setWidth(k, Math.min(w, room - others));
+  };
   const transfer = useTaskListTransfer(snap.tasks, refresh);
 
   const usedGroups = groupNames(snap.tasks);
@@ -211,6 +280,12 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     const n = await api.runTasks(ids, mode);
     if (n === 0) toast({ tone: "info", title: "המשימה כבר רצה או ממתינה בתור" });
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
+  };
+
+  /** After a stop: the same run again, which carries on in the folder it left. */
+  const resume = async (id: string) => {
+    const queued = await api.resumeTask(id);
+    toast({ tone: "info", title: queued ? "הגיבוי ימשיך מאותה נקודה" : "המשימה כבר רצה או ממתינה בתור" });
   };
 
   // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
@@ -413,6 +488,16 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             </div>
           )}
           {snap.tasks.length > 0 && (
+            <IconButton
+              label={compact ? "תצוגה רגילה (עם טקסט במצב ובסוג)" : "תצוגה קומפקטית (בלי טקסט במצב ובסוג)"}
+              aria-pressed={compact}
+              onClick={() => setCompact(!compact)}
+              className={cx("size-9 border", compact ? "border-accent/40 bg-accent-soft text-accent" : "border-line bg-panel")}
+            >
+              <Minimize2 size={16} />
+            </IconButton>
+          )}
+          {snap.tasks.length > 0 && (
             <div className="relative">
               <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
               <TextInput
@@ -593,12 +678,12 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         ) : tasks.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted">אין משימות שתואמות לחיפוש</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full table-fixed text-sm" style={{ minWidth: tableMinWidth }}>
+          <div ref={setTableWrap} className="overflow-hidden">
+            <table className="w-full table-fixed text-sm">
               <colgroup>
                 <col style={{ width: CHECK_COL }} />
                 {RESIZABLE.map((k) => (
-                  <col key={k} style={{ width: cols.widths[k] || undefined }} />
+                  <col key={k} style={{ width: k === "name" && nameAuto ? undefined : fitted[k] }} />
                 ))}
                 <col style={{ width: nameAuto ? MIN_ACTIONS_COL : undefined }} />
               </colgroup>
@@ -625,12 +710,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                       className="relative px-2 py-2.5 text-start font-medium"
                     >
                       {COLUMN_LABEL[k]}
-                      <ColumnResizer
-                        label={`רוחב העמודה ${COLUMN_LABEL[k]}`}
-                        onStart={freezeName}
-                        onResize={(w) => cols.setWidth(k, w)}
-                        onReset={() => cols.reset(k)}
-                      />
+                      {!(compact && COMPACT_COLS[k]) && (
+                        <ColumnResizer
+                          label={`רוחב העמודה ${COLUMN_LABEL[k]}`}
+                          onStart={freezeColumns}
+                          onResize={(w) => resizeColumn(k, w)}
+                          onReset={() => cols.reset(k)}
+                        />
+                      )}
                     </th>
                   ))}
                   <th className="px-2 py-2.5" />
@@ -731,13 +818,26 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                 onChange={(on) => setEnabled([t], on)}
                                 ariaLabel={`${t.enabled ? "השבתת" : "הפעלת"} ${t.name}`}
                               />
-                              <span className={cx("text-[13px]", t.enabled ? "text-ok" : "text-muted")}>
-                                {t.enabled ? "פעילה" : "מושבתת"}
-                              </span>
+                              {!compact && (
+                                <span className={cx("text-[13px]", t.enabled ? "text-ok" : "text-muted")}>
+                                  {t.enabled ? "פעילה" : "מושבתת"}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-2 py-3">
-                            <Badge tone={taskKind(t) === "incremental" ? "neutral" : "accent"}>{KIND_LABEL[taskKind(t)]}</Badge>
+                            <span title={compact ? KIND_LABEL[taskKind(t)] : undefined}>
+                              <Badge tone={taskKind(t) === "incremental" ? "neutral" : "accent"}>
+                                {compact ? (
+                                  <>
+                                    {KIND_ICON[taskKind(t)]}
+                                    <span className="sr-only">{KIND_LABEL[taskKind(t)]}</span>
+                                  </>
+                                ) : (
+                                  KIND_LABEL[taskKind(t)]
+                                )}
+                              </Badge>
+                            </span>
                           </td>
                           <td className="px-2 py-3 text-[13px]">
                             {t.fullSchedule && t.mode === "incremental" ? (
@@ -787,7 +887,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                 className="-m-1 flex flex-col items-start gap-1 rounded-lg p-1 text-start hover:bg-hover"
                                 title={`${st.lastMessage ?? ""}\nלחיצה לפרטי הריצה וליומן המלא`}
                               >
-                                {statusBadge(st.lastStatus)}
+                                {statusBadge(st.lastStatus, st.resumable)}
                                 <span className="text-xs text-muted">{fmtSmart(st.lastRunAt)}</span>
                               </button>
                             ) : (
@@ -796,9 +896,22 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                           </td>
                           <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-0.5">
-                              {running || queued ? (
-                                <IconButton label="עצור" tone="danger" onClick={() => api.cancelTask(t.id)}>
-                                  <Square size={15} />
+                              {running ? (
+                                <>
+                                  <IconButton label="השהה (אפשר להמשיך אחר כך)" onClick={() => api.cancelTask(t.id)}>
+                                    <Pause size={15} />
+                                  </IconButton>
+                                  <IconButton label="עצור" tone="danger" onClick={() => stopTask(t.id, t.name)}>
+                                    <Square size={15} />
+                                  </IconButton>
+                                </>
+                              ) : queued ? (
+                                <IconButton label="הסר מהתור" onClick={() => api.cancelTask(t.id)}>
+                                  <X size={15} />
+                                </IconButton>
+                              ) : st?.lastStatus === "cancelled" && st.resumable ? (
+                                <IconButton label="המשך מאותה נקודה" onClick={() => resume(t.id)}>
+                                  <Play size={16} />
                                 </IconButton>
                               ) : taskKind(t) === "combined" ? (
                                 <Menu

@@ -145,6 +145,7 @@ pub fn run() {
             commands::delete_tasks,
             commands::reorder_tasks,
             commands::run_tasks,
+            commands::resume_task,
             commands::cancel_task,
             commands::get_history,
             commands::clear_history,

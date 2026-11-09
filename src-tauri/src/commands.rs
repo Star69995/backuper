@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupMode, Notice, Progress, RunRecord, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
+use crate::model::{BackupMode, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -131,7 +131,7 @@ pub fn save_tasks(core: CoreState, tasks: Vec<Task>) -> Result<Vec<Task>, String
 #[tauri::command]
 pub fn delete_tasks(core: CoreState, ids: Vec<String>) {
     for id in &ids {
-        core.cancel(id);
+        core.cancel(id, false);
     }
     let mut s = core.store.lock().unwrap();
     s.tasks.retain(|t| !ids.contains(&t.id));
@@ -166,6 +166,26 @@ pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>) ->
         .count()
 }
 
+/// Continues a task whose last run was stopped: same mode as that run, and `backup_source` picks
+/// up in the folder it left. Returns false if the task is already queued or running.
+#[tauri::command]
+pub fn resume_task(core: CoreState, id: String) -> bool {
+    let mode = core
+        .store
+        .lock()
+        .unwrap()
+        .history
+        .iter()
+        .find(|r| r.task_id == id)
+        .filter(|r| r.status == RunStatus::Cancelled)
+        .map(|r| r.mode);
+    core.enqueue(Job {
+        task_id: id,
+        mode,
+        trigger: Trigger::Manual,
+    })
+}
+
 /// Answers the "drive connected" question: queues `run`, drops the rest of `ids`.
 #[tauri::command]
 pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>) {
@@ -173,8 +193,8 @@ pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>)
 }
 
 #[tauri::command]
-pub fn cancel_task(core: CoreState, id: String) {
-    core.cancel(&id);
+pub fn cancel_task(core: CoreState, id: String, discard: bool) {
+    core.cancel(&id, discard);
 }
 
 #[tauri::command]
