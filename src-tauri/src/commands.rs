@@ -292,6 +292,12 @@ pub fn preview_schedule(schedule: Schedule) -> Result<Vec<String>, String> {
     Ok(schedule::preview(&schedule, 3).iter().map(|d| d.to_rfc3339()).collect())
 }
 
+/// Live check of a regex filter: error, plain-language reading and an optional try-out on a sample name.
+#[tauri::command]
+pub fn check_regex(pattern: String, sample: Option<String>) -> crate::model::RegexCheck {
+    crate::regexcheck::check(&pattern, sample.as_deref())
+}
+
 #[tauri::command]
 pub fn save_settings(core: CoreState, settings: Settings) -> Result<(), String> {
     crate::filters::validate(&settings.global_filters)?;

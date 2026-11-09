@@ -460,3 +460,24 @@ mod tests {
         assert_eq!(run.errors[1].code, Some(32));
     }
 }
+
+/// What the rule editor shows about a regex filter (see `regexcheck`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegexCheck {
+    /// Why the pattern is invalid; the other fields stay empty then.
+    pub error: Option<String>,
+    /// The pattern read left to right: each piece of it and what it means.
+    pub parts: Vec<RegexPart>,
+    pub note: Option<String>,
+    /// Result of the try-out name (None = no name given).
+    pub matched: Option<bool>,
+    pub matched_text: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegexPart {
+    pub token: String,
+    pub meaning: String,
+}

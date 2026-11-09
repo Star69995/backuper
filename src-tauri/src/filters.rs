@@ -1,6 +1,5 @@
 //! User filter rules -> engine filters.
 
-use crate::engine::native::compile_regex;
 use crate::engine::Filters;
 use crate::model::FilterRule;
 
@@ -48,8 +47,8 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
                 return Err(format!("כלל סינון: אפשר רק לדלג על תיקיות לפי ביטוי רגולרי, לא לגבות רק אותן ({value})"))
             }
             FilterRule::Regex { value, .. } => {
-                if let Err(e) = compile_regex(value.trim()) {
-                    return Err(format!("כלל סינון: הביטוי הרגולרי \"{value}\" לא תקין ({e})"));
+                if let Some(e) = crate::regexcheck::error(value.trim()) {
+                    return Err(format!("כלל סינון: הביטוי הרגולרי \"{value}\" לא תקין - {e}"));
                 }
             }
             FilterRule::Pattern { value } if value.trim().is_empty() => return Err("כלל סינון: יש להזין תבנית שם קובץ".into()),

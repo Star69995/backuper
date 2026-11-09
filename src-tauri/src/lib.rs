@@ -9,6 +9,7 @@ mod engine;
 mod filters;
 mod manifest;
 mod model;
+mod regexcheck;
 mod schedule;
 mod store;
 mod tasklist;
@@ -155,6 +156,7 @@ pub fn run() {
             commands::folder_size,
             commands::open_path,
             commands::preview_schedule,
+            commands::check_regex,
             commands::save_settings,
             commands::set_autostart,
             commands::import_tasks,

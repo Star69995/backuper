@@ -8,6 +8,7 @@ import type {
   CobianLists,
   ImportPreview,
   Progress,
+  RegexCheck,
   RunRecord,
   Schedule,
   Settings,
@@ -38,6 +39,8 @@ export const api = {
   folderSize: (path: string) => invoke<number>("folder_size", { path }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
+  /** Validates a regex filter, explains it, and tries it on `sample` (a file or folder name). */
+  checkRegex: (pattern: string, sample: string | null) => invoke<RegexCheck>("check_regex", { pattern, sample }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   importTasks: (path: string) => invoke<ImportPreview>("import_tasks", { path }),

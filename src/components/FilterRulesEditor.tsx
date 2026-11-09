@@ -1,7 +1,8 @@
-import { CalendarX, EyeOff, FileType, Filter, FolderX, Info, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
-import { useState, type ReactNode } from "react";
-import type { FilterKind, FilterRule } from "../types";
-import { Button, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
+import { AlertTriangle, CalendarX, EyeOff, FileType, Filter, FolderX, Info, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
+import { useEffect, useId, useState, type ReactNode } from "react";
+import { api } from "../api";
+import type { FilterKind, FilterRule, RegexCheck } from "../types";
+import { Badge, Button, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
   // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
@@ -134,6 +135,94 @@ export function describeFilter(r: FilterRule) {
 
 const same = (a: FilterRule, b: FilterRule) => JSON.stringify(a) === JSON.stringify(b);
 
+/**
+ * Under a regex rule: whether it is valid (and why not), what it says piece by piece, and a try-out
+ * field. Parsing and wording come from the backend, so the reading is exactly what the engine does.
+ */
+function RegexCheckPanel({ rule }: { rule: Extract<FilterRule, { kind: "regex" }> }) {
+  const [sample, setSample] = useState("");
+  const id = useId();
+  const [check, setCheck] = useState<RegexCheck | null>(null);
+  const pattern = rule.value;
+  const subject = rule.folders ? "תיקייה" : "קובץ";
+
+  useEffect(() => {
+    if (!pattern.trim()) {
+      setCheck(null);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      api
+        .checkRegex(pattern, sample || null)
+        .then((c) => live && setCheck(c))
+        .catch(() => live && setCheck(null));
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [pattern, sample]);
+
+  if (!check) return null;
+  if (check.error)
+    return (
+      <div className="mt-1.5 flex items-start gap-1.5 rounded-md bg-bad-soft px-2.5 py-1.5 text-xs text-bad">
+        <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+        <span>הביטוי לא תקין: {check.error}</span>
+      </div>
+    );
+
+  const skips = rule.folders || !rule.include;
+  // What the rule does with the try-out name: a skip rule drops what matches, an "only" rule keeps only that.
+  const kept = check.matched === !skips;
+  return (
+    <div className="mt-1.5 flex flex-col gap-2 rounded-md border border-line bg-panel px-2.5 py-2 text-xs">
+      <div className="font-medium text-muted">מה הביטוי אומר, לפי הסדר</div>
+      <ul className="flex flex-col gap-1">
+        {check.parts.map((p, i) => (
+          <li key={i} className="flex items-baseline gap-2">
+            <code dir="ltr" className="shrink-0 rounded bg-panel2 px-1.5 py-0.5 font-mono text-[13px]">
+              {p.token}
+            </code>
+            <span>{p.meaning}</span>
+          </li>
+        ))}
+      </ul>
+      {check.note && (
+        <div className="flex items-start gap-1.5 text-muted">
+          <Info size={13} className="mt-0.5 shrink-0" />
+          <span>{check.note}</span>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+        <label htmlFor={id} className="text-muted">
+          בדיקה על שם {subject}:
+        </label>
+        <TextInput
+          id={id}
+          dir="ltr"
+          className="min-w-40 flex-1 text-left font-mono"
+          placeholder={rule.folders ? "build2" : ".gitignore"}
+          value={sample}
+          onChange={(e) => setSample(e.target.value)}
+        />
+        {check.matched !== null && (
+          <>
+            <Badge tone={check.matched ? "accent" : "neutral"}>{check.matched ? "מתאים לביטוי" : "לא מתאים לביטוי"}</Badge>
+            <Badge tone={kept ? "ok" : "warn"}>{kept ? `${subject} יגובה` : `${subject} לא יגובה`}</Badge>
+            {check.matched && check.matchedText && check.matchedText !== sample && (
+              <span className="text-muted">
+                החלק שהתאים: <bdi dir="ltr">{check.matchedText}</bdi>
+              </span>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** One rule on one line; its explanation sits behind the info button so a long list stays compact. */
 function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: (r: FilterRule) => void; onRemove: () => void }) {
   const [showHint, setShowHint] = useState(false);
@@ -208,6 +297,7 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
           <Trash2 size={15} />
         </IconButton>
       </div>
+      {r.kind === "regex" && <RegexCheckPanel rule={r} />}
       {/* A rule that was just added shows its explanation until it has a value. */}
       {!inline && hint && (showHint || (hasText(r) && !r.value)) && <p className="pb-1 pt-1.5 text-xs text-muted">{hint}</p>}
     </li>

@@ -26,6 +26,16 @@ export type FilterRule =
 
 export type FilterKind = FilterRule["kind"];
 
+/** Live reading of a regex filter: why it is invalid, what it says piece by piece, and a try-out on a sample name. */
+export interface RegexCheck {
+  error: string | null;
+  parts: { token: string; meaning: string }[];
+  note: string | null;
+  /** null = no sample name given. */
+  matched: boolean | null;
+  matchedText: string | null;
+}
+
 /** What a task does when its drives (destination / sources) get connected. */
 export type DriveAction = "off" | "run" | "ask";
 

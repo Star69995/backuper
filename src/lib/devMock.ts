@@ -317,6 +317,29 @@ export function installDevMock() {
         return "Backuper - גיבוי אינקרמנטלי\nמקור: C:\\Users\\User\\Pictures\n\nהועתק\t1234\tC:\\Users\\User\\Pictures\\a.jpg\n";
       case "preview_schedule":
         return occurrences(a.schedule as Schedule, 3);
+      case "check_regex": {
+        // Rough stand-in for the Rust reader: real parsing and wording live in regexcheck.rs.
+        const pattern = String(a.pattern).trim();
+        const sample = a.sample ? String(a.sample) : null;
+        if (!pattern) return { error: null, parts: [], note: null, matched: null, matchedText: null };
+        let re: RegExp;
+        try {
+          re = new RegExp(pattern, "i");
+        } catch {
+          return { error: "תחביר לא תקין (במקום ה-1 בביטוי)", parts: [], note: null, matched: null, matchedText: null };
+        }
+        const m = sample ? re.exec(sample) : null;
+        return {
+          error: null,
+          parts: (pattern.match(/\\.|\[[^\]]*\][*+?]?|\([^)]*\)[*+?]?|.[*+?]?/g) ?? []).map((token) => ({
+            token,
+            meaning: token === "^" ? "תחילת השם" : token === "$" ? "סוף השם" : `התאמה ל-${token}`,
+          })),
+          note: /^\^|\$$/.test(pattern) ? null : "בלי ^ בהתחלה ו-$ בסוף, מספיק שהביטוי יתאים לחלק כלשהו מהשם.",
+          matched: sample ? !!m : null,
+          matchedText: m ? m[0] : null,
+        };
+      }
       case "plugin:dialog|open":
         // The file picker and the restore-from-folder picker get an answer (other folder pickers stay cancelled).
         if ((a.options as { title?: string } | undefined)?.title?.includes("רשימת המשימות")) return "K:\\Backuper";

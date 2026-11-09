@@ -242,6 +242,7 @@ version = "0.3.13"
 dependencies = [
  "chrono",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "tauri",
