@@ -339,6 +339,9 @@ impl CopyEngine for Robocopy {
         let mut stats = CopyStats::default();
         let mut summary = Summary::default();
         let mut last_error: Option<String> = None;
+        // robocopy logs a file's line again on every retry (/R), so a file that keeps failing (a
+        // locked pagefile.sys on a system drive) would be counted up to three times.
+        let mut last_file = String::new();
         let code = run_process(
             &build_args(&mirror_args(job, false), &job.log_file),
             &job.log_file,
@@ -357,7 +360,12 @@ impl CopyEngine for Robocopy {
                     }
                 }
                 match classify(l) {
-                    Line::Copy { size, path } => (on_event.borrow_mut())(EngineEvent::File { path, size }),
+                    Line::Copy { size, path } => {
+                        if path != last_file {
+                            last_file.clone_from(&path);
+                            (on_event.borrow_mut())(EngineEvent::File { path, size });
+                        }
+                    }
                     Line::Extra | Line::Other => {}
                 }
             },
