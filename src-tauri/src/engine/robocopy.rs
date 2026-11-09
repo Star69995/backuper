@@ -15,6 +15,9 @@ use std::time::Duration;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_ERRORS: usize = 50;
+/// Errors that mean the destination or the source drive itself is in trouble (full, gone), not one
+/// file: a copy with one of these is not a usable backup.
+const DRIVE_ERRORS: [u32; 10] = [39, 112, 21, 53, 55, 59, 64, 67, 1167, 1231];
 
 pub struct Robocopy;
 
@@ -394,7 +397,9 @@ impl CopyEngine for Robocopy {
             Ok(Some(c)) => c,
         };
         stats.exit_code = Some(code);
+        let mut files_total = 0;
         if let Some(f) = summary.files() {
+            files_total = f[0];
             stats.files_copied = f[1];
             stats.files_failed = f[4];
             stats.files_deleted = f[5];
@@ -406,8 +411,19 @@ impl CopyEngine for Robocopy {
         // robocopy exit codes are bit flags: 1 copied, 2 extras, 4 mismatch, 8 failures, 16 fatal.
         let (outcome, message) = if code >= 16 {
             (Outcome::Failed, "שגיאה חמורה - המקור או היעד לא נגישים. ודאו ששני הכוננים מחוברים ושיש הרשאה אליהם, והריצו שוב. פרטים ביומן המפורט.".to_string())
-        } else if code >= 8 {
+        } else if code >= 8 && !mostly_copied(&stats, files_total) {
             (Outcome::Failed, format!("{} קבצים לא הועתקו", stats.files_failed.max(1)))
+        } else if code >= 8 {
+            // A few files that couldn't be read (locked, no access) don't make the whole copy worthless:
+            // it completes with a warning, like an incremental does, instead of staying half-done and
+            // being "continued" (and failing on the same files) on every run.
+            (
+                Outcome::Warning,
+                format!(
+                    "הגיבוי הסתיים, אבל {} קבצים לא הועתקו (פירוט ברשימת השגיאות)",
+                    stats.files_failed.max(1)
+                ),
+            )
         } else if code & 4 != 0 {
             (Outcome::Warning, "הגיבוי הסתיים, אך נמצאו פריטים לא תואמים".to_string())
         } else if code & 1 != 0 {
@@ -417,6 +433,13 @@ impl CopyEngine for Robocopy {
         };
         CopyResult { outcome, message, stats }
     }
+}
+
+/// Some files failed, but nothing points at the drives and almost everything else was copied (or
+/// was already there): at most 5% of the files failed.
+fn mostly_copied(stats: &CopyStats, files_total: u64) -> bool {
+    let drive_trouble = stats.errors.iter().any(|e| e.code.is_some_and(|c| DRIVE_ERRORS.contains(&c)));
+    !drive_trouble && files_total > 0 && stats.files_failed * 20 <= files_total
 }
 
 #[cfg(test)]
@@ -469,6 +492,20 @@ mod tests {
         }
         assert_eq!(s.files().unwrap()[1], 4);
         assert_eq!(s.bytes().unwrap()[1], 2000);
+    }
+
+    #[test]
+    fn a_few_failed_files_still_complete_the_backup() {
+        let stats = |failed: u64, code: u32| CopyStats {
+            files_failed: failed,
+            errors: vec![FileError { path: "C:\\x".into(), code: Some(code), message: String::new() }],
+            ..Default::default()
+        };
+        assert!(mostly_copied(&stats(26, 32), 21_101));
+        assert!(!mostly_copied(&stats(26, 112), 21_101), "destination full");
+        assert!(!mostly_copied(&stats(26, 53), 21_101), "network path gone");
+        assert!(!mostly_copied(&stats(600, 5), 1_000), "most files failed");
+        assert!(!mostly_copied(&stats(1, 32), 0));
     }
 
     #[test]

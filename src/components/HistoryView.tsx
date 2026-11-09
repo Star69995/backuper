@@ -274,7 +274,7 @@ function SourceCard({
             פונו <bdi dir="ltr">{fmtBytes(src.freedBytes)}</bdi>
           </span>
         )}
-        {src.filesDeleted > 0 && <span>נמחקו מהגיבוי {fmtNumber(src.filesDeleted)}</span>}
+        {src.filesDeleted > 0 && <span>הוסרו מהגיבוי {fmtNumber(src.filesDeleted)} (כבר לא במקור)</span>}
         {src.filesFailed > 0 && <span className="text-bad">נכשלו {fmtNumber(src.filesFailed)}</span>}
         {src.exitCode !== null && <span>קוד robocopy: {src.exitCode}</span>}
       </div>
@@ -421,9 +421,17 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
           {stat("קבצים שהועתקו", fmtNumber(r.filesCopied))}
           {stat("נפח שהועתק", <bdi dir="ltr">{fmtBytes(r.bytesCopied)}</bdi>)}
           {stat("משך", fmtDuration(r.startedAt, r.finishedAt))}
-          {stat("גודל הגיבוי", <bdi dir="ltr">{fmtBytes(r.backupBytes)}</bdi>)}
+          {/* Known only once a backup folder is complete: a failed or stopped run has none to measure. */}
+          {stat(
+            "גודל הגיבוי",
+            r.backupBytes > 0 || r.status === "success" || r.status === "warning" ? (
+              <bdi dir="ltr">{fmtBytes(r.backupBytes)}</bdi>
+            ) : (
+              "לא הושלם"
+            ),
+          )}
           {stat("מקום שפונה (גיבויים קודמים)", <bdi dir="ltr">{fmtBytes(r.freedBytes)}</bdi>)}
-          {stat("קבצים שנמחקו מהגיבוי", fmtNumber(r.filesDeleted))}
+          {stat("הוסרו מהגיבוי (כבר לא במקור)", fmtNumber(r.filesDeleted))}
           {stat("קבצים שנכשלו", fmtNumber(r.filesFailed))}
           {stat("סיום", fmtDateTime(r.finishedAt))}
         </div>
