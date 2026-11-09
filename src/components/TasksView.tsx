@@ -62,6 +62,7 @@ import {
   Select,
   Spinner,
   TextInput,
+  Toggle,
 } from "./ui";
 
 export const statusBadge = (s: RunStatus) =>
@@ -84,17 +85,18 @@ export const statusBadge = (s: RunStatus) =>
     cancelled: <Badge icon={<CircleSlash size={12} />}>בוטל</Badge>,
   })[s];
 
-type ColumnKey = "name" | "kind" | "schedule" | "next" | "last";
-const RESIZABLE: ColumnKey[] = ["name", "kind", "schedule", "next", "last"];
+type ColumnKey = "name" | "enabled" | "kind" | "schedule" | "next" | "last";
+const RESIZABLE: ColumnKey[] = ["name", "enabled", "kind", "schedule", "next", "last"];
 const COLUMN_LABEL: Record<ColumnKey, string> = {
   name: "משימה",
+  enabled: "מצב",
   kind: "סוג",
   schedule: "תזמון",
   next: "ריצה הבאה",
   last: "ריצה אחרונה",
 };
 /** name 0 = auto: fills the free space until the user resizes any column. */
-const DEFAULT_WIDTHS: Record<ColumnKey, number> = { name: 0, kind: 112, schedule: 176, next: 128, last: 128 };
+const DEFAULT_WIDTHS: Record<ColumnKey, number> = { name: 0, enabled: 120, kind: 112, schedule: 176, next: 128, last: 128 };
 const MIN_NAME_COL = 220;
 const CHECK_COL = 40;
 /** The actions column also takes any leftover width, so a dragged border follows the mouse exactly. */
@@ -277,7 +279,13 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     saveWithUndo(
       list.map((t) => ({ ...t, enabled })),
       list,
-      enabled ? `${list.length} משימות הופעלו` : `${list.length} משימות הושבתו`,
+      list.length === 1
+        ? enabled
+          ? "המשימה הופעלה"
+          : "המשימה הושבתה"
+        : enabled
+          ? `${list.length} משימות הופעלו`
+          : `${list.length} משימות הושבתו`,
     );
 
   const remove = async (list: Task[]) => {
@@ -633,7 +641,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                   <Fragment key={g.folder ?? gi}>
                     {g.folder !== null && (
                       <tr className="border-b border-line bg-panel2/70">
-                        <td colSpan={7} className="px-3 py-1.5">
+                        <td colSpan={8} className="px-3 py-1.5">
                           <div className="flex items-center gap-2 text-xs font-medium text-muted">
                             <Folder size={14} className="shrink-0 text-accent" />
                             <span className="text-fg">{sort.key === "source" ? "מקור:" : "יעד:"}</span>
@@ -679,7 +687,6 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               className="flex max-w-full items-center gap-2 text-start font-medium text-fg hover:text-accent"
                             >
                               <span className="truncate">{t.name}</span>
-                              {!t.enabled && <Badge>מושבת</Badge>}
                               {group === null && groupOf(t) && <Badge>{groupOf(t)}</Badge>}
                             </button>
                             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted">
@@ -716,6 +723,18 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                 ))}
                               </ul>
                             )}
+                          </td>
+                          <td className="px-2 py-3" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-2">
+                              <Toggle
+                                checked={t.enabled}
+                                onChange={(on) => setEnabled([t], on)}
+                                ariaLabel={`${t.enabled ? "השבתת" : "הפעלת"} ${t.name}`}
+                              />
+                              <span className={cx("text-[13px]", t.enabled ? "text-ok" : "text-muted")}>
+                                {t.enabled ? "פעילה" : "מושבתת"}
+                              </span>
+                            </div>
                           </td>
                           <td className="px-2 py-3">
                             <Badge tone={taskKind(t) === "incremental" ? "neutral" : "accent"}>{KIND_LABEL[taskKind(t)]}</Badge>

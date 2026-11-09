@@ -250,9 +250,10 @@ export function installDevMock() {
       }
     : null;
 
+  // Fresh copies each time, like the real backend: the UI memoizes on array identity.
   const snapshot = (): Snapshot => ({
-    tasks,
-    states,
+    tasks: [...tasks],
+    states: { ...states },
     settings,
     autostart: true,
     drivePrompts,

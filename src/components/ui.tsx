@@ -164,12 +164,15 @@ export function Toggle({
   checked,
   onChange,
   label,
+  ariaLabel,
   description,
   disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: ReactNode;
+  /** Accessible name when there's no visible `label`. */
+  ariaLabel?: string;
   description?: ReactNode;
   disabled?: boolean;
 }) {
@@ -178,6 +181,7 @@ export function Toggle({
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cx(
