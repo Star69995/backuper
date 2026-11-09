@@ -69,6 +69,10 @@ pub enum FilterRule {
     Folder {
         value: String,
     },
+    /// One file, by its full path ("C:\\pagefile.sys"): usually added from a run's errors.
+    File {
+        value: String,
+    },
     /// Files larger than this many MB.
     LargerThan {
         mb: u64,

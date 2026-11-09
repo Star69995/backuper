@@ -25,6 +25,14 @@ pub fn patterns(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// "C:\\dir\\file" or "\\\\server\\share\\file": a full path that names a file, not a folder.
+fn is_full_file_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    let drive = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    let unc = p.starts_with("\\\\") && p[2..].contains('\\');
+    (drive || unc) && !p.ends_with('\\') && !p.contains(['*', '?', '/'])
+}
+
 pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
     for r in rules {
         match r {
@@ -60,6 +68,9 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
             FilterRule::Folder { value } if value.trim().is_empty() => {
                 return Err("כלל סינון: יש להזין שם או נתיב של תיקייה".into())
             }
+            FilterRule::File { value } if !is_full_file_path(value.trim()) => {
+                return Err(format!("כלל סינון: יש להזין נתיב מלא של קובץ, למשל C:\\pagefile.sys ({value})"))
+            }
             FilterRule::LargerThan { mb: 0 } => return Err("כלל סינון: גודל הקובץ חייב להיות לפחות 1MB".into()),
             FilterRule::OlderThan { days: 0 } => return Err("כלל סינון: מספר הימים חייב להיות לפחות 1".into()),
             _ => {}
@@ -79,6 +90,8 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
             FilterRule::Regex { value, include: true, .. } => f.include_regex.push(value.trim().to_string()),
             FilterRule::Regex { value, include: false, .. } => f.exclude_regex.push(value.trim().to_string()),
             FilterRule::Folder { value } => f.exclude_dirs.push(value.trim().to_string()),
+            // robocopy's /XF takes full paths too (an entry with a backslash).
+            FilterRule::File { value } => f.exclude_files.push(value.trim().to_string()),
             FilterRule::LargerThan { mb } => {
                 let bytes = mb * 1024 * 1024;
                 f.max_size = Some(f.max_size.map_or(bytes, |m| m.min(bytes)));
@@ -116,6 +129,15 @@ mod tests {
         assert_eq!(f.exclude_dirs, ["node_modules"]);
         assert_eq!(f.max_size, Some(10 * 1024 * 1024));
         assert!(f.exclude_hidden && !f.exclude_system);
+    }
+
+    #[test]
+    fn file_rules_need_a_full_path() {
+        let ok = |v: &str| validate(&[FilterRule::File { value: v.into() }]).is_ok();
+        assert!(ok(r"C:\pagefile.sys") && ok(r"D:\a\b.txt") && ok(r"\\nas\share\x.db"));
+        assert!(!ok("pagefile.sys") && !ok(r"C:\") && !ok(r"C:\dir\") && !ok(r"C:\*.sys") && !ok(""));
+        let f = compile(&[FilterRule::File { value: r" C:\pagefile.sys ".into() }]);
+        assert_eq!(f.exclude_files, [r"C:\pagefile.sys"]);
     }
 
     #[test]

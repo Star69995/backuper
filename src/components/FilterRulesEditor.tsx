@@ -1,4 +1,4 @@
-import { AlertTriangle, CalendarX, EyeOff, FileType, Filter, FolderX, Info, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
+import { AlertTriangle, CalendarX, EyeOff, FileType, FileX, Filter, FolderX, Info, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { api } from "../api";
 import type { FilterKind, FilterRule, RegexCheck } from "../types";
@@ -19,6 +19,11 @@ const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string 
     icon: <FolderX size={15} />,
     hint: "התיקייה ומה שבתוכה לא יגובו. שם תיקייה בכל מקום בעץ (node_modules) או נתיב מלא.",
   },
+  file: {
+    label: "קובץ מסוים",
+    icon: <FileX size={15} />,
+    hint: "הקובץ הזה לא יגובה. נתיב מלא, למשל C:\\pagefile.sys. נוח לקובץ שנכשל בכל גיבוי כי הוא תמיד נעול.",
+  },
   largerThan: { label: "קבצים גדולים", icon: <Scale size={15} />, hint: "קבצים גדולים מהגודל הזה לא יגובו." },
   olderThan: {
     label: "קבצים ישנים",
@@ -34,7 +39,7 @@ const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string 
 };
 
 /** Rules offered in the add menu. */
-const MENU: FilterKind[] = ["extension", "regex", "folder", "largerThan", "olderThan", "hidden", "system"];
+const MENU: FilterKind[] = ["extension", "regex", "folder", "file", "largerThan", "olderThan", "hidden", "system"];
 
 const isFiles = (r: FilterRule): r is Extract<FilterRule, { kind: "include" | "extension" | "pattern" }> =>
   r.kind === "include" || r.kind === "extension" || r.kind === "pattern";
@@ -56,6 +61,7 @@ const PLACEHOLDERS: Partial<Record<FilterKind, string>> = {
   pattern: "~$*",
   regex: "^IMG_\\d+",
   folder: "node_modules",
+  file: "C:\\pagefile.sys",
 };
 
 /** The explanation of a rule, shown on demand (and right away while the rule is still empty). */
@@ -73,6 +79,7 @@ const blank = (kind: FilterKind): FilterRule => {
     case "extension":
     case "pattern":
     case "folder":
+    case "file":
       return { kind, value: "" };
     case "regex":
       return { kind, value: "", include: false, folders: false };
@@ -124,6 +131,8 @@ export function describeFilter(r: FilterRule) {
         : `${r.include ? "לגבות רק" : "לדלג על"} ביטוי רגולרי: ⁦${r.value}⁩`;
     case "folder":
       return `תיקייה: ⁦${r.value}⁩`;
+    case "file":
+      return `קובץ: ⁦${r.value}⁩`;
     case "largerThan":
       return r.mb % 1024 === 0 ? `קבצים גדולים מ-${r.mb / 1024}GB` : `קבצים גדולים מ-${r.mb}MB`;
     case "olderThan":

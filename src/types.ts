@@ -19,6 +19,8 @@ export type FilterRule =
   /** `folders`: matches folder names (always skipped, with their contents) instead of file names. */
   | { kind: "regex"; value: string; include: boolean; folders: boolean }
   | { kind: "folder"; value: string }
+  /** One file by its full path (usually added from a run's errors). */
+  | { kind: "file"; value: string }
   | { kind: "largerThan"; mb: number }
   | { kind: "olderThan"; days: number }
   | { kind: "hidden" }

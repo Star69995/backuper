@@ -1,9 +1,9 @@
-import { CircleAlert, FileText, Folder, FolderOpen, History, Info, Search, Trash2 } from "lucide-react";
+import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
-import type { FileError, RunRecord, RunStatus, Snapshot, SourceRun } from "../types";
+import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
 import { useFeedback } from "./feedback";
 import { statusBadge } from "./TasksView";
 import { Badge, Button, cx, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
@@ -147,8 +147,40 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
   );
 }
 
+/** Error kinds where skipping the path next time makes no sense (the problem is the drive, not the file). */
+const NOT_SKIPPABLE = new Set(["diskFull", "disconnected"]);
+
+const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
+
+/** Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it). */
+function isSkipped(task: Task, path: string) {
+  const p = norm(path);
+  return task.filters.some(
+    (r) =>
+      (r.kind === "file" && norm(r.value) === p) ||
+      (r.kind === "folder" && r.value.includes("\\") && (p === norm(r.value) || p.startsWith(norm(r.value) + "\\"))),
+  );
+}
+
+/** Skipping a failed path in the next runs: the task, whether a path is already skipped, and the action. */
+interface Skipper {
+  isSkipped: (path: string) => boolean;
+  skip: (path: string, source: string) => void;
+}
+
 /** One kind of copy failure: what happened, why, what to do, and the affected files. */
-function ErrorGroup({ kind, errors }: { kind: ErrorKind; errors: FileError[] }) {
+function ErrorGroup({
+  kind,
+  errors,
+  source,
+  skipper,
+}: {
+  kind: ErrorKind;
+  errors: FileError[];
+  source: string;
+  skipper: Skipper | null;
+}) {
+  const canSkip = skipper !== null && !NOT_SKIPPABLE.has(kind.id);
   const bad = kind.tone === "bad";
   return (
     <div
@@ -176,7 +208,22 @@ function ErrorGroup({ kind, errors }: { kind: ErrorKind; errors: FileError[] }) 
         <ul className="mt-1.5 flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
           {errors.map((e, i) => (
             <li key={i} className="min-w-0">
-              <PathText path={e.path} className="block truncate font-mono" />
+              <div className="flex min-w-0 items-center gap-2">
+                <PathText path={e.path} className="block min-w-0 flex-1 truncate font-mono" />
+                {canSkip &&
+                  e.path &&
+                  (skipper.isSkipped(e.path) ? (
+                    <span className="shrink-0 text-muted">ידולג בגיבויים הבאים</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => skipper.skip(e.path, source)}
+                      className="flex shrink-0 items-center gap-1 rounded-full border border-line px-2 py-0.5 hover:bg-hover"
+                    >
+                      <EyeOff size={12} /> לדלג בפעמים הבאות
+                    </button>
+                  ))}
+              </div>
               {kind.id === "other" && (
                 <bdi dir="ltr" className="selectable block text-left text-muted">
                   {e.message}
@@ -190,7 +237,17 @@ function ErrorGroup({ kind, errors }: { kind: ErrorKind; errors: FileError[] }) 
   );
 }
 
-function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; onShowLog: (i: number) => void }) {
+function SourceCard({
+  src,
+  index,
+  onShowLog,
+  skipper,
+}: {
+  src: SourceRun;
+  index: number;
+  onShowLog: (i: number) => void;
+  skipper: Skipper | null;
+}) {
   const { toast } = useFeedback();
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-line p-3">
@@ -228,7 +285,7 @@ function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; 
         </div>
       )}
       {groupFileErrors(src.errors).map((g) => (
-        <ErrorGroup key={g.kind.id} kind={g.kind} errors={g.errors} />
+        <ErrorGroup key={g.kind.id} kind={g.kind} errors={g.errors} source={src.source} skipper={skipper} />
       ))}
       {src.filesFailed > src.errors.length && src.errors.length > 0 && (
         <p className="text-xs text-muted">
@@ -257,7 +314,66 @@ function SourceCard({ src, index, onShowLog }: { src: SourceRun; index: number; 
 
 /** Details of one run (per source: result, errors, full log). Also opened from the tasks table. */
 export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
-  const { toast } = useFeedback();
+  const { toast, choose } = useFeedback();
+  // The run's task as it is now (null = deleted since), for "skip this next time".
+  const [task, setTask] = useState<Task | null>(null);
+  useEffect(() => {
+    api.snapshot().then((s) => setTask(s.tasks.find((t) => t.id === r.taskId) ?? null));
+  }, [r.taskId]);
+
+  const skip = async (path: string, source: string) => {
+    const dir = path.endsWith("\\");
+    const clean = path.replace(/\\+$/, "");
+    const parent = dir ? clean : clean.slice(0, clean.lastIndexOf("\\"));
+    // Skipping the drive itself or the whole source folder would leave nothing to back up.
+    const folderOk = /\\./.test(parent) && !/^[a-z]:$/i.test(parent) && norm(parent) !== norm(source);
+    const options: { value: "file" | "folder"; label: string }[] = [];
+    if (!dir) options.push({ value: "file", label: "דלג על הקובץ" });
+    if (folderOk) options.push({ value: "folder", label: dir ? "דלג על התיקייה" : "דלג על כל התיקייה שלו" });
+    if (!options.length) return;
+    const answer = await choose({
+      title: "לדלג על זה בגיבויים הבאים?",
+      message: (
+        <span className="flex flex-col gap-2">
+          <span>
+            {dir ? "התיקייה" : "הקובץ"} לא {dir ? "תגובה" : "יגובה"} יותר במשימה "<bdi>{r.taskName}</bdi>", והשגיאה לא תחזור:
+          </span>
+          <PathText path={clean} className="block font-mono text-xs break-all" />
+          {folderOk && !dir && (
+            <>
+              <span className="text-muted">אפשר לדלג רק על הקובץ, או על כל התיקייה שלו:</span>
+              <PathText path={parent} className="block font-mono text-xs break-all" />
+            </>
+          )}
+          <span className="text-muted">אפשר לבטל את זה בכל זמן בהגדרות המשימה, בחלק "סינון".</span>
+        </span>
+      ),
+      options,
+    });
+    if (!answer) return;
+    try {
+      const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
+      if (!now) throw new Error("המשימה נמחקה");
+      const rule: FilterRule = answer === "file" ? { kind: "file", value: clean } : { kind: "folder", value: parent };
+      const [saved] = await api.saveTasks([{ ...now, filters: [...now.filters, rule] }]);
+      setTask(saved);
+      toast({
+        tone: "ok",
+        title: answer === "file" ? "הקובץ ידולג בגיבויים הבאים" : "התיקייה תדולג בגיבויים הבאים",
+        action: {
+          label: "ביטול",
+          onClick: () =>
+            api
+              .saveTasks([now])
+              .then(([t]) => setTask(t))
+              .catch((e) => toast({ tone: "bad", title: "הביטול לא הצליח", message: errorText(e) })),
+        },
+      });
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
+    }
+  };
+  const skipper: Skipper | null = task && { isSkipped: (p) => isSkipped(task, p), skip };
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
   const [logFilter, setLogFilter] = useState("");
 
@@ -312,7 +428,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
           {stat("סיום", fmtDateTime(r.finishedAt))}
         </div>
         {r.sources.map((src, i) => (
-          <SourceCard key={i} src={src} index={i} onShowLog={showLog} />
+          <SourceCard key={i} src={src} index={i} onShowLog={showLog} skipper={skipper} />
         ))}
         {log !== null && (
           <div className="flex flex-col gap-2">
