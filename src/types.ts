@@ -103,6 +103,14 @@ export interface Progress {
   filesTotal: number;
   bytesDone: number;
   bytesTotal: number;
+  /** Where the totals come from: counters only | estimated from the last backup | counted. */
+  totals: "unknown" | "estimate" | "exact";
+  /** A scan beside the copy is still counting (it can be skipped). */
+  totalsScan: boolean;
+  /** When copying began for the current source (not the scan before it). */
+  copyStartedAt: string | null;
+  /** Bytes per second of the task's last real copy. */
+  expectedRate: number | null;
   currentFile: string;
 }
 
@@ -130,6 +138,7 @@ export interface Settings {
   updateMode: "auto" | "notify" | "off";
   /** Walk the whole tree once before a full copy, just for an exact percentage (slow on big drives). */
   exactProgress: boolean;
+  backgroundTotals: boolean;
 }
 
 /** Where the app's self-update stands. */

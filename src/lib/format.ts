@@ -61,6 +61,19 @@ export function fmtDuration(fromIso: string, toIso: string | number = Date.now()
   return `${Math.floor(m / 60)} שע׳ ${m % 60} דק׳`;
 }
 
+/** "פחות מדקה" / "12 דק׳" / "2 שע׳ 5 דק׳": how long is left (rounded up, so it never reads 0 mid-copy). */
+export function fmtRemaining(seconds: number) {
+  const m = Math.ceil(seconds / 60);
+  if (m <= 1) return "פחות מדקה";
+  if (m < 60) return `${m} דק׳`;
+  return `${Math.floor(m / 60)} שע׳ ${m % 60} דק׳`;
+}
+
+/** The clock time that many seconds from now, with the day when it isn't today. */
+export function fmtFinishAt(seconds: number) {
+  return fmtSmart(new Date(Date.now() + seconds * 1000).toISOString()).replace("היום ", "");
+}
+
 export const MODE_LABEL: Record<BackupMode, string> = { full: "מלא", incremental: "אינקרמנטלי" };
 
 /** What a task does: only full, only incremental, or combined (full on its own schedule + incrementals). */

@@ -148,6 +148,7 @@ pub fn run() {
             commands::run_tasks,
             commands::resume_task,
             commands::cancel_task,
+            commands::skip_totals_scan,
             commands::get_history,
             commands::clear_history,
             commands::read_log,

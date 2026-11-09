@@ -144,6 +144,9 @@ pub struct Core {
     cancel: AtomicBool,
     /// Set with `cancel` for a full stop: the half-done backup folder is deleted (a pause keeps it).
     discard: AtomicBool,
+    /// No scan beside a full copy to find its totals: the setting is off, or the user gave up on
+    /// it (for the rest of the run).
+    skip_scan: AtomicBool,
     /// The worker took a job and hasn't finished it yet (set and cleared under the queue lock).
     working: AtomicBool,
     /// Tasks waiting for the user to answer "the drive was connected - back up now?".
@@ -161,6 +164,7 @@ impl Core {
             current: Mutex::new(None),
             cancel: AtomicBool::new(false),
             discard: AtomicBool::new(false),
+            skip_scan: AtomicBool::new(false),
             working: AtomicBool::new(false),
             drive_prompts: Mutex::new(Vec::new()),
             engine: Box::new(Robocopy),
@@ -253,6 +257,12 @@ impl Core {
         self.changed();
     }
 
+    /// Stops the scan beside a running full copy that finds how much there is to copy: the copy
+    /// carries on with counters only (and the estimate from the last backup, if it had one).
+    pub fn skip_totals_scan(&self) {
+        self.skip_scan.store(true, Ordering::SeqCst);
+    }
+
     /// Runs `f` only if no backup is running or queued, holding the queue so none can start meanwhile.
     pub fn when_idle<R>(&self, f: impl FnOnce() -> R) -> Option<R> {
         let q = self.queue.lock().unwrap();
@@ -280,13 +290,15 @@ impl Core {
     fn worker_loop(&self) {
         loop {
             let job = self.next_job();
-            let (task, logs_dir, global_filters, exact_progress) = {
+            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate) = {
                 let s = self.store.lock().unwrap();
                 (
                     s.task(&job.task_id).cloned(),
                     s.logs_dir(),
                     s.settings.global_filters.clone(),
                     s.settings.exact_progress,
+                    s.settings.background_totals,
+                    backup::typical_rate(&s.history, &job.task_id),
                 )
             };
             let Some(task) = task else { continue };
@@ -307,10 +319,16 @@ impl Core {
                 files_total: 0,
                 bytes_done: 0,
                 bytes_total: 0,
+                totals: "unknown".into(),
+                totals_scan: false,
+                copy_started_at: None,
+                expected_rate,
                 current_file: String::new(),
             };
             self.cancel.store(false, Ordering::SeqCst);
             self.discard.store(false, Ordering::SeqCst);
+            // The setting is the starting point; the user can still skip during the run.
+            self.skip_scan.store(!background_totals, Ordering::SeqCst);
             *self.current.lock().unwrap() = Some(progress.clone());
             self.changed();
 
@@ -325,6 +343,7 @@ impl Core {
                 now: started_at,
                 cancel: &self.cancel,
                 discard: &self.discard,
+                skip_scan: &self.skip_scan,
                 fresh: job.fresh || matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
             };
@@ -348,18 +367,37 @@ impl Core {
                                 progress.bytes_done,
                                 progress.bytes_total,
                             ) = (0, 0, 0, 0);
+                            progress.totals = "unknown".into();
+                            progress.totals_scan = false;
+                            progress.copy_started_at = None;
                             progress.current_file.clear();
                             pending_size = 0;
                             force = true;
                         }
                         EngineEvent::Phase(p) => {
                             progress.phase = p.into();
+                            if p == "copying" {
+                                progress.copy_started_at.get_or_insert_with(Local::now);
+                            }
                             force = true;
                         }
-                        EngineEvent::Totals { files, bytes } => {
+                        EngineEvent::TotalsPending => {
+                            progress.totals_scan = true;
+                            force = true;
+                        }
+                        EngineEvent::TotalsUnavailable => {
+                            progress.totals_scan = false;
+                            force = true;
+                        }
+                        EngineEvent::Totals { files, bytes, exact } => {
                             progress.files_total = files;
                             progress.bytes_total = bytes;
+                            progress.totals = if exact { "exact" } else { "estimate" }.into();
+                            if exact {
+                                progress.totals_scan = false;
+                            }
                             progress.phase = "copying".into();
+                            progress.copy_started_at.get_or_insert_with(Local::now);
                             force = true;
                         }
                         EngineEvent::File { path, size } => {

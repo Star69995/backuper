@@ -31,6 +31,8 @@ export const api = {
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
+  /** Gives up on the scan that works out how much a running full backup has to copy. */
+  skipTotalsScan: () => invoke<void>("skip_totals_scan"),
   history: () => invoke<RunRecord[]>("get_history"),
   clearHistory: () => invoke<void>("clear_history"),
   readLog: (runId: string, sourceIndex: number) => invoke<string>("read_log", { runId, sourceIndex }),

@@ -1,7 +1,8 @@
-import { Pause, Square } from "lucide-react";
+import { Pause, SkipForward, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { fmtBytes, fmtDuration, fmtNumber, MODE_LABEL } from "../lib/format";
+import { useEta } from "../lib/eta";
+import { fmtBytes, fmtDuration, fmtFinishAt, fmtNumber, fmtRemaining, MODE_LABEL } from "../lib/format";
 import type { Job, Progress, Task } from "../types";
 import { useStopTask } from "./stopTask";
 import { Button, PathText, ProgressBar, Spinner } from "./ui";
@@ -29,6 +30,9 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
       : p.filesTotal > 0
         ? Math.min(99, (p.filesDone / p.filesTotal) * 100)
         : null;
+  // Without exact totals (a scan still running, or an estimate from the last backup) the time is approximate.
+  const approx = p.totals === "estimate";
+  const eta = useEta(p);
   const queuedNames = queue.map((j) => tasks.find((t) => t.id === j.taskId)?.name).filter(Boolean);
 
   return (
@@ -84,7 +88,37 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
               <bdi dir="ltr">{fmtBytes(p.bytesTotal)}</bdi>
             </span>
           )}
-          {pct !== null && <span>{Math.floor(pct)}%</span>}
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {p.totalsScan && p.totals === "unknown" && <span>סורק את המקור בצד כדי לחשב כמה נשאר</span>}
+            <span>
+              {eta !== null && (
+                <>
+                  {approx ? "נותרו בערך " : "נותרו כ-"}
+                  {fmtRemaining(eta)} (<bdi dir="ltr">{fmtFinishAt(eta)}</bdi>)
+                </>
+              )}
+              {pct !== null && (
+                <>
+                  {eta !== null && " - "}
+                  <bdi dir="ltr">
+                    {approx && "~"}
+                    {Math.floor(pct)}%
+                  </bdi>
+                </>
+              )}
+            </span>
+            {p.totalsScan && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<SkipForward size={13} />}
+                title="ההעתקה ממשיכה כרגיל, בלי אחוזים וזמן סיום משוער"
+                onClick={() => api.skipTotalsScan()}
+              >
+                דלג על החישוב
+              </Button>
+            )}
+          </span>
         </div>
         {p.currentFile && (
           <div className="truncate text-xs text-muted">

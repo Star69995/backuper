@@ -11,12 +11,13 @@
 
 use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters, ListedFile, Outcome, TotalsSource};
 use crate::manifest;
-use crate::model::{BackupFolder, BackupMode, KeepMode, RunStatus, Source, SourceBackups, SourceRun, Task};
+use crate::model::{BackupFolder, BackupMode, KeepMode, RunRecord, RunStatus, Source, SourceBackups, SourceRun, Task};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex};
 
 const DATE_FMT: &str = "%Y-%m-%d %H-%M";
 const DATE_FMT_SECS: &str = "%Y-%m-%d %H-%M-%S";
@@ -373,21 +374,27 @@ fn chain_index(backups: &[BackupFolder]) -> HashMap<String, (u64, u64)> {
     chain.push(base);
     chain.reverse(); // oldest first, so newer copies override
     for b in chain {
-        for f in manifest::load_or_build(Path::new(&b.path)) {
-            index.insert(f.rel.to_lowercase(), (f.size, f.modified));
-        }
+        add_to_index(&mut index, manifest::load_or_build(Path::new(&b.path)));
     }
     index
 }
 
+fn add_to_index(index: &mut HashMap<String, (u64, u64)>, files: impl IntoIterator<Item = ListedFile>) {
+    for f in files {
+        index.insert(f.rel.to_lowercase(), (f.size, f.modified));
+    }
+}
+
+/// New or changed compared with what is already there (size, or modified time beyond the tolerance).
+fn differs(f: &ListedFile, index: &HashMap<String, (u64, u64)>) -> bool {
+    match index.get(&f.rel.to_lowercase()) {
+        None => true,
+        Some(&(size, modified)) => size != f.size || modified.abs_diff(f.modified) > MTIME_TOLERANCE,
+    }
+}
+
 fn changed_since(listed: Vec<ListedFile>, index: &HashMap<String, (u64, u64)>) -> Vec<ListedFile> {
-    listed
-        .into_iter()
-        .filter(|f| match index.get(&f.rel.to_lowercase()) {
-            None => true,
-            Some(&(size, modified)) => size != f.size || modified.abs_diff(f.modified) > MTIME_TOLERANCE,
-        })
-        .collect()
+    listed.into_iter().filter(|f| differs(f, index)).collect()
 }
 
 /// Resuming an incremental in its partial folder: files already there that match the source are
@@ -478,25 +485,127 @@ pub struct RunContext<'a> {
     pub discard: &'a AtomicBool,
     /// Don't continue a leftover `.partial` folder: start a new one.
     pub fresh: bool,
+    /// Set by the user: stop (and don't start) the scan that finds a full copy's totals.
+    pub skip_scan: &'a AtomicBool,
     /// `Settings.exact_progress`: always run the list-only pass before a full copy.
     pub exact_progress: bool,
 }
 
-/// Where a full copy's progress totals come from. The list-only pass walks the whole tree an extra
-/// time, so it only runs when asked for, or when nothing is known yet (the first backup): a fresh
-/// folder is then estimated from the previous full's index. A reused or resumed folder only copies
-/// the difference, which the last backup says nothing about, so it shows counters instead.
-fn totals_source(ctx: &RunContext, previous_full: Option<&BackupFolder>, fresh_folder: bool) -> TotalsSource {
+/// What a background scan compares the source with, to find how much a full copy will do.
+enum Late {
+    /// The target folder is new and empty: everything in the source gets copied.
+    All,
+    /// The target is the previous full, updated in place: what differs from that backup's index.
+    Index(HashMap<String, (u64, u64)>),
+    /// The target already holds files (a resumed copy, or a previous full without an index): what
+    /// differs from what is in it. It is read while robocopy writes there, so the files robocopy
+    /// has copied meanwhile (`Copied`) count as work too, whichever state the scan saw them in.
+    Folder(PathBuf),
+}
+
+/// Files (relative to the source, lowercase) robocopy has started copying in this run, recorded
+/// while a `Late::Folder` scan is still running.
+#[derive(Default)]
+struct Copied {
+    files: Mutex<HashSet<String>>,
+    /// The scan is done: nothing more to record.
+    done: AtomicBool,
+}
+
+impl Copied {
+    fn record(&self, source: &Path, event: &EngineEvent) {
+        if let EngineEvent::File { path, .. } = event {
+            if !self.done.load(Ordering::SeqCst) {
+                if let Some(rel) = rel_under(source, path) {
+                    self.files.lock().unwrap().insert(rel);
+                }
+            }
+        }
+    }
+}
+
+/// `path` relative to `root`, lowercase (the same key `chain_index` uses), if it is under it.
+fn rel_under(root: &Path, path: &str) -> Option<String> {
+    let norm = |s: &str| s.replace('/', "\\").to_lowercase();
+    let root = norm(&root.to_string_lossy());
+    let path = norm(path);
+    let rest = path.strip_prefix(root.trim_end_matches('\\'))?;
+    Some(rest.strip_prefix('\\')?.to_string())
+}
+
+/// How a full copy learns its progress totals. A list-only pass before the copy walks the whole
+/// tree an extra time, so it only runs when asked for (`exact_progress`). Otherwise the copy starts
+/// at once and a scan of the source runs beside it (`Late`), however long that takes, and reports
+/// the exact totals when done: into a new folder, everything in the source; into a folder that
+/// already holds files, what differs from them (from the previous full's index when there is one,
+/// else from reading the folder). A new folder is estimated from the previous full's index until
+/// the scan is done.
+fn full_totals(
+    ctx: &RunContext,
+    previous: Option<Vec<ListedFile>>,
+    fresh_folder: bool,
+    work: &Path,
+) -> (TotalsSource, Option<Late>) {
     if ctx.exact_progress {
-        return TotalsSource::Scan;
+        return (TotalsSource::Scan, None);
     }
-    if !fresh_folder {
-        return TotalsSource::Unknown;
+    if fresh_folder {
+        let source = match previous {
+            Some(files) => TotalsSource::Estimate(files.len() as u64, files.iter().map(|f| f.size).sum()),
+            None => TotalsSource::Unknown,
+        };
+        return (source, Some(Late::All));
     }
-    match previous_full.and_then(|b| manifest::read(Path::new(&b.path))) {
-        Some(files) => TotalsSource::Estimate(files.len() as u64, files.iter().map(|f| f.size).sum()),
-        None => TotalsSource::Scan,
-    }
+    let late = match previous {
+        Some(files) => {
+            let mut index = HashMap::new();
+            add_to_index(&mut index, files);
+            Late::Index(index)
+        }
+        None => Late::Folder(work.to_path_buf()),
+    };
+    (TotalsSource::Unknown, Some(late))
+}
+
+/// (files, bytes) a full copy will do, from a scan of the source. None = stopped or unreadable
+/// (the copy itself reports a source problem).
+fn scan_totals(source: &Path, filters: &Filters, late: Late, copied: &Copied, stop: &AtomicBool) -> Option<(u64, u64)> {
+    let list_source = || native::list_files(source, filters, stop).ok().flatten();
+    let files: Vec<ListedFile> = match late {
+        Late::All => list_source()?.files,
+        Late::Index(index) => changed_since(list_source()?.files, &index),
+        Late::Folder(folder) => {
+            // Usually two different drives: read both at once.
+            let (listing, present) = std::thread::scope(|scope| {
+                let present = scope.spawn(|| manifest::scan_until(&folder, stop));
+                let listing = list_source();
+                (listing, present.join().ok().flatten())
+            });
+            let mut index = HashMap::new();
+            add_to_index(&mut index, present?.0);
+            let listing = listing?;
+            let copied = copied.files.lock().unwrap();
+            listing
+                .files
+                .into_iter()
+                .filter(|f| differs(f, &index) || copied.contains(&f.rel.to_lowercase()))
+                .collect()
+        }
+    };
+    Some((files.len() as u64, files.iter().map(|f| f.size).sum()))
+}
+
+/// Bytes per second of this task's last real copy, to start the time estimate before the current
+/// run has a speed of its own. Runs that copied little say nothing about the speed.
+pub fn typical_rate(history: &[RunRecord], task_id: &str) -> Option<u64> {
+    const MIN_BYTES: u64 = 64 << 20;
+    history
+        .iter()
+        .filter(|r| r.task_id == task_id && matches!(r.status, RunStatus::Success | RunStatus::Warning))
+        .find_map(|r| {
+            let secs = (r.finished_at - r.started_at).num_seconds();
+            (r.bytes_copied >= MIN_BYTES && secs >= 10).then(|| r.bytes_copied / secs as u64)
+        })
 }
 
 /// Backs up one source of a task into its own chain of dated folders.
@@ -566,6 +675,12 @@ pub fn backup_source(
             // Not with an include rule: robocopy only purges names matching it, so files that
             // no longer match would stay in the "full" folder.
             let latest_full = backups.iter().find(|b| b.kind == BackupMode::Full && !b.partial);
+            // Read before the reuse below removes the index, and before delete-before removes the folder.
+            let previous_files = if resume.is_none() && !ctx.exact_progress {
+                latest_full.and_then(|b| manifest::read(Path::new(&b.path)))
+            } else {
+                None
+            };
             let reused = resume.is_none()
                 && task.reuse_previous
                 && task.keep_mode == KeepMode::Count
@@ -586,8 +701,7 @@ pub fn backup_source(
             // Not safe when `work` is the previous full, updated in place, or may be (a resumed
             // folder with no complete full next to it).
             discard_safe = !reused && (resume.is_none() || latest_full.is_some());
-            // Read before delete-before removes the previous full.
-            let totals = totals_source(ctx, latest_full, !reused && resume.is_none());
+            let (totals, late) = full_totals(ctx, previous_files, !reused && resume.is_none(), &work);
             if task.delete_before {
                 on_event(EngineEvent::Phase("deleting"));
                 let (deleted, freed) = prune(
@@ -628,16 +742,53 @@ pub fn backup_source(
                 filters,
                 log_file: log_file.clone(),
                 totals,
+                late_totals: None,
             };
-            // robocopy applies the attributes when copying starts: clear them right then, so the
-            // folder is visible during the run, and again below once it has finished.
-            let mut unhidden = false;
-            ctx.engine.mirror(&job, ctx.cancel, &mut |e| {
-                if !unhidden && matches!(e, EngineEvent::File { .. }) {
-                    unhide(&work);
-                    unhidden = true;
+            // The scan that finds the totals runs beside the copy and is dropped when the copy ends
+            // (a cancel ends the copy, which stops the scan too).
+            let stop = AtomicBool::new(false);
+            let finished = AtomicBool::new(false);
+            let copied = Copied::default();
+            let late = late.filter(|_| !ctx.skip_scan.load(Ordering::SeqCst));
+            let record = matches!(late, Some(Late::Folder(_)));
+            std::thread::scope(|scope| {
+                let mut job = job;
+                if let Some(late) = late {
+                    let (tx, rx) = mpsc::channel();
+                    job.late_totals = Some(rx);
+                    let (source_ref, filters, copied_ref, stop_ref) = (&source, job.filters.clone(), &copied, &stop);
+                    scope.spawn(move || {
+                        let _ = tx.send(scan_totals(source_ref, &filters, late, copied_ref, stop_ref));
+                        copied_ref.done.store(true, Ordering::SeqCst);
+                    });
+                    // The user's "skip" ends the scan, not the copy.
+                    let (skip, finished_ref, stop_ref) = (ctx.skip_scan, &finished, &stop);
+                    scope.spawn(move || {
+                        while !finished_ref.load(Ordering::SeqCst) {
+                            if skip.load(Ordering::SeqCst) {
+                                stop_ref.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    });
                 }
-                on_event(e)
+                // robocopy applies the attributes when copying starts: clear them right then, so the
+                // folder is visible during the run, and again below once it has finished.
+                let mut unhidden = false;
+                let result = ctx.engine.mirror(&job, ctx.cancel, &mut |e| {
+                    if !unhidden && matches!(e, EngineEvent::File { .. }) {
+                        unhide(&work);
+                        unhidden = true;
+                    }
+                    if record {
+                        copied.record(&source, &e);
+                    }
+                    on_event(e)
+                });
+                finished.store(true, Ordering::SeqCst);
+                stop.store(true, Ordering::SeqCst);
+                result
             })
         }
         BackupMode::Incremental => {
@@ -834,6 +985,7 @@ mod tests {
         cancel: AtomicBool,
         discard: AtomicBool,
         fresh: AtomicBool,
+        skip_scan: AtomicBool,
         filters: Filters,
     }
 
@@ -849,6 +1001,7 @@ mod tests {
                 cancel: AtomicBool::new(false),
                 discard: AtomicBool::new(false),
                 fresh: AtomicBool::new(false),
+                skip_scan: AtomicBool::new(false),
                 filters,
             }
         }
@@ -866,6 +1019,7 @@ mod tests {
                 cancel: &self.cancel,
                 discard: &self.discard,
                 fresh: self.fresh.load(Ordering::SeqCst),
+                skip_scan: &self.skip_scan,
                 exact_progress: false,
             };
             let logs = self.root.clone();
@@ -1125,7 +1279,7 @@ mod tests {
         // When copying starts, the previous backup must already be gone.
         let mut old_existed_at_copy = None;
         let r = env.run_with(&t, BackupMode::Full, "2026-10-02 03:00", &mut |_, e| {
-            if matches!(e, EngineEvent::Totals { .. }) {
+            if matches!(e, EngineEvent::TotalsPending) {
                 old_existed_at_copy = Some(old.exists());
             }
         });
@@ -1141,7 +1295,7 @@ mod tests {
         let prev = dst.join("Src 2026-10-02 03-00 מלא");
         let mut prev_existed_at_copy = None;
         env.run_with(&t, BackupMode::Full, "2026-10-03 03:00", &mut |_, e| {
-            if matches!(e, EngineEvent::Totals { .. }) {
+            if matches!(e, EngineEvent::TotalsPending) {
                 prev_existed_at_copy = Some(prev.exists());
             }
         });
@@ -1149,32 +1303,156 @@ mod tests {
         assert_eq!(env.names(&t, 0), ["Src 2026-10-03 03-00 מלא"]);
     }
 
-    /// Without the exact-progress setting the list-only pass only runs when nothing is known yet.
+    /// Without the exact-progress setting no list-only pass runs before the copy: the totals come
+    /// from a scan of the source beside it (an estimate from the previous index until then).
     #[test]
-    fn full_totals_come_from_the_previous_index() {
+    fn full_totals_come_from_a_scan_beside_the_copy() {
         let env = Env::new();
         let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("a.txt"), "a").unwrap();
         let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        // (pending seen, every Totals event as (files, bytes, exact))
         let totals = |env: &Env, t: &Task, at: &str| {
-            let mut seen = None;
-            env.run_with(t, BackupMode::Full, at, &mut |_, e| {
-                if let EngineEvent::Totals { files, .. } = e {
-                    seen = Some(files);
-                }
+            let (mut pending, mut seen) = (false, Vec::new());
+            env.run_with(t, BackupMode::Full, at, &mut |_, e| match e {
+                EngineEvent::TotalsPending => pending = true,
+                EngineEvent::Totals { files, bytes, exact } => seen.push((files, bytes, exact)),
+                _ => {}
             });
-            seen
+            (pending, seen)
         };
-        // First backup: nothing to estimate from, so it is scanned (1 file).
-        assert_eq!(totals(&env, &t, "2026-10-01 03:00"), Some(1));
-        // Second one: the previous index says 1 file; the new file isn't counted, so no scan ran.
-        fs::write(src.join("c.txt"), "c").unwrap();
-        assert_eq!(totals(&env, &t, "2026-10-02 03:00"), Some(1));
-        // A reused folder only copies the difference, which isn't known without a scan.
+        // First backup: nothing to estimate from; the scan of the source gives the exact totals.
+        assert_eq!(totals(&env, &t, "2026-10-01 03:00"), (true, vec![(1, 1, true)]));
+        // Second one: the previous index says 1 file (estimate), then the scan finds the new one.
+        fs::write(src.join("c.txt"), "cc").unwrap();
+        assert_eq!(totals(&env, &t, "2026-10-02 03:00"), (true, vec![(1, 1, false), (2, 3, true)]));
+        // A reused folder only copies the difference: the scan compares the source with the index.
         let reuse = Task { reuse_previous: true, ..t };
-        fs::write(src.join("d.txt"), "d").unwrap();
-        assert_eq!(totals(&env, &reuse, "2026-10-03 03:00"), None);
+        fs::write(src.join("d.txt"), "ddd").unwrap();
+        fs::write(src.join("a.txt"), "changed").unwrap();
+        assert_eq!(totals(&env, &reuse, "2026-10-03 03:00"), (true, vec![(2, 10, true)]));
+        // With no index to compare with (a folder made by an older version), the folder itself is read.
+        fs::write(src.join("e.txt"), "e").unwrap();
+        manifest::remove(&dst.join("Src 2026-10-03 03-00 מלא"));
+        assert_eq!(totals(&env, &reuse, "2026-10-04 03:00"), (true, vec![(1, 1, true)]));
+    }
+
+    /// The user can give up on the scan: the copy then carries on without totals.
+    #[test]
+    fn skipped_scan_leaves_the_copy_without_totals() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.skip_scan.store(true, Ordering::SeqCst);
+        let mut events = Vec::new();
+        let r = env.run_with(&t, BackupMode::Full, "2026-10-01 03:00", &mut |_, e| {
+            if matches!(e, EngineEvent::Totals { .. } | EngineEvent::TotalsPending) {
+                events.push(());
+            }
+        });
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(r[0].files_copied, 1);
+        assert!(events.is_empty(), "no scan was started");
+    }
+
+    /// A resumed full compares the source with what its partial folder already holds.
+    #[test]
+    fn resumed_full_totals_count_what_is_left() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        for (name, body) in [("a.txt", "a"), ("sub\\b.txt", "bb")] {
+            fs::write(src.join(name), body).unwrap();
+        }
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        // Make that backup look like a copy that was paused: still partial, no index.
+        let done = dst.join("Src 2026-10-01 03-00 מלא");
+        let partial = dst.join("Src 2026-10-01 03-00 מלא.partial");
+        fs::rename(&done, &partial).unwrap();
+        manifest::remove(&partial);
+        fs::write(src.join("c.txt"), "ccc").unwrap();
+        fs::write(src.join("sub").join("d.txt"), "dddd").unwrap();
+        let mut seen = Vec::new();
+        let r = env.run_with(&t, BackupMode::Full, "2026-10-02 03:00", &mut |_, e| {
+            if let EngineEvent::Totals { files, bytes, exact } = e {
+                seen.push((files, bytes, exact));
+            }
+        });
+        assert_eq!(r[0].files_copied, 2, "{r:?}");
+        assert_eq!(seen, vec![(2, 7, true)], "only the two new files are left to copy");
+    }
+
+    /// The folder is read while robocopy writes into it: a file it has already copied looks "done" to
+    /// the scan, but was still work of this run.
+    #[test]
+    fn folder_scan_counts_files_copied_meanwhile() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        for (name, body) in [("a.txt", "aa"), ("b.txt", "bbb"), ("c.txt", "c")] {
+            fs::write(src.join(name), body).unwrap();
+        }
+        // The folder already holds a copy of a and b (same size and time); c is missing.
+        for name in ["a.txt", "b.txt"] {
+            fs::copy(src.join(name), dst.join(name)).unwrap();
+        }
+        let scan = |copied: &Copied| {
+            scan_totals(&src, &Filters::default(), Late::Folder(dst.clone()), copied, &AtomicBool::new(false))
+        };
+        let copied = Copied::default();
+        assert_eq!(scan(&copied), Some((1, 1)), "only c is left");
+        // robocopy copied a during the scan: the file event is recorded, so a counts as work too.
+        copied.record(&src, &EngineEvent::File { path: src.join("a.txt").to_string_lossy().to_string(), size: 2 });
+        assert_eq!(scan(&copied), Some((2, 3)));
+        copied.done.store(true, Ordering::SeqCst);
+        copied.record(&src, &EngineEvent::File { path: src.join("b.txt").to_string_lossy().to_string(), size: 3 });
+        assert_eq!(scan(&copied), Some((2, 3)), "nothing is recorded once the scan is done");
+    }
+
+    #[test]
+    fn paths_are_made_relative_to_the_source() {
+        let root = Path::new("D:\\Mine\\Docs");
+        assert_eq!(rel_under(root, "d:\\mine\\docs\\Sub\\A.txt").as_deref(), Some("sub\\a.txt"));
+        assert_eq!(rel_under(Path::new("D:\\"), "D:\\x.txt").as_deref(), Some("x.txt"));
+        assert_eq!(rel_under(root, "D:\\Mine\\Docs2\\a.txt"), None, "a sibling folder with the same start");
+        assert_eq!(rel_under(root, "E:\\Mine\\Docs\\a.txt"), None);
+    }
+
+    #[test]
+    fn typical_rate_comes_from_the_last_real_copy() {
+        let run = |task: &str, status, bytes: u64, secs: i64| RunRecord {
+            id: String::new(),
+            task_id: task.into(),
+            task_name: String::new(),
+            trigger: crate::model::Trigger::Manual,
+            mode: BackupMode::Full,
+            started_at: Local::now() - chrono::Duration::seconds(secs),
+            finished_at: Local::now(),
+            status,
+            message: String::new(),
+            files_copied: 0,
+            bytes_copied: bytes,
+            backup_bytes: 0,
+            freed_bytes: 0,
+            files_deleted: 0,
+            files_failed: 0,
+            sources: vec![],
+        };
+        let mb = 1 << 20;
+        // Newest first: a tiny run, a failed run, another task's run, then the one that counts.
+        let history = [
+            run("1", RunStatus::Success, mb, 60),
+            run("1", RunStatus::Failed, 900 * mb, 60),
+            run("2", RunStatus::Success, 900 * mb, 60),
+            run("1", RunStatus::Success, 600 * mb, 60),
+        ];
+        assert_eq!(typical_rate(&history, "1"), Some(10 * mb as u64));
+        assert_eq!(typical_rate(&history, "3"), None);
     }
 
     #[test]
@@ -1519,6 +1797,7 @@ mod tests {
             cancel: AtomicBool::new(false),
             discard: AtomicBool::new(false),
             fresh: AtomicBool::new(false),
+            skip_scan: AtomicBool::new(false),
             filters: crate::filters::compile(&[crate::model::FilterRule::Include { value: "*.lrcat".into() }]),
         };
         with_rule.run(&t, BackupMode::Full, "2026-10-02 03:00");

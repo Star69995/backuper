@@ -7,6 +7,7 @@ pub mod robocopy;
 use crate::model::FileError;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Receiver;
 
 /// Make `target` identical to `source` (a full backup).
 pub struct CopyJob {
@@ -16,8 +17,12 @@ pub struct CopyJob {
     pub filters: Filters,
     /// Where the engine writes its detailed log (kept for the run log viewer).
     pub log_file: PathBuf,
-    /// How the progress totals are found.
+    /// How the progress totals are found before the copy starts.
     pub totals: TotalsSource,
+    /// Totals (files, bytes) that a background scan finds while the copy already runs: the engine
+    /// reports them as exact when they arrive. `None` in the message = the scan was given up on
+    /// (skipped by the user, or the source couldn't be read). No receiver = no scan is running.
+    pub late_totals: Option<Receiver<Option<(u64, u64)>>>,
 }
 
 /// Where a mirror's progress totals come from.
@@ -74,8 +79,12 @@ pub enum EngineEvent {
     SourceStarted,
     /// "scanning" | "deleting" (old backups, before a full) | "copying"
     Phase(&'static str),
-    /// How much work the copy will do.
-    Totals { files: u64, bytes: u64 },
+    /// How much work the copy will do. `exact` = counted (a scan), not estimated from an older backup.
+    Totals { files: u64, bytes: u64, exact: bool },
+    /// The copy runs without exact totals for now: a background scan will report them (`Totals`).
+    TotalsPending,
+    /// That scan was given up on: there won't be exact totals for this source.
+    TotalsUnavailable,
     /// A file copy started.
     File { path: String, size: u64 },
 }

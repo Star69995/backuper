@@ -443,6 +443,7 @@ pub fn copy_files(
     on_event(EngineEvent::Totals {
         files: files.len() as u64,
         bytes: files.iter().map(|f| f.size).sum(),
+        exact: true,
     });
 
     for f in files {
@@ -589,6 +590,7 @@ mod tests {
                 filters: f.clone(),
                 log_file: tree.0.join(format!("{i}.log")),
                 totals: crate::engine::TotalsSource::Scan,
+                late_totals: None,
             };
             Robocopy.mirror(&job, &cancel, &mut |_| {});
             let copied = names(list_files(&target, &Filters::default(), &cancel).unwrap().unwrap().files);

@@ -112,7 +112,7 @@ fn items(p: &str, asts: &[Ast]) -> Vec<(String, String)> {
                 j += 1;
             }
             let token = &p[asts[i].span().start.offset..asts[j - 1].span().end.offset];
-            let meaning = if j - i == 1 { format!("התו {}", quote(&s)) } else { format!("הטקסט {}", quote(&s)) };
+            let meaning = if j - i == 1 { describe(p, &asts[i]) } else { format!("הטקסט {}", quote(&s)) };
             out.push((token.to_string(), meaning));
             i = j;
         } else {
@@ -136,8 +136,10 @@ fn describe(p: &str, a: &Ast) -> String {
     match a {
         Ast::Empty(_) => "כלום".into(),
         Ast::Flags(f) => format!("שינוי הגדרות ({})", text(p, &f.span)),
+        // `\.` is the character itself, not what the bare symbol means in a pattern.
+        Ast::Literal(l) if text(p, &l.span).starts_with('\\') => format!("התו {} כפי שהוא", lit(l.c)),
         Ast::Literal(l) => format!("התו {}", lit(l.c)),
-        Ast::Dot(_) => "תו כלשהו (אחד)".into(),
+        Ast::Dot(_) => "התאמה לכל תו (אחד)".into(),
         Ast::Assertion(x) => assertion(x).into(),
         Ast::ClassUnicode(c) => format!("תו מקבוצת Unicode {LRI}{}{PDI}", text(p, &c.span)),
         Ast::ClassPerl(c) => perl(c).into(),
@@ -251,6 +253,10 @@ mod tests {
         assert!(c.error.is_none());
         assert_eq!(c.parts.iter().map(|x| x.token.as_str()).collect::<Vec<_>>(), ["^", r"\."]);
         assert_eq!(meanings(r"^\.")[0], "תחילת השם");
+        assert!(meanings(r"^\.")[1].ends_with("כפי שהוא"));
+        assert!(meanings(r"\.+")[0].contains("כפי שהוא"));
+        assert!(!meanings("a")[0].contains("כפי שהוא"));
+        assert_eq!(meanings(".")[0], "התאמה לכל תו (אחד)");
         assert_eq!(c.matched, Some(true));
         assert_eq!(c.matched_text.as_deref(), Some("."));
         assert_eq!(check(r"^\.", Some("a.txt")).matched, Some(false));

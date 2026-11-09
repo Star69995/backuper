@@ -28,13 +28,19 @@ fn is_index_file(path: &Path) -> bool {
 
 /// What a backup folder holds (its index file aside), and whether all of it could be read.
 pub fn scan(folder: &Path) -> (Vec<ListedFile>, bool) {
-    match native::list_files(folder, &Filters::default(), &AtomicBool::new(false)) {
+    scan_until(folder, &AtomicBool::new(false)).unwrap_or_default()
+}
+
+/// `scan`, abandoned (None) as soon as `cancel` is set.
+pub fn scan_until(folder: &Path, cancel: &AtomicBool) -> Option<(Vec<ListedFile>, bool)> {
+    Some(match native::list_files(folder, &Filters::default(), cancel) {
         Ok(Some(l)) => (
             l.files.into_iter().filter(|f| !f.rel.eq_ignore_ascii_case(FILE_NAME)).collect(),
             l.failed_dirs == 0,
         ),
-        _ => (Vec::new(), false),
-    }
+        Ok(None) => return None,
+        Err(_) => (Vec::new(), false),
+    })
 }
 
 /// Header: magic, file count and the folder's name (an index copied from elsewhere, e.g. a source

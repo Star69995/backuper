@@ -200,6 +200,11 @@ pub fn cancel_task(core: CoreState, id: String, discard: bool) {
 }
 
 #[tauri::command]
+pub fn skip_totals_scan(core: CoreState) {
+    core.skip_totals_scan();
+}
+
+#[tauri::command]
 pub fn get_history(core: CoreState) -> Vec<RunRecord> {
     core.store.lock().unwrap().history.clone()
 }

@@ -350,8 +350,11 @@ pub struct Settings {
     /// "auto" (download, install when idle and in the tray) | "notify" | "off".
     pub update_mode: String,
     /// Before a full copy, walk the whole tree once just to get exact progress totals. Off: the
-    /// last backup's index gives an estimate (or counters only), and the extra walk is skipped.
+    /// copy starts at once and a scan of the source beside it finds the totals (see `backup::full_totals`).
     pub exact_progress: bool,
+    /// While a full copy runs, scan the source beside it to find how much there is to copy (the
+    /// percentage and the finish time). Off: counters only, plus the estimate from the last backup.
+    pub background_totals: bool,
 }
 
 /// A message for the user that waits in the UI until dismissed (e.g. the task list was recovered).
@@ -379,6 +382,7 @@ impl Default for Settings {
             task_list_copy_dir: String::new(),
             update_mode: "auto".into(),
             exact_progress: false,
+            background_totals: true,
         }
     }
 }
@@ -420,6 +424,15 @@ pub struct Progress {
     pub files_total: u64,
     pub bytes_done: u64,
     pub bytes_total: u64,
+    /// Where the totals come from: "unknown" (counters only) | "estimate" (from the previous
+    /// backup) | "exact".
+    pub totals: String,
+    /// A scan beside the copy is still finding the exact totals (the user can skip it).
+    pub totals_scan: bool,
+    /// When copying began for the current source (not the scan before it): the time estimate's clock.
+    pub copy_started_at: Option<DateTime<Local>>,
+    /// Bytes per second of this task's last real copy, for an estimate before this run has a speed.
+    pub expected_rate: Option<u64>,
     pub current_file: String,
 }
 
@@ -445,6 +458,15 @@ pub struct SourceBackups {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_from_older_versions_get_the_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"theme": "dark"}"#).unwrap();
+        assert_eq!(s.theme, "dark");
+        assert!(s.background_totals, "the background scan is on unless switched off");
+        let s: Settings = serde_json::from_str(r#"{"backgroundTotals": false}"#).unwrap();
+        assert!(!s.background_totals);
+    }
 
     #[test]
     fn reads_legacy_string_errors() {

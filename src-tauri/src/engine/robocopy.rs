@@ -3,6 +3,7 @@
 
 use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -149,8 +150,15 @@ impl LogTail {
     }
 }
 
-/// Runs robocopy to completion. Ok(None) = cancelled.
-fn run_process(args: &[OsString], log: &Path, cancel: &AtomicBool, on_line: &mut dyn FnMut(&str)) -> Result<Option<i32>, String> {
+/// Runs robocopy to completion. Ok(None) = cancelled. `on_tick` runs every poll (~150 ms), also
+/// while robocopy writes nothing (e.g. in the middle of one huge file).
+fn run_process(
+    args: &[OsString],
+    log: &Path,
+    cancel: &AtomicBool,
+    on_line: &mut dyn FnMut(&str),
+    on_tick: &mut dyn FnMut(),
+) -> Result<Option<i32>, String> {
     let _ = std::fs::remove_file(log);
     let mut child = Command::new("robocopy")
         .args(args)
@@ -163,6 +171,7 @@ fn run_process(args: &[OsString], log: &Path, cancel: &AtomicBool, on_line: &mut
     let mut tail = LogTail::new(log);
     loop {
         tail.poll(on_line);
+        on_tick();
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
@@ -172,6 +181,7 @@ fn run_process(args: &[OsString], log: &Path, cancel: &AtomicBool, on_line: &mut
         match child.try_wait() {
             Ok(Some(status)) => {
                 tail.finish(on_line);
+                on_tick();
                 return Ok(status.code());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(150)),
@@ -277,15 +287,20 @@ impl CopyEngine for Robocopy {
             stats: CopyStats::default(),
         };
 
+        let on_event = RefCell::new(on_event);
         // Pass 1 (only when asked for): list-only scan, so progress can show an exact percentage.
         // It walks source and target once more, which takes minutes on a big drive.
         match job.totals {
             TotalsSource::Scan => {
                 let scan_log = job.log_file.with_extension("scan.log");
                 let mut scan = Summary::default();
-                match run_process(&build_args(&mirror_args(job, true), &scan_log), &scan_log, cancel, &mut |l| {
-                    scan.feed(l)
-                }) {
+                match run_process(
+                    &build_args(&mirror_args(job, true), &scan_log),
+                    &scan_log,
+                    cancel,
+                    &mut |l| scan.feed(l),
+                    &mut || {},
+                ) {
                     Ok(None) => {
                         let _ = std::fs::remove_file(&scan_log);
                         return CopyResult {
@@ -299,14 +314,25 @@ impl CopyEngine for Robocopy {
                 }
                 let _ = std::fs::remove_file(&scan_log);
                 if let (Some(f), Some(b)) = (scan.files(), scan.bytes()) {
-                    on_event(EngineEvent::Totals {
+                    (on_event.borrow_mut())(EngineEvent::Totals {
                         files: f[1],
                         bytes: b[1],
+                        exact: true,
                     });
                 }
             }
-            TotalsSource::Estimate(files, bytes) => on_event(EngineEvent::Totals { files, bytes }),
-            TotalsSource::Unknown => on_event(EngineEvent::Phase("copying")),
+            TotalsSource::Estimate(files, bytes) => {
+                if job.late_totals.is_some() {
+                    (on_event.borrow_mut())(EngineEvent::TotalsPending);
+                }
+                (on_event.borrow_mut())(EngineEvent::Totals { files, bytes, exact: false });
+            }
+            TotalsSource::Unknown => {
+                if job.late_totals.is_some() {
+                    (on_event.borrow_mut())(EngineEvent::TotalsPending);
+                }
+                (on_event.borrow_mut())(EngineEvent::Phase("copying"));
+            }
         }
 
         // Pass 2: the real copy.
@@ -331,8 +357,19 @@ impl CopyEngine for Robocopy {
                     }
                 }
                 match classify(l) {
-                    Line::Copy { size, path } => on_event(EngineEvent::File { path, size }),
+                    Line::Copy { size, path } => (on_event.borrow_mut())(EngineEvent::File { path, size }),
                     Line::Extra | Line::Other => {}
+                }
+            },
+            // A background scan's result is passed on as soon as it arrives.
+            &mut || {
+                if let Some(rx) = &job.late_totals {
+                    while let Ok(late) = rx.try_recv() {
+                        (on_event.borrow_mut())(match late {
+                            Some((files, bytes)) => EngineEvent::Totals { files, bytes, exact: true },
+                            None => EngineEvent::TotalsUnavailable,
+                        });
+                    }
                 }
             },
         );

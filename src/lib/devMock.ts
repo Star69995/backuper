@@ -18,6 +18,7 @@ import type {
 } from "../types";
 import { newTask } from "../types";
 
+const mockCopyStart = Date.now() - 60_000;
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
 const src = (path: string, folderName: string) => ({ path, folderName });
 
@@ -125,6 +126,7 @@ export function installDevMock() {
     globalFilters: [{ kind: "pattern", value: "~$*" }],
     updateMode: "auto",
     exactProgress: false,
+    backgroundTotals: true,
   };
   // Open with a newer version available (?update in the URL).
   const update: UpdateStatus = new URLSearchParams(location.search).has("update")
@@ -273,8 +275,13 @@ export function installDevMock() {
       sourcePath: "C:\\Users\\User\\Pictures",
       filesDone: 184,
       filesTotal: 421,
-      bytesDone: 940_000_000,
+      // About 15 MB/s since the copy began a minute ago, so the time estimate stays steady on screen.
+      bytesDone: Math.min(2_179_000_000, Math.round(15_600_000 * ((Date.now() - mockCopyStart) / 1000))),
       bytesTotal: 2_180_000_000,
+      totals: "exact",
+      totalsScan: false,
+      copyStartedAt: new Date(mockCopyStart).toISOString(),
+      expectedRate: 14_000_000,
       currentFile: "C:\\Users\\User\\Pictures\\2025\\טיול צפון\\IMG_4821.jpg",
     },
   });
@@ -333,7 +340,16 @@ export function installDevMock() {
           error: null,
           parts: (pattern.match(/\\.|\[[^\]]*\][*+?]?|\([^)]*\)[*+?]?|.[*+?]?/g) ?? []).map((token) => ({
             token,
-            meaning: token === "^" ? "תחילת השם" : token === "$" ? "סוף השם" : `התאמה ל-${token}`,
+            meaning:
+              token === "^"
+                ? "תחילת השם"
+                : token === "$"
+                  ? "סוף השם"
+                  : token === "."
+                    ? "התאמה לכל תו (אחד)"
+                    : /^\\[^a-z0-9]$/i.test(token)
+                      ? `התו "${token[1]}" כפי שהוא`
+                      : `התאמה ל-${token}`,
           })),
           note: /^\^|\$$/.test(pattern) ? null : "בלי ^ בהתחלה ו-$ בסוף, מספיק שהביטוי יתאים לחלק כלשהו מהשם.",
           matched: sample ? !!m : null,
