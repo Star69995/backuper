@@ -139,7 +139,10 @@ pub struct AdoptSource {
     pub folder_name: String,
     /// Oldest first.
     pub folders: Vec<AdoptFolder>,
+    /// Something is wrong or can't be taken over.
     pub warnings: Vec<String>,
+    /// Plain information, nothing to act on (old incrementals Cobian left without their full).
+    pub notes: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -303,17 +306,17 @@ fn to_local(at: NaiveDateTime) -> DateTime<Local> {
 /// Archive files Cobian writes when it compresses (can't be continued from).
 const ARCHIVES: [&str; 5] = ["zip", "7z", "sqx", "exe", "enc"];
 
-/// One line for all the incrementals with no full before them (one per folder flooded the dialog:
-/// Cobian's "full copies to keep" deletes old fulls but leaves their incrementals).
-fn orphans_warning(orphans: &[(String, NaiveDateTime)]) -> Option<String> {
-    let tail = "הגיבוי המלא שעליו הם נשענים כבר לא קיים (כנראה Cobian מחק אותו), ולכן הם לא מומרים ונשארים בתיקיית היעד כמו שהם";
+/// One note for all the incrementals with no full before them. That's normal: Cobian's "full copies
+/// to keep" deletes old fulls but leaves their incrementals. Not a warning - nothing is wrong.
+fn orphans_note(orphans: &[(String, NaiveDateTime)]) -> Option<String> {
     match orphans {
         [] => None,
-        [(name, _)] => Some(format!(
-            "לגיבוי \"{name}\" אין גיבוי מלא לפניו - הגיבוי המלא שעליו הוא נשען כבר לא קיים (כנראה Cobian מחק אותו), ולכן הוא לא מומר ונשאר בתיקיית היעד כמו שהוא"
+        [(_, at)] => Some(format!(
+            "גיבוי אינקרמנטלי ישן אחד ({}) שייך לגיבוי מלא ש-Cobian כבר מחק - הוא נשאר ביעד כמו שהוא",
+            at.format("%d/%m/%Y")
         )),
         [(_, first), .., (_, last)] => Some(format!(
-            "{} גיבויים אינקרמנטליים ישנים של Cobian (מ-{} עד {}) - {tail}",
+            "{} גיבויים אינקרמנטליים ישנים (מ-{} עד {}) שייכים לגיבוי מלא ש-Cobian כבר מחק - הם נשארים ביעד כמו שהם",
             orphans.len(),
             first.format("%d/%m/%Y"),
             last.format("%d/%m/%Y"),
@@ -350,6 +353,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
             folder_name: folder_name.clone(),
             folders: Vec::new(),
             warnings: Vec::new(),
+            notes: Vec::new(),
         };
         let short = cobian_short_name(&src.path);
         if short.is_empty() {
@@ -449,9 +453,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
                 created_at: to_local(at),
             });
         }
-        if let Some(w) = orphans_warning(&orphans) {
-            out.warnings.insert(0, w);
-        }
+        out.notes.extend(orphans_note(&orphans));
         sources.push(out);
     }
     AdoptPlan {
@@ -593,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_incrementals_get_one_warning() {
+    fn orphan_incrementals_get_one_note() {
         let root = Tmp(std::env::temp_dir().join(format!("backuper-cobian-{}", uuid::Uuid::new_v4())));
         let dest = root.0.join("dst");
         // Cobian kept one full: the older fulls are gone, their incrementals are still there.
@@ -609,8 +611,9 @@ mod tests {
         let t = task(&dest, &["E:\\Pics"], BackupMode::Incremental);
         let p = plan(&t, &[]);
         assert_eq!(p.folder_count(), 2);
-        assert_eq!(p.sources[0].warnings.len(), 1, "{:?}", p.sources[0].warnings);
-        let w = &p.sources[0].warnings[0];
+        assert!(p.sources[0].warnings.is_empty(), "{:?}", p.sources[0].warnings);
+        assert_eq!(p.sources[0].notes.len(), 1, "{:?}", p.sources[0].notes);
+        let w = &p.sources[0].notes[0];
         assert!(w.starts_with("3 ") && w.contains("03/10/2026") && w.contains("05/11/2026"), "{w}");
     }
 

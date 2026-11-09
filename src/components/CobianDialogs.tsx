@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, ChevronDown, FileText, FolderOpen, History, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ChevronDown, FileText, FolderOpen, History, Info, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtDateTime, MODE_LABEL } from "../lib/format";
@@ -125,6 +125,7 @@ export function TakeoverSummary({ plan, defaultOpen = false }: { plan: AdoptPlan
   const [open, setOpen] = useState(defaultOpen);
   const count = planFolderCount(plan);
   const warnings = plan.sources.flatMap((s) => s.warnings);
+  const notes = plan.sources.flatMap((s) => s.notes ?? []);
   const multi = plan.sources.length > 1;
   return (
     <div className="flex flex-col gap-1.5 text-[13px]">
@@ -169,6 +170,12 @@ export function TakeoverSummary({ plan, defaultOpen = false }: { plan: AdoptPlan
             ))}
         </div>
       )}
+      {notes.map((n, i) => (
+        <div key={i} className="flex gap-1.5 text-muted">
+          <Info size={14} className="mt-0.5 shrink-0" />
+          <span>{n}</span>
+        </div>
+      ))}
       {warnings.map((w) => (
         <div key={w} className="flex gap-1.5 text-warn">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />

@@ -443,6 +443,7 @@ function cobianPlan(t: Task): AdoptPlan {
       source: s.path,
       folderName: s.folderName,
       warnings: [],
+      notes: t.mode === "incremental" && (t.enabled || t.cobianPending) ? [`4 גיבויים אינקרמנטליים ישנים (מ-${day(9).cobian.split("-").reverse().join("/")} עד ${day(4).cobian.split("-").reverse().join("/")}) שייכים לגיבוי מלא ש-Cobian כבר מחק - הם נשארים ביעד כמו שהם`] : [],
       folders:
         t.enabled || t.cobianPending
           ? [3, 2, 1].map((n, i) => ({
