@@ -22,7 +22,8 @@ export const api = {
   saveTasks: (tasks: Task[]) => invoke<Task[]>("save_tasks", { tasks }),
   deleteTasks: (ids: string[]) => invoke<void>("delete_tasks", { ids }),
   reorderTasks: (ids: string[]) => invoke<void>("reorder_tasks", { ids }),
-  runTasks: (ids: string[], mode: BackupMode | null = null) => invoke<number>("run_tasks", { ids, mode }),
+  /** `fresh`: start a new backup folder even if a paused one could be continued. */
+  runTasks: (ids: string[], mode: BackupMode | null = null, fresh = false) => invoke<number>("run_tasks", { ids, mode, fresh }),
   /** Continues a task whose last run was stopped (false = already queued or running). */
   resumeTask: (id: string) => invoke<boolean>("resume_task", { id }),
   /** Answers the drive-connected question: `run` get queued, all of `ids` stop waiting. */

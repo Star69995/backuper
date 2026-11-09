@@ -131,6 +131,9 @@ pub struct Job {
     /// None = the task's own mode.
     pub mode: Option<BackupMode>,
     pub trigger: Trigger,
+    /// Don't continue a paused or failed backup folder, start a new one (the user chose to).
+    /// Scheduled runs never continue one either: they start the new cycle.
+    pub fresh: bool,
 }
 
 pub struct Core {
@@ -233,6 +236,7 @@ impl Core {
                 task_id: id.clone(),
                 mode: None,
                 trigger: Trigger::DriveConnected,
+                fresh: false,
             });
         }
         self.changed();
@@ -276,9 +280,14 @@ impl Core {
     fn worker_loop(&self) {
         loop {
             let job = self.next_job();
-            let (task, logs_dir, global_filters) = {
+            let (task, logs_dir, global_filters, exact_progress) = {
                 let s = self.store.lock().unwrap();
-                (s.task(&job.task_id).cloned(), s.logs_dir(), s.settings.global_filters.clone())
+                (
+                    s.task(&job.task_id).cloned(),
+                    s.logs_dir(),
+                    s.settings.global_filters.clone(),
+                    s.settings.exact_progress,
+                )
             };
             let Some(task) = task else { continue };
             let run_id = uuid::Uuid::new_v4().to_string();
@@ -316,6 +325,8 @@ impl Core {
                 now: started_at,
                 cancel: &self.cancel,
                 discard: &self.discard,
+                fresh: job.fresh || matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
+                exact_progress,
             };
             let mut pending_size = 0u64;
             let mut last_emit = Instant::now();
@@ -455,6 +466,7 @@ impl Core {
                             task_id: t.id.clone(),
                             mode: None,
                             trigger: Trigger::DriveConnected,
+                            fresh: false,
                         });
                         if queued && notify {
                             toast(&self.app, format!("הכונן חובר - מתחיל גיבוי: {}", t.name), drives, &sound);
@@ -507,12 +519,14 @@ impl Core {
                                 task_id: t.id.clone(),
                                 mode: Some(BackupMode::Full),
                                 trigger,
+                                fresh: false,
                             });
                         } else if let Slot::Run(trigger) = main {
                             due.push(Job {
                                 task_id: t.id.clone(),
                                 mode: None,
                                 trigger,
+                                fresh: false,
                             });
                         }
                     }

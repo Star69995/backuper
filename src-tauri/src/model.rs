@@ -349,6 +349,9 @@ pub struct Settings {
     pub task_list_copy_dir: String,
     /// "auto" (download, install when idle and in the tray) | "notify" | "off".
     pub update_mode: String,
+    /// Before a full copy, walk the whole tree once just to get exact progress totals. Off: the
+    /// last backup's index gives an estimate (or counters only), and the extra walk is skipped.
+    pub exact_progress: bool,
 }
 
 /// A message for the user that waits in the UI until dismissed (e.g. the task list was recovered).
@@ -375,6 +378,7 @@ impl Default for Settings {
             global_filters: Vec::new(),
             task_list_copy_dir: String::new(),
             update_mode: "auto".into(),
+            exact_progress: false,
         }
     }
 }

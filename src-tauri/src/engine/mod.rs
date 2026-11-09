@@ -16,6 +16,19 @@ pub struct CopyJob {
     pub filters: Filters,
     /// Where the engine writes its detailed log (kept for the run log viewer).
     pub log_file: PathBuf,
+    /// How the progress totals are found.
+    pub totals: TotalsSource,
+}
+
+/// Where a mirror's progress totals come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TotalsSource {
+    /// A list-only pass first: exact, but the whole tree is walked twice (slow on big drives).
+    Scan,
+    /// Known from the last backup's index (files, bytes): no extra pass, approximate percentages.
+    Estimate(u64, u64),
+    /// Nothing known and no extra pass: the copy shows counters only.
+    Unknown,
 }
 
 /// Folders that are never worth backing up (relevant when the source is a drive root).

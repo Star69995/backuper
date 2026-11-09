@@ -152,15 +152,16 @@ pub fn reorder_tasks(core: CoreState, ids: Vec<String>) {
     core.changed();
 }
 
-/// Queues tasks to run now. Returns how many were actually queued (others were already queued/running).
+/// Queues tasks to run now. A paused backup is continued, unless `fresh`. Returns how many were actually queued (others were already queued/running).
 #[tauri::command]
-pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>) -> usize {
+pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>, fresh: bool) -> usize {
     ids.into_iter()
         .filter(|id| {
             core.enqueue(Job {
                 task_id: id.clone(),
                 mode,
                 trigger: Trigger::Manual,
+                fresh,
             })
         })
         .count()
@@ -183,6 +184,7 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
         task_id: id,
         mode,
         trigger: Trigger::Manual,
+        fresh: false,
     })
 }
 

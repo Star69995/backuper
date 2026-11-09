@@ -19,12 +19,15 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
   const phaseText = { scanning: "סורק את הקבצים...", deleting: "מוחק גיבויים קודמים לפני ההעתקה...", copying: "מעתיק קבצים" }[
     p.phase
   ];
+  // No totals while copying = the pre-scan was skipped and nothing could estimate the work: counters only.
+  const unknownTotal = !scanning && p.filesTotal === 0 && p.bytesTotal === 0;
+  // Totals may be an estimate from the previous backup, so never show a finished bar mid-copy.
   const pct = scanning
     ? null
     : p.bytesTotal > 0
-      ? (p.bytesDone / p.bytesTotal) * 100
+      ? Math.min(99, (p.bytesDone / p.bytesTotal) * 100)
       : p.filesTotal > 0
-        ? (p.filesDone / p.filesTotal) * 100
+        ? Math.min(99, (p.filesDone / p.filesTotal) * 100)
         : null;
   const queuedNames = queue.map((j) => tasks.find((t) => t.id === j.taskId)?.name).filter(Boolean);
 
@@ -71,6 +74,10 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
         <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted">
           {scanning ? (
             <span>{p.phase === "deleting" ? "מפנה מקום ביעד" : "מחשב את כמות השינויים"}</span>
+          ) : unknownTotal ? (
+            <span>
+              הועתקו {fmtNumber(p.filesDone)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi>
+            </span>
           ) : (
             <span>
               {fmtNumber(p.filesDone)} מתוך {fmtNumber(p.filesTotal)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi> מתוך{" "}

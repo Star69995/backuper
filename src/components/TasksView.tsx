@@ -112,6 +112,17 @@ const MIN_NAME_COL = 220;
 /** How narrow columns may get when the window is too small for their wanted widths. */
 const MIN_NAME_FLOOR = 140;
 const MIN_COL_FLOOR = 56;
+/** Columns with badges / a toggle + label never wrap their content, so they may not get narrower than it ("ריצה אחרונה": "ממתין בתור"). */
+const COL_FLOORS: Record<ColumnKey, number> = {
+  name: MIN_NAME_FLOOR,
+  enabled: 100,
+  kind: 80,
+  schedule: MIN_COL_FLOOR,
+  next: MIN_COL_FLOOR,
+  last: 112,
+};
+/** Columns dropped, in this order, when the window is too narrow for all of them (the kind shows as an icon next to the task name). */
+const NARROW_DROP: ColumnKey[] = ["kind", "schedule"];
 const CHECK_COL = 40;
 /** Compact view: "מצב" and "סוג" show only a toggle / an icon, so they get a fixed narrow width. */
 const COMPACT_COLS: Partial<Record<ColumnKey, number>> = { enabled: 64, kind: 64 };
@@ -173,7 +184,7 @@ function useActiveGroup() {
 }
 
 export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: () => void }) {
-  const { toast, confirm } = useFeedback();
+  const { toast, confirm, choose } = useFeedback();
   const stopTask = useStopTask();
   const [activeGroup, setActiveGroup] = useActiveGroup();
   // Groups just created here that have no tasks yet (a group exists through its tasks).
@@ -213,10 +224,21 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     return () => ro.disconnect();
   }, [tableWrap]);
   const room = availWidth - CHECK_COL - MIN_ACTIONS_COL;
+  // When even the floors don't fit, the least important columns drop out (the task name and status stay readable).
+  const floors: Record<ColumnKey, number> = compact ? { ...COL_FLOORS, ...COMPACT_COLS } : COL_FLOORS;
+  let shownCols = RESIZABLE;
+  if (availWidth > 0) {
+    for (const k of NARROW_DROP) {
+      if (shownCols.reduce((s, j) => s + floors[j], 0) > room) shownCols = shownCols.filter((j) => j !== k);
+    }
+  }
+  const showCol = (k: ColumnKey) => shownCols.includes(k);
   const nameHeader = useRef<HTMLTableCellElement>(null);
   const fitted = fitColumns(
-    Object.fromEntries(RESIZABLE.map((k) => [k, k === "name" && nameAuto ? MIN_NAME_COL : colWidth(k)])) as Record<ColumnKey, number>,
-    Object.fromEntries(RESIZABLE.map((k) => [k, k === "name" ? MIN_NAME_FLOOR : MIN_COL_FLOOR])) as Record<ColumnKey, number>,
+    Object.fromEntries(
+      shownCols.map((k) => [k, k === "name" && nameAuto ? MIN_NAME_COL : Math.max(floors[k], colWidth(k))]),
+    ) as Record<ColumnKey, number>,
+    floors,
     room,
   );
   /** The width a column really has on screen (the auto name column fills what's left). */
@@ -225,14 +247,15 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   // Once a border is dragged, every column gets a fixed width (what's shown now), so only the dragged border moves.
   const freezeColumns = () => {
     const now: Partial<Record<ColumnKey, number>> = {};
-    for (const k of RESIZABLE) if (!(compact && COMPACT_COLS[k])) now[k] = Math.floor(shownWidth(k));
+    for (const k of shownCols) if (!(compact && COMPACT_COLS[k])) now[k] = Math.floor(shownWidth(k));
     cols.setMany(now);
   };
   /** Dragging may not make the columns wider than the table. */
   const resizeColumn = (k: ColumnKey, w: number) => {
+    w = Math.max(w, floors[k]);
     if (availWidth <= 0) return cols.setWidth(k, w);
-    const others = RESIZABLE.filter((j) => j !== k).reduce((s, j) => s + shownWidth(j), 0);
-    cols.setWidth(k, Math.min(w, room - others));
+    const others = shownCols.filter((j) => j !== k).reduce((s, j) => s + shownWidth(j), 0);
+    cols.setWidth(k, Math.max(floors[k], Math.min(w, room - others)));
   };
   const transfer = useTaskListTransfer(snap.tasks, refresh);
 
@@ -276,8 +299,8 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       return n;
     });
 
-  const runNow = async (ids: string[], mode: BackupMode | null = null) => {
-    const n = await api.runTasks(ids, mode);
+  const runNow = async (ids: string[], mode: BackupMode | null = null, fresh = false) => {
+    const n = await api.runTasks(ids, mode, fresh);
     if (n === 0) toast({ tone: "info", title: "המשימה כבר רצה או ממתינה בתור" });
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
   };
@@ -293,7 +316,29 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const run = async (ids: string[], mode: BackupMode | null = null) => {
     const waiting = snap.tasks.filter((t) => ids.includes(t.id) && t.cobianPending).map((t) => t.id);
     const rest = ids.filter((id) => !waiting.includes(id));
-    if (rest.length > 0) await runNow(rest, mode);
+    // A paused backup: continue it, or start a new one (a scheduled run always starts a new one).
+    const fresh: string[] = [];
+    const go: string[] = [];
+    for (const id of rest) {
+      const task = snap.tasks.find((t) => t.id === id);
+      if (!task || !snap.states[id]?.resumable) {
+        go.push(id);
+        continue;
+      }
+      const answer = await choose({
+        title: `ל"${task.name}" יש גיבוי מושהה`,
+        message:
+          "אפשר להמשיך אותו מאותה נקודה, או להתחיל גיבוי חדש מההתחלה. הגיבוי החלקי הישן יימחק בהמשך, אחרי שגיבוי חדש יסתיים.",
+        options: [
+          { value: "continue", label: "המשך מאותה נקודה" },
+          { value: "fresh", label: "התחל מחדש" },
+        ],
+      });
+      if (answer === "continue") go.push(id);
+      else if (answer === "fresh") fresh.push(id);
+    }
+    if (go.length > 0) await runNow(go, mode);
+    if (fresh.length > 0) await runNow(fresh, mode, true);
     if (waiting.length > 0) setManualRun({ ids: waiting, mode });
   };
   const askCobian = snap.tasks.filter((t) => t.cobianPending && (t.enabled || manualRun?.ids.includes(t.id)));
@@ -682,7 +727,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             <table className="w-full table-fixed text-sm">
               <colgroup>
                 <col style={{ width: CHECK_COL }} />
-                {RESIZABLE.map((k) => (
+                {shownCols.map((k) => (
                   <col key={k} style={{ width: k === "name" && nameAuto ? undefined : fitted[k] }} />
                 ))}
                 <col style={{ width: nameAuto ? MIN_ACTIONS_COL : undefined }} />
@@ -703,7 +748,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                       }
                     />
                   </th>
-                  {RESIZABLE.map((k) => (
+                  {shownCols.map((k) => (
                     <th
                       key={k}
                       ref={k === "name" ? nameHeader : undefined}
@@ -728,7 +773,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                   <Fragment key={g.folder ?? gi}>
                     {g.folder !== null && (
                       <tr className="border-b border-line bg-panel2/70">
-                        <td colSpan={8} className="px-3 py-1.5">
+                        <td colSpan={shownCols.length + 2} className="px-3 py-1.5">
                           <div className="flex items-center gap-2 text-xs font-medium text-muted">
                             <Folder size={14} className="shrink-0 text-accent" />
                             <span className="text-fg">{sort.key === "source" ? "מקור:" : "יעד:"}</span>
@@ -771,9 +816,15 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                 e.stopPropagation();
                                 setEditing(t);
                               }}
-                              className="flex max-w-full items-center gap-2 text-start font-medium text-fg hover:text-accent"
+                              className="flex max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 text-start font-medium text-fg hover:text-accent"
                             >
-                              <span className="truncate">{t.name}</span>
+                              <span className="max-w-full truncate">{t.name}</span>
+                              {!showCol("kind") && (
+                                <span className="shrink-0 text-muted" title={KIND_LABEL[taskKind(t)]}>
+                                  {KIND_ICON[taskKind(t)]}
+                                  <span className="sr-only">{KIND_LABEL[taskKind(t)]}</span>
+                                </span>
+                              )}
                               {group === null && groupOf(t) && <Badge>{groupOf(t)}</Badge>}
                             </button>
                             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted">
@@ -825,37 +876,50 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               )}
                             </div>
                           </td>
-                          <td className="px-2 py-3">
-                            <span title={compact ? KIND_LABEL[taskKind(t)] : undefined}>
-                              <Badge tone={taskKind(t) === "incremental" ? "neutral" : "accent"}>
-                                {compact ? (
-                                  <>
-                                    {KIND_ICON[taskKind(t)]}
-                                    <span className="sr-only">{KIND_LABEL[taskKind(t)]}</span>
-                                  </>
-                                ) : (
-                                  KIND_LABEL[taskKind(t)]
-                                )}
-                              </Badge>
-                            </span>
-                          </td>
-                          <td className="px-2 py-3 text-[13px]">
-                            {t.fullSchedule && t.mode === "incremental" ? (
-                              <div className="flex flex-col gap-0.5">
-                                <span>
-                                  <span className="text-muted">אינקרמנטלי: </span>
-                                  {describeSchedule(t.schedule)}
-                                </span>
-                                <span>
-                                  <span className="text-muted">מלא: </span>
-                                  {describeSchedule(t.fullSchedule)}
-                                </span>
-                              </div>
-                            ) : (
-                              describeSchedule(t.schedule)
-                            )}
-                          </td>
-                          <td className="px-2 py-3 text-[13px]">
+                          {showCol("kind") && (
+                            <td className="px-2 py-3">
+                              <span title={compact ? KIND_LABEL[taskKind(t)] : undefined}>
+                                <Badge tone={taskKind(t) === "incremental" ? "neutral" : "accent"}>
+                                  {compact ? (
+                                    <>
+                                      {KIND_ICON[taskKind(t)]}
+                                      <span className="sr-only">{KIND_LABEL[taskKind(t)]}</span>
+                                    </>
+                                  ) : (
+                                    KIND_LABEL[taskKind(t)]
+                                  )}
+                                </Badge>
+                              </span>
+                            </td>
+                          )}
+                          {showCol("schedule") && (
+                            <td className="px-2 py-3 text-[13px]">
+                              {t.fullSchedule && t.mode === "incremental" ? (
+                                <div className="flex flex-col gap-0.5">
+                                  <span>
+                                    <span className="text-muted">אינקרמנטלי: </span>
+                                    {describeSchedule(t.schedule)}
+                                  </span>
+                                  <span>
+                                    <span className="text-muted">מלא: </span>
+                                    {describeSchedule(t.fullSchedule)}
+                                  </span>
+                                </div>
+                              ) : (
+                                describeSchedule(t.schedule)
+                              )}
+                            </td>
+                          )}
+                          <td
+                            className="px-2 py-3 text-[13px]"
+                            title={
+                              showCol("schedule")
+                                ? undefined
+                                : t.fullSchedule && t.mode === "incremental"
+                                  ? `אינקרמנטלי: ${describeSchedule(t.schedule)}\nמלא: ${describeSchedule(t.fullSchedule)}`
+                                  : describeSchedule(t.schedule)
+                            }
+                          >
                             {!next ? (
                               <span className="text-muted">-</span>
                             ) : (

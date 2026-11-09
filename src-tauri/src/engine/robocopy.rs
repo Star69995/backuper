@@ -1,7 +1,7 @@
 //! robocopy-backed engine. Progress is read by tailing robocopy's UTF-16 log (/UNILOG),
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
-use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, ALWAYS_EXCLUDED_DIRS};
+use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
 use std::ffi::OsString;
 use std::fs::File;
@@ -277,29 +277,36 @@ impl CopyEngine for Robocopy {
             stats: CopyStats::default(),
         };
 
-        // Pass 1: list-only scan, so progress can show a real percentage.
-        let scan_log = job.log_file.with_extension("scan.log");
-        let mut scan = Summary::default();
-        match run_process(&build_args(&mirror_args(job, true), &scan_log), &scan_log, cancel, &mut |l| {
-            scan.feed(l)
-        }) {
-            Ok(None) => {
+        // Pass 1 (only when asked for): list-only scan, so progress can show an exact percentage.
+        // It walks source and target once more, which takes minutes on a big drive.
+        match job.totals {
+            TotalsSource::Scan => {
+                let scan_log = job.log_file.with_extension("scan.log");
+                let mut scan = Summary::default();
+                match run_process(&build_args(&mirror_args(job, true), &scan_log), &scan_log, cancel, &mut |l| {
+                    scan.feed(l)
+                }) {
+                    Ok(None) => {
+                        let _ = std::fs::remove_file(&scan_log);
+                        return CopyResult {
+                            outcome: Outcome::Cancelled,
+                            message: "בוטל".into(),
+                            stats: CopyStats::default(),
+                        };
+                    }
+                    Err(e) => return fail(e),
+                    Ok(Some(_)) => {}
+                }
                 let _ = std::fs::remove_file(&scan_log);
-                return CopyResult {
-                    outcome: Outcome::Cancelled,
-                    message: "בוטל".into(),
-                    stats: CopyStats::default(),
-                };
+                if let (Some(f), Some(b)) = (scan.files(), scan.bytes()) {
+                    on_event(EngineEvent::Totals {
+                        files: f[1],
+                        bytes: b[1],
+                    });
+                }
             }
-            Err(e) => return fail(e),
-            Ok(Some(_)) => {}
-        }
-        let _ = std::fs::remove_file(&scan_log);
-        if let (Some(f), Some(b)) = (scan.files(), scan.bytes()) {
-            on_event(EngineEvent::Totals {
-                files: f[1],
-                bytes: b[1],
-            });
+            TotalsSource::Estimate(files, bytes) => on_event(EngineEvent::Totals { files, bytes }),
+            TotalsSource::Unknown => on_event(EngineEvent::Phase("copying")),
         }
 
         // Pass 2: the real copy.

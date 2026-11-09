@@ -588,6 +588,7 @@ mod tests {
                 copy_empty_dirs: false,
                 filters: f.clone(),
                 log_file: tree.0.join(format!("{i}.log")),
+                totals: crate::engine::TotalsSource::Scan,
             };
             Robocopy.mirror(&job, &cancel, &mut |_| {});
             let copied = names(list_files(&target, &Filters::default(), &cancel).unwrap().unwrap().files);

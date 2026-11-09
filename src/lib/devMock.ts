@@ -124,6 +124,7 @@ export function installDevMock() {
     taskListCopyDir: "",
     globalFilters: [{ kind: "pattern", value: "~$*" }],
     updateMode: "auto",
+    exactProgress: false,
   };
   // Open with a newer version available (?update in the URL).
   const update: UpdateStatus = new URLSearchParams(location.search).has("update")

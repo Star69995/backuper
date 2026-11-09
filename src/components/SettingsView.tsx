@@ -1,4 +1,4 @@
-import { Bell, Download, Filter, FolderSearch, History, Import, Monitor, Moon, Power, RefreshCw, RotateCcw, Sun, Volume2 } from "lucide-react";
+import { Bell, Download, Filter, FolderSearch, Gauge, History, Import, Monitor, Moon, Power, RefreshCw, RotateCcw, Sun, Volume2 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtRelative, fmtSmart } from "../lib/format";
@@ -81,6 +81,15 @@ export default function SettingsView({ snap, refresh }: { snap: Snapshot; refres
           onChange={(schedulerPaused) => update({ schedulerPaused })}
           label="השהיית כל התזמונים"
           description="משימות לא ירוצו אוטומטית עד לחידוש. אפשר עדיין להריץ ידנית."
+        />
+      </Card>
+
+      <Card title="ביצועים" icon={<Gauge size={18} />}>
+        <Toggle
+          checked={s.exactProgress}
+          onChange={(exactProgress) => update({ exactProgress })}
+          label="התקדמות מדויקת בגיבוי מלא"
+          description="לפני ההעתקה עוברים על כל הקבצים פעם נוספת רק כדי לדעת מראש כמה יש להעתיק, וזה יכול לקחת דקות על כונן גדול. כבוי: ההעתקה מתחילה מיד והאחוזים הם הערכה לפי הגיבוי הקודם (בגיבוי הראשון הסריקה נעשית בכל מקרה)."
         />
       </Card>
 

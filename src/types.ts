@@ -118,6 +118,8 @@ export interface Settings {
   globalFilters: FilterRule[];
   /** auto = download and install by itself (from the tray, between backups); notify = only say so. */
   updateMode: "auto" | "notify" | "off";
+  /** Walk the whole tree once before a full copy, just for an exact percentage (slow on big drives). */
+  exactProgress: boolean;
 }
 
 /** Where the app's self-update stands. */
