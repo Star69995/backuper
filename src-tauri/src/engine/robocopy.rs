@@ -1,10 +1,7 @@
 //! robocopy-backed engine. Progress is read by tailing robocopy's UTF-16 log (/UNILOG),
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
-use super::{
-    is_drive_root, CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS,
-    DRIVE_ROOT_SYSTEM_FILES,
-};
+use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -83,20 +80,10 @@ fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
         (false, false) => None,
     };
     a.extend(attrs.map(OsString::from));
-    let mut files: Vec<OsString> = f
-        .exclude_files
-        .iter()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| OsString::from(s.trim()))
-        .collect();
-    // Full paths, so only the files at the drive's root are skipped.
-    if is_drive_root(x.source) {
-        let root = arg_path(x.source).to_string_lossy().into_owned();
-        files.extend(DRIVE_ROOT_SYSTEM_FILES.iter().map(|n| OsString::from(format!("{root}{n}"))));
-    }
+    let files: Vec<&String> = f.exclude_files.iter().filter(|s| !s.trim().is_empty()).collect();
     if !files.is_empty() {
         a.push("/XF".into());
-        a.extend(files);
+        a.extend(files.iter().map(|s| OsString::from(s.trim())));
     }
     a.push("/XD".into());
     a.extend(ALWAYS_EXCLUDED_DIRS.iter().map(OsString::from));
@@ -482,27 +469,6 @@ mod tests {
         }
         assert_eq!(s.files().unwrap()[1], 4);
         assert_eq!(s.bytes().unwrap()[1], 2000);
-    }
-
-    #[test]
-    fn skips_locked_system_files_at_a_drive_root_only() {
-        let args = |src: &str| {
-            let a = Args {
-                source: Path::new(src),
-                target: Path::new("E:\\b"),
-                copy_empty_dirs: false,
-                filters: &Filters::default(),
-                list_only: false,
-            };
-            build_args(&a, Path::new("x.log"))
-        };
-        let a = args("C:\\");
-        assert!(a.contains(&OsString::from("/XF")));
-        assert!(a.contains(&OsString::from("C:\\pagefile.sys")));
-        assert!(a.contains(&OsString::from("C:\\hiberfil.sys")));
-        assert!(!args("C:\\Users").contains(&OsString::from("/XF")));
-        assert!(super::super::is_drive_root(Path::new("D:")));
-        assert!(!super::super::is_drive_root(Path::new("D:\\x")));
     }
 
     #[test]

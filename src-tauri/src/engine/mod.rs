@@ -39,18 +39,6 @@ pub enum TotalsSource {
 /// Folders that are never worth backing up (relevant when the source is a drive root).
 pub const ALWAYS_EXCLUDED_DIRS: [&str; 2] = ["$RECYCLE.BIN", "System Volume Information"];
 
-/// Files Windows keeps open at the root of a drive (paging, swap, hibernation, crash dump): they can
-/// never be copied, and robocopy waits and retries each one before giving up. Skipped only directly
-/// under a source that is a whole drive.
-pub const DRIVE_ROOT_SYSTEM_FILES: [&str; 4] = ["pagefile.sys", "hiberfil.sys", "swapfile.sys", "DumpStack.log.tmp"];
-
-/// "C:\" or "C:" (a whole drive), not a folder on it.
-pub fn is_drive_root(p: &std::path::Path) -> bool {
-    let s = p.to_string_lossy();
-    let s = s.trim().trim_end_matches(['\\', '/']);
-    s.len() == 2 && s.ends_with(':') && s.as_bytes()[0].is_ascii_alphabetic()
-}
-
 /// Filters in engine terms (compiled from the user's filter rules).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Filters {

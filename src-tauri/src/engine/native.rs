@@ -2,10 +2,7 @@
 //! filters robocopy does) and `copy_files` copies an explicit list of files (the changes).
 //! std::fs::copy uses CopyFileExW on Windows, so attributes and the modified time are preserved.
 
-use super::{
-    is_drive_root, CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome, ALWAYS_EXCLUDED_DIRS,
-    DRIVE_ROOT_SYSTEM_FILES,
-};
+use super::{CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome, ALWAYS_EXCLUDED_DIRS};
 use crate::model::FileError;
 use regex::{Regex, RegexBuilder};
 use std::collections::{BTreeSet, HashSet};
@@ -197,8 +194,6 @@ struct Rules {
     /// /XA: files (not folders) with any of these attributes are skipped.
     skip_attributes: u32,
     short_names: bool,
-    /// The source is a whole drive: skip `DRIVE_ROOT_SYSTEM_FILES` at its root.
-    drive_root: bool,
 }
 
 /// Case-insensitive like the rest of Windows. Err = the message to show the user.
@@ -236,7 +231,6 @@ impl Rules {
             min_modified: f.max_age_days.map(|d| now.saturating_sub(d as u64 * 86_400 * TICKS_PER_SEC)),
             skip_attributes: if f.exclude_hidden { ATTR_HIDDEN } else { 0 } | if f.exclude_system { ATTR_SYSTEM } else { 0 },
             short_names: !(f.include_files.is_empty() && f.exclude_files.is_empty() && f.exclude_dirs.is_empty()),
-            drive_root: is_drive_root(source),
         }
     }
 
@@ -263,10 +257,6 @@ impl Rules {
         }
         let name = String::from_utf16_lossy(&e.name);
         self.include_regex.iter().all(|r| r.is_match(&name)) && !self.exclude_regex.iter().any(|r| r.is_match(&name))
-    }
-
-    fn root_system_file(&self, name: &str) -> bool {
-        self.drive_root && DRIVE_ROOT_SYSTEM_FILES.iter().any(|n| n.eq_ignore_ascii_case(name))
     }
 
     fn keep_file(&self, e: &Entry) -> bool {
@@ -400,9 +390,6 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
                 continue;
             }
             let name = String::from_utf16_lossy(&e.name);
-            if rel.is_empty() && e.attributes & ATTR_DIRECTORY == 0 && rules.root_system_file(&name) {
-                continue;
-            }
             let child = if rel.is_empty() { name } else { format!("{rel}\\{name}") };
             if e.attributes & ATTR_DIRECTORY != 0 {
                 if rules.skip_dir(&e, &child) {

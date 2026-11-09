@@ -462,10 +462,7 @@ const BODY: Record<HelpId, ReactNode> = {
       </List>
       <P>
         יש גם כללים מוכנים בלחיצה אחת, כמו <Ui>קבצים זמניים</Ui>, <Ui>קבצי Windows מיותרים</Ui> ו<Ui>תיקיות פיתוח</Ui>. סל המיחזור
-        ותיקיית <bdi dir="ltr">System Volume Information</bdi> אף פעם לא מגובים. בגיבוי של כונן שלם גם הקבצים ש-Windows מחזיקה
-        פתוחים תמיד בשורש הכונן (<bdi dir="ltr">pagefile.sys</bdi>, <bdi dir="ltr">hiberfil.sys</bdi>,{" "}
-        <bdi dir="ltr">swapfile.sys</bdi> ו-<bdi dir="ltr">DumpStack.log.tmp</bdi>) לא מגובים, כי אי אפשר להעתיק אותם ואין בהם מה
-        לשחזר.
+        ותיקיית <bdi dir="ltr">System Volume Information</bdi> אף פעם לא מגובים.
       </P>
     </>
   ),
