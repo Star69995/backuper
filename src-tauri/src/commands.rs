@@ -364,12 +364,37 @@ pub struct ImportPreview {
     /// "backuper" (export / snapshot / tasks.json) | "simple" (copy_sources JSON) | "cobian"
     source: &'static str,
     tasks: Vec<ImportedTask>,
+    /// Plain config only: how it can be split (non-empty groups, distinct folders).
+    simple: Option<SimpleShape>,
+    /// Tasks of an earlier import of a plain config in another split, replaced by this one
+    /// (deleted when importing, so their folders don't count as conflicts).
+    replaces: Vec<ReplacedTask>,
 }
 
-/// Reads a task list file (this app's export or snapshot, or a Cobian .lst) without saving anything.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimpleShape {
+    groups: usize,
+    sources: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplacedTask {
+    id: String,
+    name: String,
+}
+
+/// Reads a task list file (this app's export or snapshot, a plain JSON config, or a Cobian .lst)
+/// without saving anything. `split` = how a plain config becomes tasks (ignored for the others).
 #[tauri::command]
-pub fn import_tasks(core: CoreState, path: String) -> Result<ImportPreview, String> {
+pub fn import_tasks(
+    core: CoreState,
+    path: String,
+    split: Option<crate::simpleconfig::Split>,
+) -> Result<ImportPreview, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("לא ניתן לקרוא את הקובץ: {e}"))?;
+    let mut simple = None;
     let (source, imported) = match crate::tasklist::parse(&bytes)? {
         Some(tasks) => (
             "backuper",
@@ -381,12 +406,32 @@ pub fn import_tasks(core: CoreState, path: String) -> Result<ImportPreview, Stri
                 })
                 .collect(),
         ),
-        None => match crate::simpleconfig::parse(&bytes)? {
-            Some(i) => ("simple", vec![i]),
+        None => match crate::simpleconfig::parse(&bytes, split.unwrap_or_default())? {
+            Some(p) => {
+                simple = Some(SimpleShape {
+                    groups: p.groups,
+                    sources: p.sources,
+                });
+                ("simple", p.tasks)
+            }
             None => ("cobian", crate::cobian::parse_file(&bytes)?),
         },
     };
-    let existing = core.store.lock().unwrap().tasks.clone();
+    let mut existing = core.store.lock().unwrap().tasks.clone();
+    // Importing a plain config split differently than last time replaces the earlier tasks.
+    let mut replaces = Vec::new();
+    if simple.is_some() {
+        existing.retain(|t| {
+            let old = crate::simpleconfig::is_simple_id(&t.id) && !imported.iter().any(|i| i.task.id == t.id);
+            if old {
+                replaces.push(ReplacedTask {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                });
+            }
+            !old
+        });
+    }
     let tasks = imported
         .into_iter()
         .map(|i| {
@@ -414,7 +459,12 @@ pub fn import_tasks(core: CoreState, path: String) -> Result<ImportPreview, Stri
             }
         })
         .collect();
-    Ok(ImportPreview { source, tasks })
+    Ok(ImportPreview {
+        source,
+        tasks,
+        simple,
+        replaces,
+    })
 }
 
 /// Saves the given tasks (all of them when `ids` is None) to a file. Returns how many.

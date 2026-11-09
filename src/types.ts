@@ -252,9 +252,16 @@ export interface ImportedTask {
   unchanged: boolean;
 }
 
+/** How a plain JSON config becomes tasks: all folders in one, one per `src_N` group, one per folder. */
+export type ImportSplit = "one" | "group" | "source";
+
 export interface ImportPreview {
   source: "backuper" | "simple" | "cobian";
   tasks: ImportedTask[];
+  /** Plain config only: non-empty groups and distinct folders in the file. */
+  simple: { groups: number; sources: number } | null;
+  /** Tasks of an earlier import of a plain config, split differently - deleted when importing. */
+  replaces: { id: string; name: string }[];
 }
 
 /** A Cobian Backup / Reflector task list found on this computer. */

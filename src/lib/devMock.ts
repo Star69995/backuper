@@ -5,6 +5,7 @@ import type {
   AdoptPlan,
   ImportedTask,
   ImportPreview,
+  ImportSplit,
   Notice,
   RunRecord,
   Schedule,
@@ -363,7 +364,9 @@ export function installDevMock() {
       case "plugin:dialog|save":
         return `C:\\Users\\User\\Desktop\\${(a.options as { defaultPath: string }).defaultPath}`;
       case "import_tasks":
-        return String(a.path).endsWith(".lst") ? { source: "cobian", tasks: cobianImport() } : snapshotImport(tasks);
+        if (String(a.path).endsWith(".lst")) return { source: "cobian", tasks: cobianImport(), simple: null, replaces: [] };
+        if (String(a.path).endsWith("config.json")) return simpleImport((a.split as ImportSplit | undefined) ?? "one");
+        return snapshotImport(tasks);
       case "export_tasks":
         return a.ids ? (a.ids as string[]).length : tasks.length;
       case "dismiss_notice":
@@ -537,5 +540,39 @@ function snapshotImport(current: Task[]): ImportPreview {
     exists: false,
     unchanged: false,
   });
-  return { source: "backuper", tasks: items };
+  return { source: "backuper", tasks: items, simple: null, replaces: [] };
+}
+
+/** A plain config (`mom_config.json`): two groups, four folders, one destination. */
+function simpleImport(split: ImportSplit): ImportPreview {
+  const groups = [
+    ["C:\\Users\\User\\Documents", "C:\\Users\\User\\Desktop"],
+    ["D:\\תמונות", "D:\\Music"],
+  ];
+  const name = (p: string) => p.replace(/^.*\\/, "");
+  const parts =
+    split === "one"
+      ? [{ id: "simple-config", name: "גיבוי מהקובץ", paths: groups.flat() }]
+      : split === "group"
+        ? groups.map((g, i) => ({ id: `simple-config-src_${i}`, name: `גיבוי מהקובץ - ${g.map(name).join(", ")}`, paths: g }))
+        : groups.flat().map((p) => ({ id: `simple-config-${name(p)}`, name: name(p), paths: [p] }));
+  return {
+    source: "simple",
+    simple: { groups: groups.length, sources: groups.flat().length },
+    replaces: split === "one" ? [] : [{ id: "simple-config", name: "גיבוי מהקובץ" }],
+    tasks: parts.map((p, i) => ({
+      task: {
+        ...newTask(),
+        id: p.id,
+        name: p.name,
+        sources: p.paths.map((path) => src(path, name(path))),
+        destination: "H:\\",
+        schedule: { kind: "manual" },
+      },
+      warnings: i === 0 ? ["הקובץ לא כולל תזמון - המשימות ייובאו כהפעלה ידנית"] : [],
+      error: null,
+      exists: false,
+      unchanged: false,
+    })),
+  };
 }
