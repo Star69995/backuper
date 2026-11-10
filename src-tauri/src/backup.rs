@@ -1510,6 +1510,57 @@ mod tests {
         assert!(manifest::read(&full).is_some(), "rebuilt");
     }
 
+    /// A plain config imported in another split keeps the folder names (and so the chains in the
+    /// destination): the new tasks continue with an incremental, not a new full. Two folders with
+    /// the same last name get " (2)" in every split, and no split has a (destination, folderName) twice.
+    #[test]
+    fn plain_config_chains_survive_a_different_split() {
+        use crate::simpleconfig::{parse, Split};
+        let env = Env::new();
+        let (a, b, dst) = (env.root.join("A").join("Docs"), env.root.join("B").join("Docs"), env.root.join("dst"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("a.txt"), "a").unwrap();
+        fs::write(b.join("b.txt"), "b").unwrap();
+        let json = serde_json::json!({
+            "copy_sources": {"src_0": [a.to_str().unwrap()], "src_1": [b.to_str().unwrap()]},
+            "copy_destinations": [dst.to_str().unwrap()],
+        })
+        .to_string();
+        let tasks = |split| parse(json.as_bytes(), split).unwrap().unwrap().tasks.into_iter().map(|i| i.task).collect::<Vec<_>>();
+
+        for split in [Split::One, Split::Group, Split::Source] {
+            let mut keys: Vec<_> = tasks(split)
+                .iter()
+                .flat_map(|t| t.sources.iter().map(|s| (t.destination.to_lowercase(), s.folder_name.to_lowercase())))
+                .collect();
+            keys.sort();
+            assert_eq!(keys.len(), 2);
+            keys.dedup();
+            assert_eq!(keys.len(), 2, "{split:?}: folder names collide");
+        }
+
+        // Full backup as one task, then each folder as its own task.
+        let one = &tasks(Split::One)[0];
+        env.run(one, BackupMode::Full, "2026-10-01 03:00");
+        assert_eq!(env.names(one, 0), ["Docs 2026-10-01 03-00 מלא"]);
+        assert_eq!(env.names(one, 1), ["Docs (2) 2026-10-01 03-00 מלא"]);
+        fs::write(a.join("a2.txt"), "a2").unwrap();
+        fs::write(b.join("b2.txt"), "b2").unwrap();
+        for t in tasks(Split::Source) {
+            let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+            assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+            assert_eq!(r[0].files_copied, 1, "{}: only the new file, no new full: {r:?}", t.name);
+            assert!(r[0].message.is_empty() || !r[0].message.contains("מלא"), "{}", r[0].message);
+        }
+        let split = tasks(Split::Source);
+        assert_eq!(env.names(&split[0], 0), ["Docs 2026-10-01 03-00 מלא", "Docs 2026-10-02 03-00 אינקרמנטלי"]);
+        assert_eq!(
+            env.names(&split[1], 0),
+            ["Docs (2) 2026-10-01 03-00 מלא", "Docs (2) 2026-10-02 03-00 אינקרמנטלי"]
+        );
+    }
+
     /// Cobian's folders, taken over: the next incremental copies only what changed after Cobian's last backup.
     #[test]
     fn continues_from_cobian_backups() {
