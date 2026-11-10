@@ -95,6 +95,13 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
                     <PathText path={src.source} />
                   </span>
                 </h3>
+                {!!task.sources.find((s) => s.folderName === src.folderName)?.previousNames?.length && (
+                  <p className="text-xs text-muted">
+                    שם תיקיות הגיבוי שונה. גיבויים בשם הקודם (
+                    <bdi>{task.sources.find((s) => s.folderName === src.folderName)?.previousNames?.join(", ")}</bdi>) יקבלו את השם
+                    החדש כשכונן היעד יהיה מחובר, ועד אז לא מוצגים כאן.
+                  </p>
+                )}
                 {src.backups.length === 0 ? (
                   <p className="rounded-lg border border-dashed border-line px-3 py-2 text-[13px] text-muted">
                     אין עדיין גיבויים לתיקייה זו

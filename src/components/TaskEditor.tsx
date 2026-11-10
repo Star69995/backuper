@@ -10,6 +10,7 @@ import {
   FolderOpen,
   FolderPlus,
   HardDrive,
+  Info,
   Layers,
   RefreshCw,
   Settings2,
@@ -220,7 +221,7 @@ function SourcesEditor({
       {sources.map((src, i) => (
         <div
           key={i}
-          className="flex flex-col gap-2 rounded-lg border border-line bg-panel2 p-2 sm:flex-row sm:items-center sm:border-0 sm:bg-transparent sm:p-0"
+          className="flex flex-col gap-2 rounded-lg border border-line bg-panel2 p-2 sm:flex-row sm:flex-wrap sm:items-center sm:border-0 sm:bg-transparent sm:p-0"
         >
           <div className="min-w-0 flex-1">
             <PathPicker
@@ -242,6 +243,16 @@ function SourcesEditor({
               <Trash2 size={16} />
             </IconButton>
           </div>
+          {!!src.previousNames?.length && (
+            <p className="text-xs text-muted sm:basis-full">
+              גיבויים קיימים בשם הקודם ({src.previousNames.map((n, k) => (
+                <span key={n}>
+                  {k > 0 && ", "}
+                  <bdi>{n}</bdi>
+                </span>
+              ))}) יקבלו את השם החדש כשכונן היעד יחובר.
+            </p>
+          )}
         </div>
       ))}
       <div className="flex flex-wrap items-center gap-3">
@@ -312,14 +323,16 @@ export default function TaskEditor({
   const kind = taskKind(t);
   const keepsOne = t.keepMode === "count" && t.keepCount === 1;
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
-  // Existing backups are found by destination + folder name; changing either orphans them.
-  const locationChanged =
+  // Existing backups are found by destination + folder name. A new destination leaves them behind;
+  // a new folder name renames them (now, or when the destination drive is connected).
+  const destinationChanged = !isNew && t.destination.trim() !== task.destination;
+  const namesChanged =
     !isNew &&
-    (t.destination !== task.destination ||
-      task.sources.some((old) => {
-        const cur = t.sources.find((s) => s.path === old.path);
-        return cur && sanitizeFolderName(cur.folderName) !== old.folderName;
-      }));
+    !destinationChanged &&
+    task.sources.some((old) => {
+      const cur = t.sources.find((s) => s.path === old.path);
+      return cur && sanitizeFolderName(cur.folderName || defaultFolderName(cur.path)) !== old.folderName;
+    });
 
   const sourceCount = t.sources.filter((s) => s.path.trim()).length;
   const sections: SectionInfo<SectionId>[] = [
@@ -451,11 +464,17 @@ export default function TaskEditor({
                 placeholder="D:\Backups"
               />
             </Field>
-            {locationChanged && (
+            {destinationChanged && (
               <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
                 <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                שיניתם את היעד או שם של תיקיות גיבוי. גיבויים שכבר קיימים במיקום הקודם לא ינוהלו יותר על ידי המשימה (ולא
-                יימחקו אוטומטית).
+                שיניתם את היעד. גיבויים שכבר קיימים ביעד הקודם לא ינוהלו יותר על ידי המשימה (ולא יימחקו אוטומטית).
+              </div>
+            )}
+            {namesChanged && (
+              <div className="flex items-start gap-2 rounded-lg bg-accent-soft px-3 py-2 text-[13px] text-accent">
+                <Info size={16} className="mt-0.5 shrink-0" />
+                שיניתם שם של תיקיות גיבוי. גם הגיבויים שכבר קיימים יקבלו את השם החדש - מיד בשמירה אם כונן היעד מחובר, ואחרת
+                כשהוא יתחבר (או לפני הגיבוי הבא). הרצף שלהם נשמר, והגיבוי הבא ימשיך מהם.
               </div>
             )}
           </Section>

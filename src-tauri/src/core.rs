@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 
+/// `backup::rename_previous` for each source of the task (same order).
+fn rename_task_backups(task: &Task) -> Vec<backup::Renamed> {
+    task.sources.iter().map(|s| backup::rename_previous(&task.destination, s)).collect()
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum Slot {
     /// Not due yet.
@@ -180,6 +185,9 @@ impl Core {
         // Its own thread: checking a disconnected network drive letter can block for a while.
         let me = self.clone();
         std::thread::spawn(move || me.drive_loop());
+        // Sources renamed while their drive wasn't connected, if it is now.
+        let me = self.clone();
+        std::thread::spawn(move || me.rename_backups_when_idle(None));
     }
 
     /// Tells the UI to refetch its snapshot.
@@ -263,6 +271,54 @@ impl Core {
         self.skip_scan.store(true, Ordering::SeqCst);
     }
 
+    /// Renames the backup folders of sources whose folder name changed (`Source::previous_names`)
+    /// in the tasks `only` (None = all), if no backup is running or waiting; otherwise the worker
+    /// does it before the task's next run. Called on save, at startup and when a drive connects.
+    pub fn rename_backups_when_idle(&self, only: Option<&[String]>) {
+        let tasks: Vec<Task> = self
+            .store
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .filter(|t| only.is_none_or(|ids| ids.contains(&t.id)))
+            .filter(|t| t.sources.iter().any(|s| !s.previous_names.is_empty()))
+            .cloned()
+            .collect();
+        if tasks.is_empty() {
+            return;
+        }
+        // Folders only: the store is locked after the queue is released (get_snapshot locks them the other way round).
+        if let Some(done) = self.when_idle(|| tasks.iter().map(rename_task_backups).collect::<Vec<_>>()) {
+            for (task, results) in tasks.iter().zip(done) {
+                self.apply_renamed(task, &results);
+            }
+        }
+    }
+
+    /// Drops the previous names that have no folders left, keeping any added since `task` was read.
+    fn apply_renamed(&self, task: &Task, results: &[backup::Renamed]) {
+        let mut changed = false;
+        {
+            let mut s = self.store.lock().unwrap();
+            let Some(cur) = s.tasks.iter_mut().find(|t| t.id == task.id) else { return };
+            for (src, r) in task.sources.iter().zip(results) {
+                let Some(c) = cur.sources.iter_mut().find(|c| c.path == src.path && c.folder_name == src.folder_name) else {
+                    continue;
+                };
+                let before = c.previous_names.len();
+                c.previous_names.retain(|n| !src.previous_names.contains(n) || r.left.contains(n));
+                changed |= c.previous_names.len() != before;
+            }
+            if changed {
+                s.save_tasks();
+            }
+        }
+        if changed || results.iter().any(|r| r.count > 0) {
+            self.changed();
+        }
+    }
+
     /// Runs `f` only if no backup is running or queued, holding the queue so none can start meanwhile.
     pub fn when_idle<R>(&self, f: impl FnOnce() -> R) -> Option<R> {
         let q = self.queue.lock().unwrap();
@@ -302,6 +358,10 @@ impl Core {
                 )
             };
             let Some(task) = task else { continue };
+            // A source renamed while its drive wasn't connected: its backups get the new name first,
+            // so the run continues their chain.
+            let renamed = rename_task_backups(&task);
+            self.apply_renamed(&task, &renamed);
             let run_id = uuid::Uuid::new_v4().to_string();
             let requested = job.mode.unwrap_or(task.mode);
             let started_at = Local::now();
@@ -415,6 +475,16 @@ impl Core {
                 },
             );
 
+            let mut sources = sources;
+            for (run, r) in sources.iter_mut().zip(&renamed) {
+                if r.problems.is_empty() {
+                    continue;
+                }
+                run.message = format!("{}. {}", run.message, r.problems.join(". "));
+                if run.status == Some(RunStatus::Success) {
+                    run.status = Some(RunStatus::Warning);
+                }
+            }
             let record = summarize(run_id, &task, job.trigger, requested, started_at, sources);
             let settings = {
                 let mut s = self.store.lock().unwrap();
@@ -476,12 +546,18 @@ impl Core {
                 (s.tasks.clone(), st.scheduler_paused, st.notify_success, st.sound_success.clone())
             };
             // Polled even while paused, so unpausing doesn't fire for drives connected long ago.
-            let ready: Vec<Task> = watch
-                .poll(&tasks)
-                .into_iter()
-                .filter(|t| t.enabled && !paused)
-                .cloned()
+            let connected = watch.poll(&tasks);
+            // Even for tasks that are off: a renamed source's backups get the new name as soon as
+            // its drive is back (before a backup is queued below, which would hold the rename off).
+            let rename: Vec<String> = connected
+                .iter()
+                .filter(|t| t.sources.iter().any(|s| !s.previous_names.is_empty()))
+                .map(|t| t.id.clone())
                 .collect();
+            if !rename.is_empty() {
+                self.rename_backups_when_idle(Some(&rename));
+            }
+            let ready: Vec<Task> = connected.into_iter().filter(|t| t.enabled && !paused).cloned().collect();
             let mut changed = false;
             {
                 // A question about a task that's gone, turned off, or whose drive was unplugged again is moot.

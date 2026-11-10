@@ -66,6 +66,18 @@ pub fn write(folder: &Path, files: &[ListedFile]) {
 }
 
 pub fn read(folder: &Path) -> Option<Vec<ListedFile>> {
+    read_named(folder, &folder_name(folder))
+}
+
+/// After the folder was renamed from `old_name`: its index names the old folder, so write it again
+/// under the new name (otherwise the next incremental would walk the whole folder once).
+pub fn renamed(folder: &Path, old_name: &str) {
+    if let Some(files) = read_named(folder, old_name) {
+        write(folder, &files);
+    }
+}
+
+fn read_named(folder: &Path, name: &str) -> Option<Vec<ListedFile>> {
     let text = fs::read_to_string(folder.join(FILE_NAME)).ok()?;
     let text = text.strip_suffix(&format!("\r\n{END}\r\n"))?;
     let mut lines = text.split("\r\n");
@@ -74,7 +86,7 @@ pub fn read(folder: &Path) -> Option<Vec<ListedFile>> {
         return None;
     }
     let count: usize = header.next()?.parse().ok()?;
-    if header.next()? != folder_name(folder) {
+    if header.next()? != name {
         return None;
     }
     let files = lines

@@ -432,7 +432,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       ...t,
       id: "",
       name: `${t.name} (עותק)`,
-      sources: t.sources.map((s) => ({ ...s, folderName: `${s.folderName} (עותק)` })),
+      sources: t.sources.map((s) => ({ path: s.path, folderName: `${s.folderName} (עותק)` })),
     });
 
   /** Moves tasks into a group ("" = general). */

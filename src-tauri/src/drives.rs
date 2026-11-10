@@ -94,6 +94,7 @@ mod tests {
                 .map(|p| Source {
                     path: p.to_string(),
                     folder_name: "x".into(),
+                    ..Default::default()
                 })
                 .collect(),
             ..Default::default()
