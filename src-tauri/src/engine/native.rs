@@ -179,6 +179,8 @@ fn verbatim(p: &Path) -> io::Result<Vec<u16>> {
 struct Rules {
     include: Vec<Pattern>,
     exclude_files: Vec<Pattern>,
+    /// /XF entries with a backslash: full paths of single files.
+    exclude_file_paths: Vec<Pattern>,
     include_regex: Vec<Regex>,
     exclude_regex: Vec<Regex>,
     exclude_dir_regex: Vec<Regex>,
@@ -216,10 +218,13 @@ impl Rules {
             .map(|d| d.trim().trim_end_matches('\\').to_string())
             .chain(ALWAYS_EXCLUDED_DIRS.iter().map(|d| d.to_string()))
             .partition(|d| d.contains('\\'));
+        let (file_paths, file_names): (Vec<String>, Vec<String>) =
+            f.exclude_files.iter().cloned().partition(|n| n.contains('\\'));
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() * TICKS_PER_SEC + UNIX_EPOCH_TICKS;
         Rules {
             include: patterns(&f.include_files),
-            exclude_files: patterns(&f.exclude_files),
+            exclude_files: patterns(&file_names),
+            exclude_file_paths: patterns(&file_paths),
             // Validated when saved; a rule that still fails to compile skips nothing.
             include_regex: f.include_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
             exclude_regex: f.exclude_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
@@ -257,6 +262,13 @@ impl Rules {
         }
         let name = String::from_utf16_lossy(&e.name);
         self.include_regex.iter().all(|r| r.is_match(&name)) && !self.exclude_regex.iter().any(|r| r.is_match(&name))
+    }
+
+    fn skip_file_path(&self, rel: &str) -> bool {
+        !self.exclude_file_paths.is_empty() && {
+            let full: Vec<u16> = format!("{}\\{rel}", self.base).encode_utf16().collect();
+            self.exclude_file_paths.iter().any(|p| p.matches(&full))
+        }
     }
 
     fn keep_file(&self, e: &Entry) -> bool {
@@ -401,7 +413,7 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
                     }
                     None => pending.push(child),
                 }
-            } else if rules.keep_file(&e) {
+            } else if rules.keep_file(&e) && !rules.skip_file_path(&child) {
                 out.files.push(ListedFile {
                     rel: child,
                     size: e.size,
@@ -575,6 +587,7 @@ mod tests {
             Filters { include_files: v(&["*.t?t", ".*"]), ..Default::default() },
             Filters { exclude_files: v(&["*.htm", "*.b", "*x*"]), ..Default::default() },
             Filters { exclude_dirs: v(&["de*"]), ..Default::default() },
+            Filters { exclude_files: v(&[&src.join("sub").join("s.htm").display().to_string(), "x.txt"]), ..Default::default() },
             Filters { exclude_dirs: v(&[&format!("{}\\", src.join("sub").join("deep").display()), "hid"]), ..Default::default() },
             Filters { exclude_dirs: v(&[r"sub\deep"]), ..Default::default() },
             Filters { exclude_hidden: true, exclude_system: true, ..Default::default() },

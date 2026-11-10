@@ -21,18 +21,22 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
     p.phase
   ];
   // No totals while copying = the pre-scan was skipped and nothing could estimate the work: counters only.
-  const unknownTotal = !scanning && p.filesTotal === 0 && p.bytesTotal === 0;
+  // An estimate from the previous backup can fall short (the source grew): "X of Y" and a percentage would read wrong.
+  const overshot = p.bytesDone > p.bytesTotal || p.filesDone > p.filesTotal;
+  const unknownTotal = !scanning && ((p.filesTotal === 0 && p.bytesTotal === 0) || overshot);
   // Totals may be an estimate from the previous backup, so never show a finished bar mid-copy.
-  const pct = scanning
-    ? null
-    : p.bytesTotal > 0
-      ? Math.min(99, (p.bytesDone / p.bytesTotal) * 100)
-      : p.filesTotal > 0
-        ? Math.min(99, (p.filesDone / p.filesTotal) * 100)
-        : null;
+  const pct =
+    unknownTotal || scanning
+      ? null
+      : p.bytesTotal > 0
+        ? Math.min(99, (p.bytesDone / p.bytesTotal) * 100)
+        : p.filesTotal > 0
+          ? Math.min(99, (p.filesDone / p.filesTotal) * 100)
+          : null;
   // Without exact totals (a scan still running, or an estimate from the last backup) the time is approximate.
   const approx = p.totals === "estimate";
-  const eta = useEta(p);
+  const etaRaw = useEta(p);
+  const eta = unknownTotal ? null : etaRaw;
   const queuedNames = queue.map((j) => tasks.find((t) => t.id === j.taskId)?.name).filter(Boolean);
 
   return (
