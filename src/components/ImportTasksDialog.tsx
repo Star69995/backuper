@@ -2,7 +2,7 @@ import { AlertTriangle, ArrowLeft, CheckCircle2, Filter, Info, XCircle } from "l
 import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { describeRetention, describeSchedule, KIND_LABEL, taskKind } from "../lib/format";
-import type { AdoptPlan, ImportPreview, Task } from "../types";
+import type { AdoptPlan, ImportPreview, ImportSplit, Task } from "../types";
 import { CobianListsDialog, planFolderCount, TakeoverSummary, takeoverToast } from "./CobianDialogs";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
@@ -25,12 +25,12 @@ const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD
  */
 export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
   const { toast } = useFeedback();
-  const [preview, setPreview] = useState<{ data: ImportPreview; origin: Origin } | null>(null);
+  const [preview, setPreview] = useState<{ data: ImportPreview; origin: Origin; path: string; split: ImportSplit } | null>(null);
   const [cobianPicker, setCobianPicker] = useState(false);
 
-  const open = async (path: string, origin: Origin) => {
+  const open = async (path: string, origin: Origin, split: ImportSplit = "one") => {
     try {
-      setPreview({ data: await api.importTasks(path), origin });
+      setPreview({ data: await api.importTasks(path, split), origin, path, split });
     } catch (e) {
       toast({ tone: "bad", title: "לא ניתן לקרוא את הקובץ", message: errorText(e) });
     }
@@ -57,14 +57,22 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
   };
 
   /**
-   * Saves imported tasks, then takes over the Cobian backups of `takeOver` (ids).
-   * Undo deletes the new tasks and restores the ones that were updated (renamed folders stay).
+   * Saves imported tasks, then takes over the Cobian backups of `takeOver` (ids). `replaces` = tasks
+   * of an earlier import of the same plain config (split differently), deleted first.
+   * Undo deletes the new tasks and restores the ones that were updated or replaced (renamed folders stay).
    */
-  const save = async (list: Task[], takeOver: string[]) => {
+  const save = async (list: Task[], takeOver: string[], replaces: string[]) => {
     const before = tasks.filter((t) => list.some((n) => n.id === t.id));
+    const replaced = tasks.filter((t) => replaces.includes(t.id));
     const added = list.filter((n) => !before.some((t) => t.id === n.id)).map((t) => t.id);
     try {
-      await api.saveTasks(list);
+      if (replaced.length) await api.deleteTasks(replaced.map((t) => t.id));
+      try {
+        await api.saveTasks(list);
+      } catch (e) {
+        if (replaced.length) await api.saveTasks(replaced).catch(() => {});
+        throw e;
+      }
       setPreview(null);
       refresh();
       toast({
@@ -76,7 +84,9 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
         action: {
           label: "ביטול",
           onClick: () =>
-            Promise.all([api.deleteTasks(added), before.length ? api.saveTasks(before) : null])
+            api
+              .deleteTasks(added)
+              .then(() => (before.length || replaced.length ? api.saveTasks([...before, ...replaced]) : null))
               .then(() => {
                 refresh();
                 toast({ tone: "info", title: "הייבוא בוטל" });
@@ -115,6 +125,8 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
         <ImportTasksDialog
           preview={preview.data}
           origin={preview.origin}
+          split={preview.split}
+          onSplit={(split) => open(preview.path, preview.origin, split)}
           groups={groupNames(tasks)}
           onClose={() => setPreview(null)}
           onImport={save}
@@ -149,15 +161,20 @@ type Takeover = "now" | "never" | "later";
 function ImportTasksDialog({
   preview,
   origin,
+  split,
+  onSplit,
   groups,
   onClose,
   onImport,
 }: {
   preview: ImportPreview;
   origin: Origin;
+  /** Plain config: how its folders become tasks (changing it reads the file again). */
+  split: ImportSplit;
+  onSplit: (split: ImportSplit) => Promise<void>;
   groups: string[];
   onClose: () => void;
-  onImport: (tasks: Task[], takeOver: string[]) => void;
+  onImport: (tasks: Task[], takeOver: string[], replaces: string[]) => void;
 }) {
   const items = preview.tasks;
   const cobian = preview.source === "cobian";
@@ -182,9 +199,21 @@ function ImportTasksDialog({
   }, [cobian, items]);
   // Existing tasks start unchecked, so an import doesn't overwrite later edits by accident.
   // Identical ones would change nothing, so they can't be picked at all.
-  const [checked, setChecked] = useState<Set<string>>(
-    () => new Set(items.filter((i) => !i.error && !i.exists).map((i) => i.task.id)),
-  );
+  const initialChecked = (list: typeof items) => new Set(list.filter((i) => !i.error && !i.exists).map((i) => i.task.id));
+  const [checked, setChecked] = useState<Set<string>>(() => initialChecked(items));
+  // A different split of a plain config is a new list of tasks.
+  const [shownItems, setShownItems] = useState(items);
+  if (shownItems !== items) {
+    setShownItems(items);
+    setChecked(initialChecked(items));
+  }
+  const [splitting, setSplitting] = useState(false);
+  const changeSplit = (v: ImportSplit) => {
+    if (v === split || splitting) return;
+    setSplitting(true);
+    onSplit(v).finally(() => setSplitting(false));
+  };
+  const splitOptions = splitChoices(preview.simple);
   // Cobian lists are imported in two steps: review (details, warnings, errors), then the options -
   // whether to continue from Cobian's backups (only when some were found) and what to switch on. Until
   // the user has stopped Cobian, the safe default is to import the tasks switched off.
@@ -212,6 +241,7 @@ function ImportTasksDialog({
         ...(askGroup && !i.task.group && { group: group.trim() }),
       })),
       cobian && takeOver === "now" ? foundTasks.map((i) => i.task.id) : [],
+      preview.replaces.map((t) => t.id),
     );
   const importLabel = chosen.length === 1 ? "ייבוא משימה אחת" : `ייבוא ${chosen.length} משימות`;
 
@@ -240,7 +270,7 @@ function ImportTasksDialog({
           {prev ? <Button onClick={() => setStep(prev)}>חזרה</Button> : <Button onClick={onClose}>ביטול</Button>}
           <Button
             variant="primary"
-            disabled={chosen.length === 0 || (cobian && !plans)}
+            disabled={chosen.length === 0 || (cobian && !plans) || splitting}
             onClick={next ? () => setStep(next) : doImport}
           >
             {next ? "המשך" : importLabel}
@@ -272,6 +302,21 @@ function ImportTasksDialog({
             <div className="flex items-center gap-2 text-[13px] text-muted">
               <Spinner className="size-4" /> מחפש גיבויים קיימים של Cobian ביעדים...
             </div>
+          )}
+
+          {splitOptions.length > 1 && (
+            <Field label="איך לחלק למשימות" hint="כל המשימות מגבות לאותו יעד. אפשר לשנות כל משימה גם אחרי הייבוא.">
+              <ChoiceCards value={split} onChange={changeSplit} options={splitOptions} />
+            </Field>
+          )}
+
+          {preview.replaces.length > 0 && (
+            <Note>
+              {preview.replaces.length === 1
+                ? `המשימה "${preview.replaces[0].name}" יובאה קודם מקובץ כזה, בחלוקה אחרת. בייבוא היא תימחק ותוחלף במשימות החדשות.`
+                : `המשימות ${preview.replaces.map((t) => `"${t.name}"`).join(", ")} יובאו קודם מקובץ כזה, בחלוקה אחרת. בייבוא הן יימחקו ויוחלפו במשימות החדשות.`}{" "}
+              הגיבויים שכבר נוצרו ביעד נשארים, והמשימות החדשות ממשיכות מהם.
+            </Note>
           )}
 
           {askGroup && (
@@ -388,6 +433,32 @@ function ImportTasksDialog({
       )}
     </Modal>
   );
+}
+
+/** The ways a plain JSON config can become tasks (none when it has a single folder). */
+function splitChoices(shape: ImportPreview["simple"]): { value: ImportSplit; title: string; text: string }[] {
+  if (!shape || shape.sources < 2) return [];
+  return [
+    {
+      value: "one",
+      title: "משימה אחת לכל התיקיות",
+      text: "כל התיקיות מגובות יחד, באותו תזמון.",
+    },
+    ...(shape.groups > 1 && shape.groups < shape.sources
+      ? [
+          {
+            value: "group" as const,
+            title: `משימה לכל קבוצה בקובץ (${shape.groups} משימות)`,
+            text: "התיקיות שמופיעות יחד בקובץ מגובות יחד.",
+          },
+        ]
+      : []),
+    {
+      value: "source",
+      title: `משימה נפרדת לכל תיקייה (${shape.sources} משימות)`,
+      text: "אפשר לתזמן, להפעיל ולהשבית כל תיקייה בנפרד.",
+    },
+  ];
 }
 
 /** Cobian import, second step: Cobian's existing backups (if any were found) and whether to switch the tasks on. */

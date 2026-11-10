@@ -7,6 +7,7 @@ import type {
   BackupMode,
   CobianLists,
   ImportPreview,
+  ImportSplit,
   Progress,
   RegexCheck,
   RunRecord,
@@ -45,7 +46,7 @@ export const api = {
   checkRegex: (pattern: string, sample: string | null) => invoke<RegexCheck>("check_regex", { pattern, sample }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
-  importTasks: (path: string) => invoke<ImportPreview>("import_tasks", { path }),
+  importTasks: (path: string, split?: ImportSplit) => invoke<ImportPreview>("import_tasks", { path, split }),
   /** All tasks when `ids` is null. Returns how many were saved. */
   exportTasks: (path: string, ids: string[] | null = null) => invoke<number>("export_tasks", { path, ids }),
   /** The automatic snapshots, or those in `dir` (a folder the user picked). */
