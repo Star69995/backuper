@@ -439,10 +439,14 @@ function cobianPlan(t: Task): AdoptPlan {
   return {
     taskId: t.id,
     destination: t.destination,
-    sources: t.sources.map((s) => ({
+    sources: t.sources.map((s, i) => ({
       source: s.path,
       folderName: s.folderName,
       warnings: [],
+      leftovers:
+        t.mode === "incremental" && (t.enabled || t.cobianPending)
+          ? { count: 4, first: day(9 + i).iso, last: day(4).iso }
+          : null,
       folders:
         t.enabled || t.cobianPending
           ? [3, 2, 1].map((n, i) => ({

@@ -139,7 +139,19 @@ pub struct AdoptSource {
     pub folder_name: String,
     /// Oldest first.
     pub folders: Vec<AdoptFolder>,
+    /// Something is wrong or can't be taken over.
     pub warnings: Vec<String>,
+    /// Old incrementals Cobian left without their full (normal: its "full copies to keep" deletes
+    /// old fulls only). Not taken over, left as they are. The UI sums them into one note per task.
+    pub leftovers: Option<Leftovers>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Leftovers {
+    pub count: usize,
+    pub first: DateTime<Local>,
+    pub last: DateTime<Local>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -332,6 +344,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
             folder_name: folder_name.clone(),
             folders: Vec::new(),
             warnings: Vec::new(),
+            leftovers: None,
         };
         let short = cobian_short_name(&src.path);
         if short.is_empty() {
@@ -400,6 +413,8 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
         found.sort_by_key(|f| f.1);
         let only_full = task.mode == BackupMode::Full;
         let mut have_full = false;
+        // Incrementals older than every full left: Cobian's retention deleted their full and kept them.
+        let mut orphans: Vec<NaiveDateTime> = Vec::new();
         for (name, at, kind) in found {
             let kind = match kind {
                 Some(k) if !only_full => k,
@@ -409,7 +424,7 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
             };
             // An incremental with no full before it has nothing to sit on.
             if kind == BackupMode::Incremental && !have_full {
-                out.warnings.push(format!("לגיבוי \"{name}\" אין גיבוי מלא לפניו - הוא לא מומר"));
+                orphans.push(at);
                 continue;
             }
             have_full |= kind == BackupMode::Full;
@@ -427,6 +442,13 @@ pub fn plan(task: &Task, others: &[Task]) -> AdoptPlan {
                 to,
                 kind,
                 created_at: to_local(at),
+            });
+        }
+        if let (Some(first), Some(last)) = (orphans.first(), orphans.last()) {
+            out.leftovers = Some(Leftovers {
+                count: orphans.len(),
+                first: to_local(*first),
+                last: to_local(*last),
             });
         }
         sources.push(out);
@@ -567,6 +589,30 @@ mod tests {
         assert!(dest.join("Pics 2026-10-01 03;00;00").is_dir(), "other sources' folders untouched");
         assert!(dest.join("Docs old").is_dir());
         assert_eq!(plan(&t, &[]).folder_count(), 0, "nothing left to take over");
+    }
+
+    #[test]
+    fn orphan_incrementals_get_one_note() {
+        let root = Tmp(std::env::temp_dir().join(format!("backuper-cobian-{}", uuid::Uuid::new_v4())));
+        let dest = root.0.join("dst");
+        // Cobian kept one full: the older fulls are gone, their incrementals are still there.
+        for d in [
+            "Pics 2026-10-03 01;58;50 (Incremental)",
+            "Pics 2026-10-04 01;59;02 (Incremental)",
+            "Pics 2026-11-05 01;58;00 (Incremental)",
+            "Pics 2026-11-06 01;58;00 (Full)",
+            "Pics 2026-11-07 01;58;00 (Incremental)",
+        ] {
+            fs::create_dir_all(dest.join(d)).unwrap();
+        }
+        let t = task(&dest, &["E:\\Pics"], BackupMode::Incremental);
+        let p = plan(&t, &[]);
+        assert_eq!(p.folder_count(), 2);
+        assert!(p.sources[0].warnings.is_empty(), "{:?}", p.sources[0].warnings);
+        let l = p.sources[0].leftovers.as_ref().expect("leftovers");
+        assert_eq!(l.count, 3);
+        assert_eq!(l.first.naive_local(), dt("2026-10-03 01:58:50"));
+        assert_eq!(l.last.naive_local(), dt("2026-11-05 01:58:00"));
     }
 
     #[test]

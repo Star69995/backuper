@@ -288,7 +288,16 @@ export interface AdoptSource {
   folderName: string;
   /** Oldest first. */
   folders: AdoptFolder[];
+  /** Something is wrong or can't be taken over. */
   warnings: string[];
+  /** Old incrementals Cobian left without their full (normal). Not taken over; one note per task in the UI. */
+  leftovers: Leftovers | null;
+}
+
+export interface Leftovers {
+  count: number;
+  first: string;
+  last: string;
 }
 
 /** Which Cobian backup folders a task would take over, so it continues from Cobian's last backup. */

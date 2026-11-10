@@ -7,6 +7,7 @@ const dateTimeFmt = new Intl.DateTimeFormat("he-IL", {
   hour: "2-digit",
   minute: "2-digit",
 });
+const dateFmt = new Intl.DateTimeFormat("he-IL", { day: "2-digit", month: "2-digit", year: "numeric" });
 const timeFmt = new Intl.DateTimeFormat("he-IL", { hour: "2-digit", minute: "2-digit" });
 const rtf = new Intl.RelativeTimeFormat("he", { numeric: "auto" });
 
@@ -15,6 +16,10 @@ export const WEEKDAYS = ["ראשון", "שני", "שלישי", "רביעי", "ח
 
 export function fmtDateTime(iso: string | null | undefined) {
   return iso ? dateTimeFmt.format(new Date(iso)) : "-";
+}
+
+export function fmtDate(iso: string | null | undefined) {
+  return iso ? dateFmt.format(new Date(iso)) : "-";
 }
 
 /** "היום 03:00" / "מחר 03:00" / full date. */

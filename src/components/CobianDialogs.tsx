@@ -1,7 +1,7 @@
-import { AlertTriangle, ArrowLeft, ChevronDown, FileText, FolderOpen, History, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ChevronDown, FileText, FolderOpen, History, Info, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api";
-import { fmtDateTime, MODE_LABEL } from "../lib/format";
+import { fmtDate, fmtDateTime, MODE_LABEL } from "../lib/format";
 import type { AdoptPlan, AdoptResult, CobianList, CobianLists, Task } from "../types";
 import { useFeedback } from "./feedback";
 import { Badge, Button, cx, EmptyState, Modal, PathText, Spinner } from "./ui";
@@ -125,6 +125,10 @@ export function TakeoverSummary({ plan, defaultOpen = false }: { plan: AdoptPlan
   const [open, setOpen] = useState(defaultOpen);
   const count = planFolderCount(plan);
   const warnings = plan.sources.flatMap((s) => s.warnings);
+  const leftovers = plan.sources.flatMap((s) => (s.leftovers ? [s.leftovers] : []));
+  const leftCount = leftovers.reduce((n, l) => n + l.count, 0);
+  const leftFirst = leftovers.map((l) => l.first).sort()[0];
+  const leftLast = leftovers.map((l) => l.last).sort().at(-1);
   const multi = plan.sources.length > 1;
   return (
     <div className="flex flex-col gap-1.5 text-[13px]">
@@ -167,6 +171,16 @@ export function TakeoverSummary({ plan, defaultOpen = false }: { plan: AdoptPlan
                 </ul>
               </div>
             ))}
+        </div>
+      )}
+      {leftCount > 0 && (
+        <div className="flex gap-1.5 text-muted">
+          <Info size={14} className="mt-0.5 shrink-0" />
+          <span>
+            {leftCount === 1
+              ? `גיבוי אינקרמנטלי ישן אחד (${fmtDate(leftFirst)}) שייך לגיבוי מלא ש-Cobian כבר מחק - הוא נשאר ביעד כמו שהוא`
+              : `${leftCount} גיבויים אינקרמנטליים ישנים (מ-${fmtDate(leftFirst)} עד ${fmtDate(leftLast)}) שייכים לגיבויים מלאים ש-Cobian כבר מחק - הם נשארים ביעד כמו שהם`}
+          </span>
         </div>
       )}
       {warnings.map((w) => (
