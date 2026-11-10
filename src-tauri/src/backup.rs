@@ -1510,6 +1510,66 @@ mod tests {
         assert!(manifest::read(&full).is_some(), "rebuilt");
     }
 
+    /// A full backup where a few files can't be read (locked) completes with a warning instead of staying
+    /// a `.partial` folder, the failure is listed, and robocopy's retry lines count the file once.
+    #[test]
+    fn full_backup_with_a_locked_file_completes_with_a_warning() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        for i in 0..40 {
+            fs::write(src.join(format!("f{i}.txt")), "x").unwrap();
+        }
+        fs::write(src.join("locked.txt"), "l").unwrap();
+        // Held open without sharing: robocopy gets ERROR 32 on every retry.
+        let _lock = fs::OpenOptions::new().read(true).write(true).share_mode(0).open(src.join("locked.txt")).unwrap();
+
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let mut locked_starts = 0;
+        let r = env.run_with(&t, BackupMode::Full, "2026-10-01 03:00", &mut |_, e| {
+            if let EngineEvent::File { path, .. } = e {
+                if path.ends_with("locked.txt") {
+                    locked_starts += 1;
+                }
+            }
+        });
+        assert_eq!(r[0].status, Some(RunStatus::Warning), "{r:?}");
+        assert_eq!(r[0].files_failed, 1, "{r:?}");
+        assert!(r[0].errors.iter().any(|e| e.path.ends_with("locked.txt") && e.code == Some(32)), "{:?}", r[0].errors);
+        assert_eq!(locked_starts, 1, "the retries of one file are one file");
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-01 03-00 מלא"], "finished, not .partial");
+        assert!(dst.join("Src 2026-10-01 03-00 מלא").join("f39.txt").exists());
+    }
+
+    /// A single file excluded by its full path (the "skip this file" rule from a run's errors) is left out
+    /// of both a full backup (robocopy /XF) and an incremental (native listing).
+    #[test]
+    fn full_path_file_rule_skips_one_file() {
+        let mut env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("pagefile.sys"), "p").unwrap();
+        fs::write(src.join("sub").join("pagefile.sys"), "p2").unwrap();
+        fs::write(src.join("keep.txt"), "k").unwrap();
+        let rule = crate::model::FilterRule::File { value: src.join("pagefile.sys").display().to_string() };
+        env.filters = crate::filters::compile(&[rule]);
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        let full = dst.join("Src 2026-10-01 03-00 מלא");
+        assert!(full.join("keep.txt").exists());
+        assert!(!full.join("pagefile.sys").exists());
+        assert!(full.join("sub").join("pagefile.sys").exists(), "same name in another folder is not the file");
+
+        fs::write(src.join("new.txt"), "n").unwrap();
+        fs::write(src.join("pagefile.sys"), "changed").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].files_copied, 1, "{r:?}");
+        let inc = dst.join("Src 2026-10-02 03-00 אינקרמנטלי");
+        assert!(inc.join("new.txt").exists() && !inc.join("pagefile.sys").exists());
+    }
+
     /// A plain config imported in another split keeps the folder names (and so the chains in the
     /// destination): the new tasks continue with an incremental, not a new full. Two folders with
     /// the same last name get " (2)" in every split, and no split has a (destination, folderName) twice.
