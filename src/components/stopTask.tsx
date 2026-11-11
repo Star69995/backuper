@@ -19,8 +19,8 @@ export function useStopTask() {
         </>
       ),
       options: [
-        { value: "keep", label: "עצור ושמור" },
-        { value: "delete", label: "עצור ומחק", danger: true },
+        { value: "keep", label: "עצירה ושמירה" },
+        { value: "delete", label: "עצירה ומחיקה", danger: true },
       ],
     });
     if (answer) await api.cancelTask(taskId, answer === "delete");

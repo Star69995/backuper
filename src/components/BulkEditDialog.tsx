@@ -257,7 +257,7 @@ export default function BulkEditDialog({
             </Button>
             <Button onClick={onClose}>ביטול</Button>
             <Button variant="primary" disabled={changedCount === 0} onClick={() => onApply(next)}>
-              החל על {changedCount} משימות
+              החלה על {changedCount} משימות
             </Button>
           </>
         )

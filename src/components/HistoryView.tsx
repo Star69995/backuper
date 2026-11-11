@@ -37,7 +37,7 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
       !(await confirm({
         title: "לנקות את יומן הריצות?",
         message: "כל רשומות הריצות והיומנים המפורטים יימחקו. הגיבויים עצמם לא יושפעו.",
-        confirmLabel: "נקה",
+        confirmLabel: "ניקוי",
         danger: true,
       }))
     )
@@ -205,7 +205,7 @@ function ErrorGroup({
         {kind.fix}
       </p>
       <details className="group">
-        <summary className="cursor-pointer text-xs text-muted select-none hover:text-fg">הצג את הקבצים</summary>
+        <summary className="cursor-pointer text-xs text-muted select-none hover:text-fg">הצגת הקבצים</summary>
         <ul className="mt-1.5 flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
           {errors.map((e, i) => (
             <li key={i} className="min-w-0">
@@ -303,7 +303,7 @@ function SourceCard({
             icon={<FolderOpen size={14} />}
             onClick={() => api.openPath(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}
           >
-            פתח את תיקיית הגיבוי
+            פתיחת תיקיית הגיבוי
           </Button>
         )}
         {src.logFile && (
@@ -347,8 +347,8 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
     // Skipping the drive itself or the whole source folder would leave nothing to back up.
     const folderOk = /\\./.test(parent) && !/^[a-z]:$/i.test(parent) && norm(parent) !== norm(source);
     const options: { value: "file" | "folder"; label: string }[] = [];
-    if (!dir) options.push({ value: "file", label: "דלג על הקובץ" });
-    if (folderOk) options.push({ value: "folder", label: dir ? "דלג על התיקייה" : "דלג על כל התיקייה שלו" });
+    if (!dir) options.push({ value: "file", label: "דילוג על הקובץ" });
+    if (folderOk) options.push({ value: "folder", label: dir ? "דילוג על התיקייה" : "דילוג על כל התיקייה שלו" });
     if (!options.length) return;
     const answer = await choose({
       title: "לדלג על זה בגיבויים הבאים?",
@@ -471,10 +471,10 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
               icon={<RotateCcw size={15} />}
               onClick={() => restart(r.taskId, r.taskName, r.mode).then((ok) => ok && onClose())}
             >
-              התחל מחדש
+              התחלה מחדש
             </Button>
             <Button variant="ghost" onClick={onClose}>
-              סגור
+              סגירה
             </Button>
           </>
         ) : (
@@ -485,7 +485,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
               </Button>
             )}
             <Button variant={canResume ? "secondary" : "primary"} onClick={onClose}>
-              סגור
+              סגירה
             </Button>
           </>
         )

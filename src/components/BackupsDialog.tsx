@@ -39,7 +39,7 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
           {b.kind === "full" && " גיבויים אינקרמנטליים שנוצרו אחריה יישארו, אבל בלי הגיבוי המלא שלהם."}
         </>
       ),
-      confirmLabel: "מחק לצמיתות",
+      confirmLabel: "מחיקה לצמיתות",
       danger: true,
     });
     if (!ok) return;
@@ -69,10 +69,10 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
             רענון
           </Button>
           <Button icon={<FolderOpen size={15} />} onClick={() => openPath(task.destination)}>
-            פתח את היעד
+            פתיחת היעד
           </Button>
           <Button variant="primary" onClick={onClose}>
-            סגור
+            סגירה
           </Button>
         </>
       }
@@ -147,10 +147,10 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
                               </button>
                             )}
                           </div>
-                          <IconButton label="פתח בסייר הקבצים" onClick={() => openPath(b.path)}>
+                          <IconButton label="פתיחה בסייר הקבצים" onClick={() => openPath(b.path)}>
                             <FolderOpen size={16} />
                           </IconButton>
-                          <IconButton label="מחק גיבוי" tone="danger" onClick={() => remove(src, b)}>
+                          <IconButton label="מחיקת הגיבוי" tone="danger" onClick={() => remove(src, b)}>
                             <Trash2 size={16} />
                           </IconButton>
                         </li>
