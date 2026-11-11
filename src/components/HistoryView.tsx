@@ -441,7 +441,7 @@ function SourceCard({
           <Button
             size="sm"
             icon={<FolderOpen size={14} />}
-            onClick={() => api.openPath(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}
+            onClick={() => openBackupFolder(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}
           >
             פתיחת תיקיית הגיבוי
           </Button>
@@ -461,6 +461,19 @@ function SourceCard({
 }
 
 /** Details of one run (per source: result, errors, full log). Also opened from the tasks table. */
+/**
+ * A run recorded by an older version names its folder with hyphens in the time ("03-00"); such
+ * folders get renamed to the current format ("03;00") on the task's next run, so try that name too.
+ */
+function openBackupFolder(path: string): Promise<unknown> {
+  const modern = path.replace(
+    / (\d{4}-\d\d-\d\d) (\d\d)-(\d\d)(?:-(\d\d))?( (?:מלא|אינקרמנטלי)(?:\.partial)?)?$/,
+    (_m, date: string, h: string, m: string, s: string | undefined, tag: string | undefined) =>
+      ` ${date} ${h};${m}${s ? `;${s}` : ""}${tag ?? " מלא"}`,
+  );
+  return api.openPath(path).catch((e) => (modern !== path ? api.openPath(modern) : Promise.reject(e)));
+}
+
 export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
   const { toast } = useFeedback();
   // The run's task as it is now (null = deleted since), for "skip this next time".

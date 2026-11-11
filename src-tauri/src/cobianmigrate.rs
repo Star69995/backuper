@@ -568,9 +568,11 @@ pub fn restore_plan(task: &Task, journal: &[CobianRename], never_backed_up: bool
     };
     for r in &recorded {
         let dir = PathBuf::from(r.destination.trim());
-        let problem = check(&dir, &r.to, &r.from);
+        // Renamed since, to a newer version's time format.
+        let now_named = backup::current_name(&dir, &r.to);
+        let problem = check(&dir, &now_named, &r.from);
         folders.push(RestoreFolder {
-            from: r.to.clone(),
+            from: now_named,
             to: r.from.clone(),
             kind: r.kind,
             problem,
@@ -710,7 +712,7 @@ mod tests {
             "Docs 2026-09-29 03;00;00",
             "Docs 2026-09-30 03;00;00 (Full)",
             "Docs 2026-10-01 03;00;12 (Incremental)",
-            "Docs 2026-10-01 03-00 אינקרמנטלי", // already ours
+            "Docs 2026-10-01 03;00 אינקרמנטלי", // already ours
             "Pics 2026-10-01 03;00;00",
             "Docs old", // not Cobian's
         ] {
@@ -724,11 +726,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("Docs 2026-09-28 03;00;00", "Docs 2026-09-28 03-00 מלא"),
-                ("Docs 2026-09-29 03;00;00", "Docs 2026-09-29 03-00 אינקרמנטלי"),
-                ("Docs 2026-09-30 03;00;00 (Full)", "Docs 2026-09-30 03-00 מלא"),
+                ("Docs 2026-09-28 03;00;00", "Docs 2026-09-28 03;00 מלא"),
+                ("Docs 2026-09-29 03;00;00", "Docs 2026-09-29 03;00 אינקרמנטלי"),
+                ("Docs 2026-09-30 03;00;00 (Full)", "Docs 2026-09-30 03;00 מלא"),
                 // The minute is taken by our own folder: with seconds.
-                ("Docs 2026-10-01 03;00;12 (Incremental)", "Docs 2026-10-01 03-00-12 אינקרמנטלי"),
+                ("Docs 2026-10-01 03;00;12 (Incremental)", "Docs 2026-10-01 03;00;12 אינקרמנטלי"),
             ]
         );
         assert!(p.sources[1].folders.is_empty());
@@ -810,7 +812,7 @@ mod tests {
             })
             .collect();
         // A backup this app made later, and the index file a run left in a taken-over folder.
-        fs::create_dir_all(dest.join("Docs 2026-10-01 03-00 אינקרמנטלי")).unwrap();
+        fs::create_dir_all(dest.join("Docs 2026-10-01 03;00 אינקרמנטלי")).unwrap();
         crate::manifest::write(&dest.join(&journal[0].to), &[]);
         assert!(crate::manifest::read(&dest.join(&journal[0].to)).is_some());
 
@@ -824,14 +826,14 @@ mod tests {
         assert!(dest.join("Docs 2026-09-29 03;00;00 (Incremental)").is_dir());
         assert!(crate::manifest::read(&dest.join("Docs 2026-09-28 03;00;07 (Full)")).is_none(), "index removed");
         let left: Vec<String> = backup::list_backups(&t.destination, "Docs").into_iter().map(|b| b.name).collect();
-        assert_eq!(left, ["Docs 2026-10-01 03-00 אינקרמנטלי"], "this app's own backup stays");
+        assert_eq!(left, ["Docs 2026-10-01 03;00 אינקרמנטלי"], "this app's own backup stays");
 
         // Recorded renames whose folders are gone (or already back) can't be restored again.
         let p = restore_plan(&t, &journal, false, &CobianNaming::default());
         assert!(p.folders.iter().all(|f| f.problem.is_some()));
 
         // Taken over by an older version (no record), task never backed up: names rebuilt.
-        fs::remove_dir_all(dest.join("Docs 2026-10-01 03-00 אינקרמנטלי")).unwrap();
+        fs::remove_dir_all(dest.join("Docs 2026-10-01 03;00 אינקרמנטלי")).unwrap();
         apply(&t, &[]);
         assert!(restore_plan(&t, &[], false, &CobianNaming::default()).folders.is_empty(), "the task has backups of its own");
         let naming = CobianNaming {
@@ -844,8 +846,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("Docs 2026-09-28 03-00 מלא", "Docs 2026-09-28 03;00 (Full)"),
-                ("Docs 2026-09-29 03-00 אינקרמנטלי", "Docs 2026-09-29 03;00 (Incremental)"),
+                ("Docs 2026-09-28 03;00 מלא", "Docs 2026-09-28 03;00 (Full)"),
+                ("Docs 2026-09-29 03;00 אינקרמנטלי", "Docs 2026-09-29 03;00 (Incremental)"),
             ]
         );
         assert_eq!(
