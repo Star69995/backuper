@@ -152,6 +152,7 @@ pub fn list_backups(dest: &str, folder_name: &str) -> Vec<BackupFolder> {
                 created_at,
                 kind,
                 partial,
+                bytes: None,
             })
         })
         .collect();
@@ -166,13 +167,26 @@ pub fn has_partial(task: &Task) -> bool {
         .any(|s| list_backups(&task.destination, &s.folder_name).iter().any(|b| b.partial))
 }
 
+/// Every source's backups on disk, each with its size: from its index when it has one, else one
+/// fast listing (never per-file stats). A partial folder has no index and may still be growing,
+/// so its size is left for the user to ask for.
 pub fn list_task_backups(task: &Task) -> Vec<SourceBackups> {
     task.sources
         .iter()
-        .map(|s| SourceBackups {
-            source: s.path.clone(),
-            folder_name: s.folder_name.clone(),
-            backups: list_backups(&task.destination, &s.folder_name),
+        .map(|s| {
+            let mut backups = list_backups(&task.destination, &s.folder_name);
+            std::thread::scope(|scope| {
+                for b in backups.iter_mut().filter(|b| !b.partial) {
+                    scope.spawn(move || {
+                        let folder = Path::new(&b.path);
+                        b.bytes = Some(match manifest::read(folder) {
+                            Some(files) => files.iter().map(|f| f.size).sum(),
+                            None => manifest::scan(folder).0.iter().map(|f| f.size).sum(),
+                        });
+                    });
+                }
+            });
+            SourceBackups { source: s.path.clone(), folder_name: s.folder_name.clone(), backups }
         })
         .collect()
 }
@@ -1091,6 +1105,11 @@ mod tests {
         // Pics had no changes: its incremental folder exists, but is empty.
         let empty = dst.join("Pics 2026-10-02 03-00 אינקרמנטלי");
         assert!(empty.is_dir() && !has_files(&empty));
+        // The backups list gives each folder's own size (full 9, incremental 1 + 9, empty 0).
+        let listed: Vec<(BackupMode, Option<u64>)> =
+            list_task_backups(&t)[0].backups.iter().map(|b| (b.kind, b.bytes)).collect();
+        assert_eq!(listed, [(BackupMode::Incremental, Some(1 + 9)), (BackupMode::Full, Some(9))]);
+        assert_eq!(list_task_backups(&t)[1].backups[0].bytes, Some(0));
 
         // A second incremental only sees changes since the previous incremental.
         let r = env.run(&t, BackupMode::Incremental, "2026-10-03 03:00");

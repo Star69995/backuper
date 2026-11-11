@@ -280,6 +280,8 @@ export interface BackupFolder {
   createdAt: string;
   kind: BackupMode;
   partial: boolean;
+  /** Size of the folder's files; null when not known (a partial folder). */
+  bytes: number | null;
 }
 
 export interface SourceBackups {

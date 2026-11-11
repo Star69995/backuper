@@ -1083,7 +1083,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               <span className="text-muted">טרם רץ</span>
                             )}
                             <div className="mt-1 flex flex-col text-xs text-muted">
-                              {st?.lastBackup && <BackupSize last={st.lastBackup} />}
+                              {st?.lastBackup && <BackupSize last={st.lastBackup} onOpen={() => setBackupsOf(t)} />}
                               <FreeSpace space={space[t.destination]} last={st?.lastBackup} />
                             </div>
                           </td>
@@ -1275,14 +1275,24 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   }
 }
 
-/** Size of the newest backup (it may be older than the last run, if that one failed). */
-function BackupSize({ last }: { last: LastBackup }) {
+/**
+ * Size of the newest backup alone (full or incremental; it may be older than the last run, if that
+ * one failed). Opens the task's backups on disk, each with its own size.
+ */
+function BackupSize({ last, onOpen }: { last: LastBackup; onOpen: () => void }) {
   return (
-    <span
-      title={`גודל הגיבוי האחרון שנשמר (${MODE_LABEL[last.mode]}) - ${fmtSmart(last.at)}`}
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+      className="w-fit rounded text-start hover:text-accent hover:underline"
+      title={`גודל הגיבוי האחרון שנשמר (${MODE_LABEL[last.mode]}) - ${fmtSmart(last.at)}\nלחיצה להצגת כל הגיבויים שבדיסק ואת הגודל של כל אחד`}
     >
-      גודל <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(last.bytes)}</bdi>
-    </span>
+      גודל <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(last.bytes)}</bdi> ({MODE_LABEL[last.mode]})
+    </button>
   );
 }
 

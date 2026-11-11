@@ -413,7 +413,8 @@ export function installDevMock() {
         .map((createdAt, i): BackupFolder => {
           const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
           const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
-          return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
+          const bytes = kind === "full" ? 12_345_678_901 : 40_000_000 + i * 310_000_000;
+          return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false, bytes };
         })
         // A failed last run leaves its half-done folder behind (the run details offer to continue in it).
         .concat(
@@ -425,6 +426,7 @@ export function installDevMock() {
                   createdAt: states[t.id].lastRunAt!,
                   kind: "full" as const,
                   partial: true,
+                  bytes: null,
                 },
               ]
             : [],

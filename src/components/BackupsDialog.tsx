@@ -4,7 +4,7 @@ import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtRelative, MODE_LABEL } from "../lib/format";
 import type { BackupFolder, SourceBackups, Task } from "../types";
 import { useFeedback } from "./feedback";
-import { Badge, Button, EmptyState, IconButton, Modal, PathText, Spinner } from "./ui";
+import { Badge, Button, EmptyState, IconButton, Modal, PathLink, PathText, Spinner } from "./ui";
 
 export default function BackupsDialog({ task, onClose }: { task: Task; onClose: () => void }) {
   const { toast, confirm } = useFeedback();
@@ -52,6 +52,9 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
     }
   };
 
+  const openPath = (p: string) =>
+    api.openPath(p).catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את התיקייה", message: errorText(e) }));
+
   const total = list?.reduce((n, s) => n + s.backups.length, 0) ?? 0;
 
   return (
@@ -65,7 +68,7 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
           <Button icon={<RefreshCw size={15} />} onClick={load} className="me-auto">
             רענון
           </Button>
-          <Button icon={<FolderOpen size={15} />} onClick={() => api.openPath(task.destination).catch(() => {})}>
+          <Button icon={<FolderOpen size={15} />} onClick={() => openPath(task.destination)}>
             פתח את היעד
           </Button>
           <Button variant="primary" onClick={onClose}>
@@ -86,6 +89,11 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
         <div className="flex flex-col gap-5">
           {list.map((src) => {
             const latestFull = src.backups.find((b) => b.kind === "full" && !b.partial);
+            const known = src.backups.map((b) => {
+              const s = sizes[b.path] ?? b.bytes;
+              return typeof s === "number" ? s : null;
+            });
+            const sum = src.backups.length > 0 && known.every((s) => s !== null) ? known.reduce<number>((n, s) => n + (s ?? 0), 0) : null;
             return (
               <section key={src.folderName} className="flex flex-col gap-2">
                 <h3 className="flex min-w-0 items-center gap-2 text-sm font-semibold">
@@ -94,6 +102,11 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
                   <span className="min-w-0 truncate text-xs font-normal text-muted">
                     <PathText path={src.source} />
                   </span>
+                  {sum !== null && (
+                    <span className="ms-auto shrink-0 text-xs font-normal text-muted" title="סך הגיבויים של תיקייה זו בדיסק">
+                      סה"כ <bdi dir="ltr">{fmtBytes(sum)}</bdi>
+                    </span>
+                  )}
                 </h3>
                 {src.backups.length === 0 ? (
                   <p className="rounded-lg border border-dashed border-line px-3 py-2 text-[13px] text-muted">
@@ -102,7 +115,7 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
                 ) : (
                   <ul className="flex flex-col gap-1.5">
                     {src.backups.map((b) => {
-                      const size = sizes[b.path];
+                      const size = sizes[b.path] ?? b.bytes ?? undefined;
                       return (
                         <li key={b.path} className="flex flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2">
                           <div className="min-w-0 flex-1">
@@ -119,6 +132,9 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
                             <div className="mt-0.5 text-xs text-muted">
                               נוצר {fmtDateTime(b.createdAt)} ({fmtRelative(b.createdAt)})
                             </div>
+                            <div className="mt-0.5 flex min-w-0 text-xs text-muted">
+                              <PathLink path={b.path} onOpen={openPath} />
+                            </div>
                           </div>
                           <div className="text-[13px] text-muted">
                             {size === "loading" ? (
@@ -131,7 +147,7 @@ export default function BackupsDialog({ task, onClose }: { task: Task; onClose: 
                               </button>
                             )}
                           </div>
-                          <IconButton label="פתח בסייר הקבצים" onClick={() => api.openPath(b.path)}>
+                          <IconButton label="פתח בסייר הקבצים" onClick={() => openPath(b.path)}>
                             <FolderOpen size={16} />
                           </IconButton>
                           <IconButton label="מחק גיבוי" tone="danger" onClick={() => remove(src, b)}>

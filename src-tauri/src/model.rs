@@ -482,6 +482,8 @@ pub struct BackupFolder {
     pub created_at: DateTime<Local>,
     pub kind: BackupMode,
     pub partial: bool,
+    /// Size of the folder's files, filled by `list_task_backups` (None: not known, e.g. a partial folder).
+    pub bytes: Option<u64>,
 }
 
 /// The dated backups of one source.
