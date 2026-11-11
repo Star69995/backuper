@@ -415,10 +415,11 @@ fn reuses_previous_full(task: &Task) -> bool {
 /// The space the task's next full backup needs on the destination, to compare with what is free
 /// (`None` = no full backup is expected, or nothing to compare with). A full backup needs about
 /// what the previous full weighed, less what delete-before removes first. Sizes come from the
-/// index files only, never a walk (this is polled by the UI).
-pub fn full_space(task: &Task, now: DateTime<Local>) -> Option<FullSpace> {
-    // Incremental-only tasks make a full backup just when a source has none yet.
-    let only_incremental = task.mode == BackupMode::Incremental && task.full_schedule.is_none();
+/// index files only, never a walk (this is polled by the UI). `full_next` = the user asked for the
+/// next run to be a full one (`TaskState.full_next`).
+pub fn full_space(task: &Task, now: DateTime<Local>, full_next: bool) -> Option<FullSpace> {
+    // Incremental-only tasks make a full backup just when a source has none yet (or when asked for one).
+    let only_incremental = task.mode == BackupMode::Incremental && task.full_schedule.is_none() && !full_next;
     let (mut needed, mut freed) = (0u64, 0u64);
     for s in &task.sources {
         let all = list_backups(&task.destination, &s.folder_name);
@@ -1449,23 +1450,25 @@ mod tests {
         };
         let now = Local::now();
         // Nothing to compare with before the first full backup.
-        assert_eq!(full_space(&base, now), None);
+        assert_eq!(full_space(&base, now, false), None);
         env.run(&base, BackupMode::Full, "2026-10-01 03:00");
         env.run(&base, BackupMode::Full, "2026-10-02 03:00");
-        assert_eq!(full_space(&base, now), Some(FullSpace { needed: 1000, freed: 0 }));
+        assert_eq!(full_space(&base, now, false), Some(FullSpace { needed: 1000, freed: 0 }));
 
         // Delete-before with keep 2: the new full counts as one, so the older of the two goes first.
         let before = Task { delete_before: true, ..base.clone() };
-        assert_eq!(full_space(&before, now), Some(FullSpace { needed: 1000, freed: 1000 }));
+        assert_eq!(full_space(&before, now, false), Some(FullSpace { needed: 1000, freed: 1000 }));
         // Updating the previous full in place needs no new room.
         let reuse = Task { reuse_previous: true, keep_count: 1, ..base.clone() };
-        assert_eq!(full_space(&reuse, now), None);
+        assert_eq!(full_space(&reuse, now, false), None);
         // An incremental-only task makes no full backup while one exists.
         let inc = Task { mode: BackupMode::Incremental, ..base.clone() };
-        assert_eq!(full_space(&inc, now), None);
+        assert_eq!(full_space(&inc, now, false), None);
+        // ...unless the user asked for the next run to be a full one.
+        assert_eq!(full_space(&inc, now, true), Some(FullSpace { needed: 1000, freed: 0 }));
         // ...unless it also has a full schedule (combined mode).
         let combined = Task { full_schedule: Some(crate::model::Schedule::Daily { time: "03:00".into() }), ..inc };
-        assert_eq!(full_space(&combined, now), Some(FullSpace { needed: 1000, freed: 0 }));
+        assert_eq!(full_space(&combined, now, false), Some(FullSpace { needed: 1000, freed: 0 }));
     }
 
     /// Without the exact-progress setting no list-only pass runs before the copy: the totals come

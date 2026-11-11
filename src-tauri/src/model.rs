@@ -247,6 +247,9 @@ pub struct TaskState {
     pub resumable: bool,
     /// The newest backup that was written (a failed or stopped run doesn't replace it).
     pub last_backup: Option<LastBackup>,
+    /// The user asked for the next automatic run (scheduled, catch-up, drive connected) to be a
+    /// full backup instead of the task's own mode. Cleared once a full backup completes.
+    pub full_next: bool,
 }
 
 /// Size of a task's newest backup, shown in the task list.

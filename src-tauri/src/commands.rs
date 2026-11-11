@@ -207,6 +207,12 @@ pub fn cancel_task(core: CoreState, id: String, discard: bool) {
 }
 
 /// Removes a paused backup from the paused list (`delete`: its partial folders go too).
+/// Makes the task's next automatic run a full backup (once), or takes that back.
+#[tauri::command]
+pub fn set_full_next(core: CoreState, id: String, on: bool) {
+    core.set_full_next(&id, on);
+}
+
 #[tauri::command]
 pub fn dismiss_paused(core: CoreState, id: String, delete: bool) -> Result<(), String> {
     core.dismiss_paused(&id, delete)
@@ -334,13 +340,19 @@ pub async fn disk_space(paths: Vec<String>) -> Result<Vec<Option<DiskSpace>>, St
 /// `backup::full_space` for each task id, in the same order (None = no full backup expected).
 #[tauri::command]
 pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Vec<Option<FullSpace>>, String> {
-    let tasks: Vec<Option<Task>> = {
+    let tasks: Vec<Option<(Task, bool)>> = {
         let store = core.store.lock().unwrap();
-        task_ids.iter().map(|id| store.task(id).cloned()).collect()
+        task_ids
+            .iter()
+            .map(|id| {
+                let full_next = store.states.get(id).is_some_and(|st| st.full_next);
+                store.task(id).cloned().map(|t| (t, full_next))
+            })
+            .collect()
     };
     tauri::async_runtime::spawn_blocking(move || {
         let now = chrono::Local::now();
-        tasks.iter().map(|t| t.as_ref().and_then(|t| backup::full_space(t, now))).collect()
+        tasks.iter().map(|t| t.as_ref().and_then(|(t, f)| backup::full_space(t, now, *f))).collect()
     })
     .await
     .map_err(|e| e.to_string())

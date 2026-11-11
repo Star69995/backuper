@@ -694,6 +694,9 @@ export function installDevMock() {
         if (tasks.find((t) => t.id === a.id)?.cobianPending) return false;
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return true;
+      case "set_full_next":
+        states[a.id as string] = { ...states[a.id as string], fullNext: a.on as boolean };
+        return null;
       case "dismiss_paused":
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return null;
