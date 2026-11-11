@@ -40,13 +40,36 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
   const approx = p.totals === "estimate";
   const etaRaw = useEta(p);
   const eta = unknownTotal ? null : etaRaw.source;
-  // Several sources: the time left is for the whole task when the later ones have earlier runs to go
-  // by, else only for this folder, and then it says how many folders still follow.
   const multi = p.sourceCount > 1;
-  const total = eta === null ? null : etaRaw.total;
   const after = p.sourceCount - p.sourceIndex;
-  const afterText = after === 1 ? "ועוד תיקייה אחת אחריה" : `ועוד ${after} תיקיות אחריה`;
-  const folderText = `תיקייה ${p.sourceIndex} מתוך ${p.sourceCount}`;
+  // Several sources: the bar and the main numbers are for the whole task when the later folders have
+  // earlier runs to go by (their size comes from those), else the bar has one part per folder.
+  const later = after === 0 ? 0 : p.laterBytes;
+  const whole =
+    multi && pct !== null && later !== null && p.bytesTotal > 0
+      ? {
+          pct: Math.min(99, ((p.earlierBytes + p.bytesDone) / (p.earlierBytes + p.bytesTotal + later)) * 100),
+          eta: eta === null ? null : etaRaw.total,
+        }
+      : null;
+  const counts = scanning ? (
+    <span>
+      {p.phase === "deleting"
+        ? "מפנה מקום ביעד"
+        : p.phase === "pruning"
+          ? "הכללים שונו מאז ההעתקה הקודמת בתיקייה"
+          : "מחשב את כמות השינויים"}
+    </span>
+  ) : unknownTotal ? (
+    <span>
+      הועתקו {fmtNumber(p.filesDone)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi>
+    </span>
+  ) : (
+    <span>
+      {fmtNumber(p.filesDone)} מתוך {fmtNumber(p.filesTotal)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi> מתוך{" "}
+      <bdi dir="ltr">{fmtBytes(p.bytesTotal)}</bdi>
+    </span>
+  );
   const queuedNames = queue.map((j) => tasks.find((t) => t.id === j.taskId)?.name).filter(Boolean);
 
   return (
@@ -61,7 +84,6 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
               מגבה: {p.taskName} <span className="text-[13px] font-normal text-muted">({MODE_LABEL[p.mode]})</span>
             </div>
             <div className="text-[13px] text-muted">
-              {p.sourceCount > 1 && `תיקייה ${p.sourceIndex} מתוך ${p.sourceCount} - `}
               {phaseText} - {fmtDuration(p.startedAt)}
             </div>
           </div>
@@ -82,85 +104,93 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
         </div>
       </div>
       <div className="mt-4 flex flex-col gap-2">
-        {p.sourceCount > 1 && (
-          <div className="truncate text-xs">
-            <span className="text-muted">מקור: </span>
-            <PathText path={p.sourcePath} />
+        {multi ? (
+          <>
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-[13px]">
+              <span className="font-medium">
+                כל המשימה ({p.sourceCount} תיקיות):{" "}
+                {whole ? <bdi dir="ltr">~{Math.floor(whole.pct)}%</bdi> : `עכשיו תיקייה ${p.sourceIndex} מתוך ${p.sourceCount}`}
+              </span>
+              <span className="text-muted">
+                {whole?.eta != null ? (
+                  <>
+                    נותרו בערך {fmtRemaining(whole.eta)} לכל המשימה (<bdi dir="ltr">{fmtFinishAt(whole.eta)}</bdi>)
+                  </>
+                ) : after > 0 ? (
+                  "הזמן לכל המשימה עוד לא ידוע"
+                ) : null}
+              </span>
+            </div>
+            {whole ? <ProgressBar value={whole.pct} /> : <SourcesBar index={p.sourceIndex} count={p.sourceCount} pct={pct} />}
+            <div className="mt-1 flex flex-col gap-1 rounded-lg bg-hover/50 px-3 py-2 text-xs text-muted">
+              <div className="flex flex-wrap justify-between gap-x-4 gap-y-1">
+                <span className="truncate">
+                  <span className="font-medium text-fg">
+                    תיקייה {p.sourceIndex} מתוך {p.sourceCount}
+                    {pct !== null && (
+                      <>
+                        {": "}
+                        <bdi dir="ltr">
+                          {approx && "~"}
+                          {Math.floor(pct)}%
+                        </bdi>
+                      </>
+                    )}
+                  </span>{" "}
+                  - <PathText path={p.sourcePath} />
+                </span>
+                {eta !== null && !whole?.eta && (
+                  <span>
+                    {approx ? "נותרו בערך " : "נותרו כ-"}
+                    {fmtRemaining(eta)} לתיקייה הזו
+                    {after > 0 && (after === 1 ? ", ואחריה עוד תיקייה אחת" : `, ואחריה עוד ${after} תיקיות`)}
+                  </span>
+                )}
+              </div>
+              {counts}
+            </div>
+          </>
+        ) : (
+          <>
+            <ProgressBar value={pct} />
+            <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted">
+              {counts}
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span>
+                  {eta !== null && (
+                    <>
+                      {approx ? "נותרו בערך " : "נותרו כ-"}
+                      {fmtRemaining(eta)} (<bdi dir="ltr">{fmtFinishAt(eta)}</bdi>)
+                    </>
+                  )}
+                  {pct !== null && (
+                    <>
+                      {eta !== null && " - "}
+                      <bdi dir="ltr">
+                        {approx && "~"}
+                        {Math.floor(pct)}%
+                      </bdi>
+                    </>
+                  )}
+                </span>
+              </span>
+            </div>
+          </>
+        )}
+        {p.totalsScan && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+            {p.totals === "unknown" && <span>סורק את המקור בצד כדי לחשב כמה נשאר</span>}
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<SkipIcon size={13} />}
+              title="ההעתקה ממשיכה כרגיל, בלי אחוזים וזמן סיום משוער"
+              onClick={() => api.skipTotalsScan()}
+            >
+              דילוג על החישוב
+            </Button>
           </div>
         )}
-        <ProgressBar value={pct} />
-        <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted">
-          {scanning ? (
-            <span>
-              {p.phase === "deleting"
-                ? "מפנה מקום ביעד"
-                : p.phase === "pruning"
-                  ? "הכללים שונו מאז ההעתקה הקודמת בתיקייה"
-                  : "מחשב את כמות השינויים"}
-            </span>
-          ) : unknownTotal ? (
-            <span>
-              הועתקו {fmtNumber(p.filesDone)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi>
-            </span>
-          ) : (
-            <span>
-              {fmtNumber(p.filesDone)} מתוך {fmtNumber(p.filesTotal)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi> מתוך{" "}
-              <bdi dir="ltr">{fmtBytes(p.bytesTotal)}</bdi>
-            </span>
-          )}
-          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            {p.totalsScan && p.totals === "unknown" && <span>סורק את המקור בצד כדי לחשב כמה נשאר</span>}
-            <span>
-              {!multi ? (
-                eta !== null && (
-                  <>
-                    {approx ? "נותרו בערך " : "נותרו כ-"}
-                    {fmtRemaining(eta)} (<bdi dir="ltr">{fmtFinishAt(eta)}</bdi>)
-                  </>
-                )
-              ) : total !== null ? (
-                <>
-                  {/* The later folders come from their last runs: always an estimate. */}
-                  {after === 0 && !approx ? "נותרו כ-" : "נותרו בערך "}
-                  {fmtRemaining(total)} לכל המשימה (<bdi dir="ltr">{fmtFinishAt(total)}</bdi>)
-                </>
-              ) : eta !== null ? (
-                <>
-                  {approx ? "נותרו בערך " : "נותרו כ-"}
-                  {fmtRemaining(eta)} לתיקייה הזו, {afterText}
-                </>
-              ) : null}
-              {multi && (
-                <>
-                  {eta !== null && " - "}
-                  {folderText}
-                  {eta === null && after > 0 && `, ${afterText}`}
-                  {pct !== null && ": "}
-                </>
-              )}
-              {pct !== null && (
-                <>
-                  {eta !== null && !multi && " - "}
-                  <bdi dir="ltr">
-                    {approx && "~"}
-                    {Math.floor(pct)}%
-                  </bdi>
-                </>
-              )}
-            </span>
-            {p.totalsScan && (
-              <Button
-                size="sm"
-                variant="ghost"
-                icon={<SkipIcon size={13} />}
-                title="ההעתקה ממשיכה כרגיל, בלי אחוזים וזמן סיום משוער"
-                onClick={() => api.skipTotalsScan()}
-              >
-                דילוג על החישוב
-              </Button>
-            )}
-          </span>
-        </div>
         {p.currentFile && (
           <div dir="ltr" className="truncate text-xs text-muted">
             <PathText path={p.currentFile} />
@@ -174,5 +204,18 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
         {queuedNames.length > 0 && <div className="text-xs text-muted">ממתינים בתור: {queuedNames.join(", ")}</div>}
       </div>
     </section>
+  );
+}
+
+/** One part per folder: the finished ones full, the current one as far as it got (a moving stripe when unknown). */
+function SourcesBar({ index, count, pct }: { index: number; count: number; pct: number | null }) {
+  return (
+    <div className="flex gap-1" dir="rtl">
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className="flex-1">
+          <ProgressBar value={i + 1 < index ? 100 : i + 1 > index ? 0 : pct} />
+        </div>
+      ))}
+    </div>
   );
 }

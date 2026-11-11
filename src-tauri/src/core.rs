@@ -376,6 +376,7 @@ impl Core {
                 copy_started_at: None,
                 expected_rate,
                 later_bytes: later_bytes(0),
+                earlier_bytes: 0,
                 current_file: String::new(),
             };
             self.cancel.store(false, Ordering::SeqCst);
@@ -417,6 +418,8 @@ impl Core {
                             progress.source_index = i + 1;
                             progress.source_path = task.sources[i].path.clone();
                             progress.later_bytes = later_bytes(i);
+                            // The last file of the previous source counts only now.
+                            progress.earlier_bytes += done_before + pending_size;
                             progress.phase = "scanning".into();
                             (
                                 progress.files_done,
