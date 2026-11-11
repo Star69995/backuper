@@ -311,7 +311,7 @@ export function installDevMock() {
         : i === 1
           ? "הועתקו 12 קבצים חדשים או שהשתנו"
           : "אין שינויים מאז הגיבוי הקודם",
-    targetFolder: `E:\\Backups\\${folderName} 2026-10-01 03-00 ${i === 0 ? "מלא" : "אינקרמנטלי"}`,
+    targetFolder: `E:\\Backups\\${folderName} 2026-10-01 03h00 ${i === 0 ? "מלא" : "אינקרמנטלי"}`,
     filesCopied: i === 0 ? 120 : i === 1 ? 12 : 0,
     bytesCopied: i === 0 ? 480_000_000 : i === 1 ? 3_200_000 : 0,
     backupBytes: i === 0 ? 480_000_000 : i === 1 ? 3_200_000 : 0,
@@ -400,7 +400,7 @@ export function installDevMock() {
             ...sourceRun("Videos", "D:\\Videos", 0),
             status: "cancelled",
             message: "הגיבוי הושהה",
-            targetFolder: "E:\\Backups\\Videos 2026-11-11 09-00 מלא.partial",
+            targetFolder: "E:\\Backups\\Videos 2026-11-11 09h00 מלא.partial",
             filesCopied: files,
             bytesCopied: bytes,
             backupBytes: 0,
@@ -414,7 +414,7 @@ export function installDevMock() {
   const stamp = (at: string) => {
     const d = new Date(at);
     const p = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}`;
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}h${p(d.getMinutes())}`;
   };
   const backupsOf = (t: Task): SourceBackups[] =>
     t.sources.map((s) => ({
@@ -485,6 +485,8 @@ export function installDevMock() {
       totalsScan: false,
       copyStartedAt: new Date(mockCopyStart).toISOString(),
       expectedRate: 14_000_000,
+      laterBytes: 3_400_000_000,
+      earlierBytes: 1_250_000_000,
       currentFile: "C:\\Users\\User\\Pictures\\2025\\טיול צפון\\IMG_4821.jpg",
     },
   });
@@ -703,6 +705,9 @@ export function installDevMock() {
         if (tasks.find((t) => t.id === a.id)?.cobianPending) return false;
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return true;
+      case "set_full_next":
+        states[a.id as string] = { ...states[a.id as string], fullNext: a.on as boolean };
+        return null;
       case "dismiss_paused":
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return null;
