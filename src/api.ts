@@ -43,6 +43,8 @@ export const api = {
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
+  /** Makes the task's next automatic run a full backup (once), or takes that back. */
+  setFullNext: (id: string, on: boolean) => invoke<void>("set_full_next", { id, on }),
   /** Takes a paused backup off the paused list; `del` also deletes its partial folders. Rejects with a message if it can't. */
   dismissPaused: (id: string, del: boolean) => invoke<void>("dismiss_paused", { id, delete: del }),
   /** Gives up on the scan that works out how much a running full backup has to copy. */
@@ -95,6 +97,10 @@ export const api = {
   checkUpdates: () => invoke<boolean>("check_updates"),
   /** Downloads and installs it (the app restarts), right away or once the backups are done. */
   installUpdate: () => invoke<void>("install_update"),
+  /** What the window has open with unsaved changes (an update waits for them and asks). */
+  setUnsaved: (what: string[]) => invoke<void>("set_unsaved", { what }),
+  /** The update dialog was closed. */
+  dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;
@@ -117,7 +123,6 @@ export const api = {
     const r = await open({ directory: true, multiple: true, title });
     return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
   },
-  onShowUpdate: (cb: () => void) => listen("show-update", cb),
   onSnapshotChanged: (cb: () => void) => listen("snapshot-changed", cb),
   onProgress: (cb: (p: Progress) => void) => listen<Progress>("progress", (e) => cb(e.payload)),
 };

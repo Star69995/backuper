@@ -1,6 +1,7 @@
 import { AlertTriangle, ArrowLeft, CheckCircle2, Filter, Info, XCircle } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
+import { useUnsaved } from "../lib/unsaved";
 import { describeRetention, describeSchedule, KIND_LABEL, taskKind } from "../lib/format";
 import type { AdoptPlan, ImportPreview, ImportSplit, Task } from "../types";
 import { CobianListsDialog, planFolderCount, TakeoverSummary } from "./CobianDialogs";
@@ -170,6 +171,7 @@ function ImportTasksDialog({
 }) {
   const items = preview.tasks;
   const cobian = preview.source === "cobian";
+  useUnsaved("ייבוא משימות שעוד לא הסתיים");
   // Our own files carry each task's group, and so do Cobian's (TaskGroup). The other tasks (Cobian
   // without a group, a plain config) go into one group, named after the list file (Cobian's default
   // list, "MainList", means the general list).

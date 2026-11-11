@@ -121,7 +121,7 @@ pub enum KeepMode {
 #[serde(rename_all = "camelCase", default)]
 pub struct Source {
     pub path: String,
-    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03-00 מלא").
+    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03h00 מלא").
     pub folder_name: String,
 }
 
@@ -247,6 +247,9 @@ pub struct TaskState {
     pub resumable: bool,
     /// The newest backup that was written (a failed or stopped run doesn't replace it).
     pub last_backup: Option<LastBackup>,
+    /// The user asked for the next automatic run (scheduled, catch-up, drive connected) to be a
+    /// full backup instead of the task's own mode. Cleared once a full backup completes.
+    pub full_next: bool,
 }
 
 /// Size of a task's newest backup, shown in the task list.
@@ -413,8 +416,11 @@ pub struct Settings {
     pub global_filters: Vec<FilterRule>,
     /// Folder that always holds a copy of the task list (e.g. on the backup drive). Empty = off.
     pub task_list_copy_dir: String,
-    /// "auto" (download, install when idle and in the tray) | "notify" | "off".
+    /// "auto" (download, install when the app isn't in use) | "notify" | "off".
     pub update_mode: String,
+    /// "auto" also installs while the window is open once nobody has touched the computer for
+    /// this many minutes. 0 = only while the window is closed to the tray or minimized.
+    pub update_idle_minutes: u32,
     /// Before a full copy, walk the whole tree once just to get exact progress totals. Off: the
     /// copy starts at once and a scan of the source beside it finds the totals (see `backup::full_totals`).
     pub exact_progress: bool,
@@ -475,6 +481,7 @@ impl Default for Settings {
             global_filters: Vec::new(),
             task_list_copy_dir: String::new(),
             update_mode: "auto".into(),
+            update_idle_minutes: 2,
             exact_progress: false,
             background_totals: true,
         }
@@ -498,6 +505,9 @@ pub struct UpdateStatus {
     pub error: Option<String>,
     /// The user asked to install; it waits for the running/queued backups to finish.
     pub install_waiting: bool,
+    /// The window should show the update dialog: the "new version" notification was clicked,
+    /// or the window was opened after it was shown. Cleared by `dismiss_update_prompt`.
+    pub prompt: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -527,6 +537,11 @@ pub struct Progress {
     pub copy_started_at: Option<DateTime<Local>>,
     /// Bytes per second of this task's last real copy, for an estimate before this run has a speed.
     pub expected_rate: Option<u64>,
+    /// Bytes the sources after the current one are expected to copy, from their last runs
+    /// (None = one of them has no earlier run to go by; 0 = this is the last source).
+    pub later_bytes: Option<u64>,
+    /// Bytes the sources before the current one copied in this run.
+    pub earlier_bytes: u64,
     pub current_file: String,
 }
 

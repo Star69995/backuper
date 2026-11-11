@@ -12,15 +12,16 @@ Backups are **plain files and folders**: no private format, no compression, no e
 A task has **one or more source folders**, one destination folder and a schedule. All sources of a task run together and their backup folders share the same date. Each source has its own chain of dated folders in the destination, named after the source folder (editable):
 
 ```
-E:\Backups\Documents 2026-10-01 03-00 מלא            <- full: identical to the source
-E:\Backups\Documents 2026-10-02 03-00 אינקרמנטלי     <- only files new/changed since the previous backup
-E:\Backups\Pictures  2026-10-01 03-00 מלא
+E:\Backups\Documents 2026-10-01 03h00 מלא            <- full: identical to the source
+E:\Backups\Documents 2026-10-02 03h00 אינקרמנטלי     <- only files new/changed since the previous backup
+E:\Backups\Pictures  2026-10-01 03h00 מלא
 ```
 
 - **Full**: a new dated folder identical to the source (files deleted from the source don't show up).
   - *Fast full* (optional, keepCount = 1): renames the previous full folder to the new date and mirrors into it, so only the differences get copied.
 - **Incremental**: every run creates a **new** dated folder holding only the files that are new or changed since the previous backup (compared against the full backup plus the incrementals after it, by size and modified time). The app scans the source itself (one directory read per folder, no file is opened) with the same filter semantics as robocopy, and reads what is already backed up from a hidden `.backuper-index` file in each completed backup folder instead of walking the destination drive (a folder without one, e.g. from an older version, is walked once and gets one). Measured on 200,000 files (1% changed), source and backups on two hard disks: change detection went from ~32s to ~0.8s, the whole incremental from ~34s to ~3.3s. Files deleted by hand from a backup folder still count as backed up until the next full. If nothing changed, the folder stays empty, so Explorer still shows the backup ran. The first backup is always full.
 - **Combined**: full backups on their own schedule (e.g. weekly on Friday) and incrementals on another (e.g. daily). When both are due at once, only the full runs. Each full starts a new chain.
+- **Full on the next run**: the task menu of an incremental or combined task has "גיבוי מלא בהרצה המתוזמנת הבאה": the next automatic run (scheduled, catch-up, drive connected) makes a full backup instead of an incremental, once (`TaskState.fullNext`, cleared when a full backup completes; a manual run is unaffected). The next-run cell shows "(מלא)" meanwhile, and the free-space warning counts on a full.
 - **Retention** (`keepMode`): a full backup plus the incrementals after it is a chain. Three modes:
   - *by count* (default) - when a full backup completes, chains beyond `keepCount` (default 1) are deleted.
   - *by time* - keeps whatever is needed to restore any moment of the last `keepDays` days: a chain is deleted only once the next full is also older than that. Checked after every backup, full or incremental.

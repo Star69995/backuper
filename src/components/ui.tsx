@@ -1,4 +1,4 @@
-import { type LucideProps, Play, Search, SkipForward, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, type LucideProps, Play, Search, SkipForward, X } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -507,17 +507,25 @@ export function Modal({
 }
 
 export type MenuItem =
-  { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean } | "separator";
+  | { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }
+  /** Opens a list of its own in the same menu (with a way back), so a long list doesn't crowd the main one. */
+  | { label: string; icon?: ReactNode; items: MenuItem[]; disabled?: boolean }
+  | "separator";
 
 /**
  * Dropdown menu rendered in a portal (so tables with overflow don't clip it).
  * `fill`: the trigger spans its container and the menu is at least as wide (a form field that picks from a list).
+ * An item with `items` swaps the menu's content for that list, with a "חזרה" row on top.
  */
 export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => ReactNode; items: MenuItem[]; fill?: boolean }) {
   const anchor = useRef<HTMLSpanElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const close = () => setPos(null);
+  const [sub, setSub] = useState<{ label: string; items: MenuItem[] } | null>(null);
+  const close = () => {
+    setPos(null);
+    setSub(null);
+  };
 
   const openMenu = () => {
     const r = anchor.current!.getBoundingClientRect();
@@ -532,7 +540,7 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
     if (top + m.height > window.innerHeight - 8) top = Math.max(8, a.top - m.height - 4);
     if (left + m.width > window.innerWidth - 8) left = Math.max(8, a.right - m.width);
     if (top !== pos.top || left !== pos.left) setPos({ top, left });
-  }, [pos]);
+  }, [pos, sub]);
 
   useEffect(() => {
     if (!pos) return;
@@ -565,26 +573,46 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
             className="fixed z-50 max-h-[min(32rem,calc(100vh-16px))] min-w-48 overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl"
             style={{ top: pos.top, left: pos.left, ...(fill && { minWidth: anchor.current?.offsetWidth }) }}
           >
-            {items.map((it, i) =>
+            {sub && (
+              <>
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => setSub(null)}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-start text-[13px] text-muted hover:bg-hover"
+                >
+                  <span className="flex size-4 items-center justify-center opacity-80">
+                    <ChevronRight size={14} />
+                  </span>
+                  חזרה
+                </button>
+                <div className="px-2.5 pb-1 pt-0.5 text-xs font-semibold text-muted">{sub.label}</div>
+                <div className="my-1 h-px bg-line" />
+              </>
+            )}
+            {(sub ? sub.items : items).map((it, i) =>
               it === "separator" ? (
                 <div key={i} className="my-1 h-px bg-line" />
               ) : (
                 <button
-                  key={i}
+                  key={`${sub ? "s" : "m"}${i}`}
                   role="menuitem"
                   type="button"
                   disabled={it.disabled}
+                  aria-haspopup={"items" in it ? "menu" : undefined}
                   onClick={() => {
+                    if ("items" in it) return setSub({ label: it.label, items: it.items });
                     close();
                     it.onClick();
                   }}
                   className={cx(
                     "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-start text-[13px] disabled:opacity-40",
-                    it.danger ? "text-bad hover:bg-bad-soft" : "hover:bg-hover",
+                    "danger" in it && it.danger ? "text-bad hover:bg-bad-soft" : "hover:bg-hover",
                   )}
                 >
                   <span className="flex size-4 items-center justify-center opacity-80">{it.icon}</span>
-                  {it.label}
+                  <span className="flex-1">{it.label}</span>
+                  {"items" in it && <ChevronLeft size={14} className="opacity-60" />}
                 </button>
               ),
             )}
@@ -607,7 +635,7 @@ export function EmptyState({ icon, title, children }: { icon: ReactNode; title: 
 
 /**
  * Paths are LTR content inside the RTL layout. Each segment is isolated so a Hebrew
- * folder name with a date ("מסמכים 2026-09-01 03-00") keeps its own order.
+ * folder name with a date ("מסמכים 2026-09-01 03h00") keeps its own order.
  */
 export function PathText({ path, className, title = path }: { path: string; className?: string; title?: string }) {
   const parts = path.split(/(\\)/);

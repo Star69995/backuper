@@ -135,6 +135,8 @@ export interface TaskState {
   resumable?: boolean;
   /** The newest backup that was written (a failed or stopped run doesn't replace it). */
   lastBackup?: LastBackup | null;
+  /** The next automatic run (scheduled, catch-up, drive connected) is a full backup, once. */
+  fullNext?: boolean;
 }
 
 /** Size of a task's newest backup (all its sources). Full if any source made a full one. */
@@ -180,6 +182,10 @@ export interface Progress {
   copyStartedAt: string | null;
   /** Bytes per second of the task's last real copy. */
   expectedRate: number | null;
+  /** Bytes the sources after the current one are expected to copy, from their last runs (null = unknown, 0 = last source). */
+  laterBytes: number | null;
+  /** Bytes the sources before the current one copied in this run. */
+  earlierBytes: number;
   currentFile: string;
 }
 
@@ -205,6 +211,8 @@ export interface Settings {
   globalFilters: FilterRule[];
   /** auto = download and install by itself (from the tray, between backups); notify = only say so. */
   updateMode: "auto" | "notify" | "off";
+  /** "auto" also installs with the window open after this many idle minutes (0 = only when closed/minimized). */
+  updateIdleMinutes: number;
   /** Walk the whole tree once before a full copy, just for an exact percentage (slow on big drives). */
   exactProgress: boolean;
   backgroundTotals: boolean;
@@ -223,6 +231,8 @@ export interface UpdateStatus {
   error: string | null;
   /** The user asked to install; it waits for the running/queued backups to finish. */
   installWaiting: boolean;
+  /** Show the update dialog: the "new version" notification was clicked (or the window opened after it). */
+  prompt: boolean;
 }
 
 export interface Snapshot {

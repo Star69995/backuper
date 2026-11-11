@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, errorText } from "../api";
+import { useUnsaved } from "../lib/unsaved";
 import {
   DRIVE_ACTION_LABEL,
   defaultFolderName,
@@ -323,6 +324,7 @@ export default function TaskEditor({
   const kind = taskKind(t);
   const keepsOne = t.keepMode === "count" && t.keepCount === 1;
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
+  useUnsaved(dirty ? (isNew ? "משימה חדשה" : `עריכת המשימה "${task.name}"`) : null);
   // Existing backups are found by destination + folder name; changing either orphans them.
   const locationChanged =
     !isNew &&

@@ -209,6 +209,12 @@ pub fn cancel_task(core: CoreState, id: String, discard: bool) {
     core.cancel(&id, discard);
 }
 
+/// Makes the task's next automatic run a full backup (once), or takes that back.
+#[tauri::command]
+pub fn set_full_next(core: CoreState, id: String, on: bool) {
+    core.set_full_next(&id, on);
+}
+
 /// Removes a paused backup from the paused list (`delete`: its partial folders go too).
 #[tauri::command]
 pub fn dismiss_paused(core: CoreState, id: String, delete: bool) -> Result<(), String> {
@@ -354,13 +360,19 @@ pub async fn disk_space(paths: Vec<String>) -> Result<Vec<Option<DiskSpace>>, St
 /// `backup::full_space` for each task id, in the same order (None = no full backup expected).
 #[tauri::command]
 pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Vec<Option<FullSpace>>, String> {
-    let tasks: Vec<Option<Task>> = {
+    let tasks: Vec<Option<(Task, bool)>> = {
         let store = core.store.lock().unwrap();
-        task_ids.iter().map(|id| store.task(id).cloned()).collect()
+        task_ids
+            .iter()
+            .map(|id| {
+                let full_next = store.states.get(id).is_some_and(|st| st.full_next);
+                store.task(id).cloned().map(|t| (t, full_next))
+            })
+            .collect()
     };
     tauri::async_runtime::spawn_blocking(move || {
         let now = chrono::Local::now();
-        tasks.iter().map(|t| t.as_ref().and_then(|t| backup::full_space(t, now))).collect()
+        tasks.iter().map(|t| t.as_ref().and_then(|(t, f)| backup::full_space(t, now, *f))).collect()
     })
     .await
     .map_err(|e| e.to_string())
@@ -624,6 +636,18 @@ pub async fn check_updates(updates: UpdatesState<'_>) -> Result<bool, String> {
 #[tauri::command]
 pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
     updates.install_now().await
+}
+
+/// What the window has open with unsaved changes (an automatic install waits for them).
+#[tauri::command]
+pub fn set_unsaved(updates: UpdatesState, what: Vec<String>) {
+    updates.inner().set_unsaved(what);
+}
+
+/// The update dialog was closed (the notification's request is answered).
+#[tauri::command]
+pub fn dismiss_update_prompt(updates: UpdatesState) {
+    updates.dismiss_prompt();
 }
 
 #[derive(Serialize)]

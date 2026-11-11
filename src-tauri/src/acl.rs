@@ -205,10 +205,10 @@ pub fn grant_own_tree(dir: &Path) -> io::Result<()> {
     reset_tree(dir, false)
 }
 
-/// Whether a folder name is one of ours: "<name> 2026-10-01 03-00[-15][ מלא| אינקרמנטלי][.partial]".
+/// Whether a folder name is one of ours: "<name> 2026-10-01 03h00[m15s][ מלא| אינקרמנטלי][.partial]" (or the older "03-00[-15]").
 /// The admin copy deletes only such folders, whatever it is handed.
 pub fn is_backup_folder_name(name: &str) -> bool {
-    let re = regex::Regex::new(r"^.+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}(-\d{2})?( (מלא|אינקרמנטלי))?(\.partial)?$").unwrap();
+    let re = regex::Regex::new(r"^.+ \d{4}-\d{2}-\d{2} \d{2}(-\d{2}(-\d{2})?|h\d{2}(m\d{2}s)?)( (מלא|אינקרמנטלי))?(\.partial)?$").unwrap();
     re.is_match(name)
 }
 
