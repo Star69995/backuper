@@ -1,4 +1,4 @@
-import { Check, CircleAlert, Copy, EyeOff, File, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
+import { ArrowUp, Check, CircleAlert, Copy, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
@@ -7,7 +7,7 @@ import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, 
 import { useFeedback } from "./feedback";
 import { useResumeTask } from "./resumeTask";
 import { statusBadge } from "./TasksView";
-import { Badge, Button, cx, EmptyState, Modal, PathText, RunIcon, Select, Spinner, TextInput } from "./ui";
+import { Badge, Button, cx, EmptyState, IconButton, Modal, PathText, RunIcon, Select, Spinner, TextInput } from "./ui";
 
 export default function HistoryView({ snap }: { snap: Snapshot }) {
   const { toast, confirm } = useFeedback();
@@ -353,6 +353,12 @@ function SourceCard({
           <PathText path={src.targetFolder} className="min-w-0 truncate" />
         </div>
       )}
+      {src.errors.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <span className="text-[13px] font-semibold">קבצים שלא הועתקו</span>
+          <CopyErrorsButton text={() => errorsText(run, src)} />
+        </div>
+      )}
       {groupFileErrors(src.errors).map((g) => (
         <ErrorGroup
           key={g.kind.id}
@@ -383,7 +389,6 @@ function SourceCard({
             יומן מפורט
           </Button>
         )}
-        {src.errors.length > 0 && <CopyErrorsButton text={() => errorsText(run, src)} />}
       </div>
     </section>
   );
@@ -440,7 +445,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
     }
   };
   const askSkip = (path: string, source: string, all: string[]) => {
-    if (skipLevels(path, source).length) setSkipAsk({ path, source, all });
+    if (canSkipPath(path, source)) setSkipAsk({ path, source, all });
   };
   const skipper: Skipper | null = task && { isSkipped: (p) => isSkipped(task, p), skip: askSkip };
 
@@ -599,38 +604,34 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
   );
 }
 
-interface SkipLevel {
-  rule: FilterRule;
-  /** The full path the rule leaves out. */
-  path: string;
+/** Why a folder can't be skipped for this source, or null when it can (under the source, not the source or a drive). */
+function folderProblem(folder: string, source: string): string | null {
+  const f = norm(folder);
+  const src = norm(source);
+  if (!f) return "יש לכתוב נתיב של תיקייה";
+  if (!/^[a-z]:\\|^\\\\/i.test(folder.trim())) return "יש לכתוב נתיב מלא, למשל C:\\תיקייה";
+  if (f === src) return "זו תיקיית המקור עצמה - דילוג עליה לא ישאיר מה לגבות";
+  if (!f.startsWith(src + "\\")) return "התיקייה צריכה להיות בתוך תיקיית המקור של המשימה";
+  return null;
+}
+
+/** The failed path without a trailing backslash, whether it is a folder, and the folder offered by default. */
+function skipTarget(path: string) {
+  const dir = path.endsWith("\\");
+  const clean = path.replace(/\\+$/, "");
+  return { dir, clean, folder: dir ? clean : clean.slice(0, clean.lastIndexOf("\\")) };
+}
+
+/** Whether there is anything to skip for this failed path: the file itself, or its folder. */
+function canSkipPath(path: string, source: string) {
+  const { dir, folder } = skipTarget(path);
+  return !dir || folderProblem(folder, source) === null;
 }
 
 /**
- * What "skip this next time" can leave out for a failed path: the file itself, then each folder above it up to (not
- * including) the task's source folder - skipping the source or the drive would leave nothing to back up. A path outside
- * the source (shouldn't happen) gets only its own folder, as before.
+ * Picks what to skip in the next runs: just the failed file, or a folder - its own by default, editable so a higher
+ * folder (or any folder in the source) can be given instead.
  */
-function skipLevels(path: string, source: string): SkipLevel[] {
-  const dir = path.endsWith("\\");
-  const clean = path.replace(/\\+$/, "");
-  const levels: SkipLevel[] = [];
-  if (!dir) levels.push({ rule: { kind: "file", value: clean }, path: clean });
-  const src = norm(source);
-  const under = (p: string) => norm(p).startsWith(src + "\\");
-  const ok = (p: string) => /\\./.test(p) && !/^[a-z]:$/i.test(p) && norm(p) !== src;
-  let folder = dir ? clean : clean.slice(0, clean.lastIndexOf("\\"));
-  if (!under(clean)) {
-    if (folder && ok(folder)) levels.push({ rule: { kind: "folder", value: folder }, path: folder });
-    return levels;
-  }
-  while (folder && under(folder) && ok(folder)) {
-    levels.push({ rule: { kind: "folder", value: folder }, path: folder });
-    folder = folder.slice(0, folder.lastIndexOf("\\"));
-  }
-  return levels;
-}
-
-/** Picks what to skip in the next runs: the failed file, or one of the folders above it, with what each one covers. */
 function SkipDialog({
   taskName,
   path,
@@ -646,22 +647,44 @@ function SkipDialog({
   onSkip: (rule: FilterRule) => void;
   onClose: () => void;
 }) {
-  const levels = useMemo(() => skipLevels(path, source), [path, source]);
-  const [pick, setPick] = useState(0);
-  // How many of this source's failed paths each level would leave out (a folder covers everything under it).
-  const covers = (l: SkipLevel) => {
-    if (l.rule.kind === "file") return 1;
-    const p = norm(l.path);
-    return all.filter((a) => norm(a) === p || norm(a).startsWith(p + "\\")).length;
+  const { dir, clean, folder: ownFolder } = skipTarget(path);
+  const [kind, setKind] = useState<"file" | "folder">(dir ? "folder" : "file");
+  const [folder, setFolder] = useState(ownFolder);
+  const value = folder.trim().replace(/\\+$/, "");
+  const problem = kind === "folder" ? folderProblem(value, source) : null;
+  const f = norm(value);
+  const covers = all.filter((a) => norm(a) === f || norm(a).startsWith(f + "\\")).length;
+  const coversFailed = norm(clean) === f || norm(clean).startsWith(f + "\\");
+  const up = value.slice(0, value.lastIndexOf("\\"));
+  const canGoUp = value.includes("\\") && folderProblem(up, source) === null;
+
+  const option = (k: "file" | "folder", label: string, body: ReactNode) => {
+    const on = kind === k;
+    return (
+      <div
+        role="radio"
+        aria-checked={on}
+        tabIndex={0}
+        onClick={() => setKind(k)}
+        onKeyDown={(e) => (e.key === " " || e.key === "Enter") && e.target === e.currentTarget && setKind(k)}
+        className={cx(
+          "flex min-w-0 cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2",
+          on ? "border-accent bg-accent-soft" : "border-line hover:bg-hover",
+        )}
+      >
+        <span
+          className={cx("mt-1 flex size-4 shrink-0 items-center justify-center rounded-full border", on ? "border-accent" : "border-line")}
+        >
+          {on && <span className="size-2 rounded-full bg-accent" />}
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="font-medium">{label}</span>
+          {body}
+        </span>
+      </div>
+    );
   };
-  const chosen = levels[pick];
-  const firstFolder = levels.findIndex((l) => l.rule.kind === "folder");
-  if (!chosen) return null;
-  const sourceName = (p: string) => {
-    // Show each folder relative to the source, so the levels are easy to tell apart; the full path is below.
-    if (!norm(p).startsWith(norm(source) + "\\")) return p;
-    return p.slice(source.replace(/\\+$/, "").length).replace(/^\\+/, "") || p;
-  };
+
   return (
     <Modal
       size="md"
@@ -674,8 +697,13 @@ function SkipDialog({
       onClose={onClose}
       footer={
         <>
-          <Button variant="primary" icon={<EyeOff size={15} />} onClick={() => onSkip(chosen.rule)}>
-            {chosen.rule.kind === "file" ? "דלג על הקובץ" : "דלג על התיקייה"}
+          <Button
+            variant="primary"
+            icon={<EyeOff size={15} />}
+            disabled={problem !== null}
+            onClick={() => onSkip(kind === "file" ? { kind: "file", value: clean } : { kind: "folder", value })}
+          >
+            {kind === "file" ? "דלג על הקובץ" : "דלג על התיקייה"}
           </Button>
           <Button variant="ghost" onClick={onClose}>
             ביטול
@@ -684,62 +712,42 @@ function SkipDialog({
       }
     >
       <div className="flex flex-col gap-3 text-sm leading-relaxed">
-        <p>
-          {levels.length > 1
-            ? "בחרו על מה לדלג: הקובץ עצמו, או תיקייה שמעליו (התיקייה וכל מה שבתוכה לא יגובו יותר):"
-            : "זה לא יגובה יותר, והשגיאה לא תחזור:"}
-        </p>
-        <div role="radiogroup" className="flex flex-col gap-1.5">
-          {levels.map((l, i) => {
-            const n = covers(l);
-            const on = i === pick;
-            return (
-              <button
-                key={l.path}
-                type="button"
-                role="radio"
-                aria-checked={on}
-                onClick={() => setPick(i)}
-                className={cx(
-                  "flex min-w-0 items-start gap-2.5 rounded-lg border px-3 py-2 text-start",
-                  on ? "border-accent bg-accent-soft" : "border-line hover:bg-hover",
-                )}
-              >
-                <span
-                  className={cx(
-                    "mt-1 flex size-4 shrink-0 items-center justify-center rounded-full border",
-                    on ? "border-accent" : "border-line",
-                  )}
+        <div role="radiogroup" className="flex flex-col gap-2">
+          {!dir && option("file", "רק הקובץ", <PathText path={clean} className="block font-mono text-xs break-all" />)}
+          {option(
+            "folder",
+            dir ? "התיקייה, עם כל מה שבתוכה" : "תיקייה שלמה, עם כל מה שבתוכה",
+            <>
+              <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                <TextInput
+                  dir="ltr"
+                  value={folder}
+                  onChange={(e) => setFolder(e.target.value)}
+                  onFocus={() => setKind("folder")}
+                  className="min-w-0 flex-1 font-mono"
+                  aria-label="נתיב התיקייה"
+                />
+                <IconButton
+                  label="תיקייה אחת למעלה"
+                  disabled={!canGoUp}
+                  onClick={() => {
+                    setKind("folder");
+                    setFolder(up);
+                  }}
                 >
-                  {on && <span className="size-2 rounded-full bg-accent" />}
-                </span>
-                {l.rule.kind === "file" ? (
-                  <File size={16} className="mt-0.5 shrink-0 text-muted" />
+                  <ArrowUp size={16} />
+                </IconButton>
+              </div>
+              {kind === "folder" &&
+                (problem ? (
+                  <span className="text-xs text-bad">{problem}</span>
+                ) : !coversFailed ? (
+                  <span className="text-xs text-warn">התיקייה הזו לא כוללת את {dir ? "התיקייה" : "הקובץ"} שנכשל, אז השגיאה עלולה לחזור</span>
                 ) : (
-                  <Folder size={16} className="mt-0.5 shrink-0 text-accent" />
-                )}
-                <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="font-medium">
-                    {l.rule.kind === "file"
-                      ? "רק הקובץ"
-                      : i === firstFolder
-                        ? path.endsWith("\\")
-                          ? "התיקייה עצמה"
-                          : "התיקייה שלו"
-                        : "תיקייה מעל"}
-                  </span>
-                  <PathText path={sourceName(l.path)} className="block font-mono text-xs break-all" />
-                  {l.rule.kind === "folder" && n > 1 && (
-                    <span className="text-xs text-muted">כולל {fmtNumber(n)} מהקבצים שנכשלו בריצה הזו</span>
-                  )}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <div className="flex flex-col gap-1 rounded-lg bg-panel2 px-3 py-2">
-          <span className="text-xs text-muted">{chosen.rule.kind === "file" ? "הקובץ שידולג:" : "התיקייה שתדולג, עם כל מה שבתוכה:"}</span>
-          <PathText path={chosen.path} className="block font-mono text-xs break-all" />
+                  covers > 1 && <span className="text-xs text-muted">כולל {fmtNumber(covers)} מהקבצים שנכשלו בריצה הזו</span>
+                ))}
+            </>,
+          )}
         </div>
         <p className="text-muted">אפשר לבטל את זה בכל זמן בהגדרות המשימה, בחלק "סינון".</p>
       </div>
