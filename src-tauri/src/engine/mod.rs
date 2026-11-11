@@ -9,6 +9,14 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 
+/// Win32 "disk full" codes (ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL). Every further file would fail
+/// the same way, so engines stop at the first one instead of working through the whole tree.
+pub fn is_disk_full(code: Option<u32>) -> bool {
+    matches!(code, Some(39 | 112))
+}
+
+pub const DISK_FULL_MESSAGE: &str = "אין מספיק מקום פנוי בכונן היעד, והגיבוי נעצר. פנו מקום בכונן (או הקטינו את מספר הגיבויים שנשמרים) והמשיכו את הגיבוי מאותה נקודה.";
+
 /// Make `target` identical to `source` (a full backup).
 pub struct CopyJob {
     pub source: PathBuf,

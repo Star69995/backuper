@@ -1,9 +1,12 @@
 //! robocopy-backed engine. Progress is read by tailing robocopy's UTF-16 log (/UNILOG),
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
-use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS};
+use super::{
+    is_disk_full, CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS,
+    DISK_FULL_MESSAGE,
+};
 use crate::model::FileError;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -153,15 +156,23 @@ impl LogTail {
     }
 }
 
-/// Runs robocopy to completion. Ok(None) = cancelled. `on_tick` runs every poll (~150 ms), also
-/// while robocopy writes nothing (e.g. in the middle of one huge file).
+enum Exit {
+    Code(i32),
+    Cancelled,
+    /// `abort` said stop (the destination is full): robocopy was killed.
+    Aborted,
+}
+
+/// Runs robocopy to completion. `on_tick` runs every poll (~150 ms), also while robocopy writes
+/// nothing (e.g. in the middle of one huge file). `abort` is checked after each poll.
 fn run_process(
     args: &[OsString],
     log: &Path,
     cancel: &AtomicBool,
+    abort: &dyn Fn() -> bool,
     on_line: &mut dyn FnMut(&str),
     on_tick: &mut dyn FnMut(),
-) -> Result<Option<i32>, String> {
+) -> Result<Exit, String> {
     let _ = std::fs::remove_file(log);
     let mut child = Command::new("robocopy")
         .args(args)
@@ -179,13 +190,19 @@ fn run_process(
             let _ = child.kill();
             let _ = child.wait();
             tail.finish(on_line);
-            return Ok(None);
+            return Ok(Exit::Cancelled);
+        }
+        if abort() {
+            let _ = child.kill();
+            let _ = child.wait();
+            tail.finish(on_line);
+            return Ok(Exit::Aborted);
         }
         match child.try_wait() {
             Ok(Some(status)) => {
                 tail.finish(on_line);
                 on_tick();
-                return Ok(status.code());
+                return Ok(Exit::Code(status.code().unwrap_or(-1)));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(150)),
             Err(e) => return Err(e.to_string()),
@@ -301,10 +318,11 @@ impl CopyEngine for Robocopy {
                     &build_args(&mirror_args(job, true), &scan_log),
                     &scan_log,
                     cancel,
+                    &|| false,
                     &mut |l| scan.feed(l),
                     &mut || {},
                 ) {
-                    Ok(None) => {
+                    Ok(Exit::Cancelled) => {
                         let _ = std::fs::remove_file(&scan_log);
                         return CopyResult {
                             outcome: Outcome::Cancelled,
@@ -313,7 +331,7 @@ impl CopyEngine for Robocopy {
                         };
                     }
                     Err(e) => return fail(e),
-                    Ok(Some(_)) => {}
+                    Ok(_) => {}
                 }
                 let _ = std::fs::remove_file(&scan_log);
                 if let (Some(f), Some(b)) = (scan.files(), scan.bytes()) {
@@ -345,13 +363,20 @@ impl CopyEngine for Robocopy {
         // robocopy logs a file's line again on every retry (/R), so a file that keeps failing (a
         // locked pagefile.sys on a system drive) would be counted up to three times.
         let mut last_file = String::new();
+        // A full destination fails every further file too (after robocopy's retries, for each one),
+        // so the first such error ends the run.
+        let disk_full = Cell::new(false);
         let code = run_process(
             &build_args(&mirror_args(job, false), &job.log_file),
             &job.log_file,
             cancel,
+            &|| disk_full.get(),
             &mut |l| {
                 summary.feed(l);
                 if is_error_line(l) {
+                    if is_disk_full(parse_error(l, "").code) {
+                        disk_full.set(true);
+                    }
                     last_error = Some(l.to_string());
                     return;
                 }
@@ -385,16 +410,31 @@ impl CopyEngine for Robocopy {
             },
         );
 
+        // The reason line may not have been written before robocopy was killed.
+        if let Some(err) = last_error.take() {
+            let entry = parse_error(&err, "");
+            if stats.errors.len() < MAX_ERRORS && !stats.errors.contains(&entry) {
+                stats.errors.push(entry);
+            }
+        }
         let code = match code {
             Err(e) => return fail(e),
-            Ok(None) => {
+            Ok(Exit::Cancelled) => {
                 return CopyResult {
                     outcome: Outcome::Cancelled,
                     message: "הגיבוי בוטל על ידי המשתמש".into(),
                     stats,
                 }
             }
-            Ok(Some(c)) => c,
+            Ok(Exit::Aborted) => {
+                stats.files_failed = stats.errors.len() as u64;
+                return CopyResult {
+                    outcome: Outcome::Failed,
+                    message: DISK_FULL_MESSAGE.into(),
+                    stats,
+                };
+            }
+            Ok(Exit::Code(c)) => c,
         };
         stats.exit_code = Some(code);
         let mut files_total = 0;
@@ -411,6 +451,8 @@ impl CopyEngine for Robocopy {
         // robocopy exit codes are bit flags: 1 copied, 2 extras, 4 mismatch, 8 failures, 16 fatal.
         let (outcome, message) = if code >= 16 {
             (Outcome::Failed, "שגיאה חמורה - המקור או היעד לא נגישים. ודאו ששני הכוננים מחוברים ושיש הרשאה אליהם, והריצו שוב. פרטים ביומן המפורט.".to_string())
+        } else if code >= 8 && stats.errors.iter().any(|e| is_disk_full(e.code)) {
+            (Outcome::Failed, DISK_FULL_MESSAGE.to_string())
         } else if code >= 8 && !mostly_copied(&stats, files_total) {
             (Outcome::Failed, format!("{} קבצים לא הועתקו", stats.files_failed.max(1)))
         } else if code >= 8 {

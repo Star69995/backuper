@@ -2,7 +2,7 @@
 //! filters robocopy does) and `copy_files` copies an explicit list of files (the changes).
 //! std::fs::copy uses CopyFileExW on Windows, so attributes and the modified time are preserved.
 
-use super::{CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome, ALWAYS_EXCLUDED_DIRS};
+use super::{is_disk_full, CopyResult, CopyStats, EngineEvent, Filters, ListedFile, Outcome, ALWAYS_EXCLUDED_DIRS, DISK_FULL_MESSAGE};
 use crate::model::FileError;
 use regex::{Regex, RegexBuilder};
 use std::collections::{BTreeSet, HashSet};
@@ -568,9 +568,10 @@ pub fn copy_files(
             }
             fs::copy(&from, &to)
         };
-        // One retry: files are often locked only for a moment. A file that's gone stays gone.
+        // One retry: files are often locked only for a moment. A file that's gone stays gone, and a
+        // full disk doesn't free up by waiting.
         let result = copy().or_else(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            if e.kind() == std::io::ErrorKind::NotFound || is_disk_full(e.raw_os_error().map(|c| c as u32)) {
                 return Err(e);
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -591,6 +592,18 @@ pub fn copy_files(
                         code: e.raw_os_error().map(|c| c as u32),
                         message: e.to_string(),
                     });
+                }
+                // Every further file would fail too: stop here. The cut-off file is removed so the
+                // resume doesn't take a truncated copy for a finished one.
+                if is_disk_full(e.raw_os_error().map(|c| c as u32)) {
+                    let _ = fs::remove_file(&to);
+                    log.push(DISK_FULL_MESSAGE.into());
+                    write_log(log_file, &log);
+                    return CopyResult {
+                        outcome: Outcome::Failed,
+                        message: DISK_FULL_MESSAGE.into(),
+                        stats,
+                    };
                 }
             }
         }
