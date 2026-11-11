@@ -3,6 +3,11 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   AdoptPlan,
+  BackupFolder,
+  FilterCheck,
+  FilterProbe,
+  FilterRule,
+  RuleResult,
   ImportedTask,
   ImportPreview,
   ImportSplit,
@@ -20,7 +25,111 @@ import type {
 import { newTask } from "../types";
 
 const mockCopyStart = Date.now() - 60_000;
+
+/** Rough stand-in for filtercheck.rs (the real one uses the engine's matching and reads the disk). */
+function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: string[], probe: FilterProbe): FilterCheck {
+  const empty = (): RuleResult => ({ effect: "none", detail: null });
+  const out: FilterCheck = {
+    kept: null,
+    folder: false,
+    reason: null,
+    onDisk: null,
+    notes: [],
+    rules: rules.map(empty),
+    globalRules: global.map(empty),
+  };
+  let path = probe.path.trim().replace(/\//g, "\\");
+  if (!path) return out;
+  out.folder = path.endsWith("\\");
+  path = path.replace(/\\+$/, "");
+  const base = sources.find((s) => path.toLowerCase().startsWith(s.toLowerCase().replace(/\\+$/, "") + "\\"));
+  const rel = base ? path.slice(base.replace(/\\+$/, "").length + 1) : path.replace(/^[a-z]:\\/i, "");
+  const parts = rel.split("\\").filter(Boolean);
+  const name = parts[parts.length - 1] ?? "";
+  const dirs = out.folder ? parts : parts.slice(0, -1);
+  const wild = (p: string) =>
+    new RegExp(
+      `^${p
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".")}$`,
+      "i",
+    );
+  const pats = (v: string) =>
+    v
+      .split(/[,;]/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`));
+  const re = (v: string) => {
+    try {
+      return new RegExp(v, "i");
+    } catch {
+      return null;
+    }
+  };
+  const one = (r: FilterRule): RuleResult => {
+    const skip = (detail: string | null = null): RuleResult => ({ effect: "skips", detail });
+    switch (r.kind) {
+      case "folder": {
+        const hit = dirs.find((d) => wild(r.value.trim()).test(d));
+        return hit ? skip(hit === name && out.folder ? null : `מדלג על התיקייה ${hit} שבדרך`) : empty();
+      }
+      case "regex": {
+        const x = re(r.value);
+        if (!r.value.trim() || !x) return { effect: "invalid", detail: "הביטוי לא תקין" };
+        if (r.folders) {
+          const hit = dirs.find((d) => x.test(d));
+          return hit ? skip(`מדלג על התיקייה ${hit} שבדרך`) : empty();
+        }
+        if (out.folder) return empty();
+        if (r.include)
+          return x.test(name) ? { effect: "keeps", detail: null } : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
+        return x.test(name) ? skip() : empty();
+      }
+      default:
+        if (out.folder) return empty();
+        switch (r.kind) {
+          case "include":
+            return pats(r.value).some((p) => wild(p).test(name))
+              ? { effect: "keeps", detail: null }
+              : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
+          case "extension":
+          case "pattern":
+            return pats(r.value).some((p) => wild(p).test(name)) ? skip() : empty();
+          case "file":
+            return r.value.trim().toLowerCase() === path.toLowerCase() ? skip() : empty();
+          case "largerThan":
+            return probe.sizeMb === null
+              ? { effect: "unknown", detail: "הקובץ לא נמצא בדיסק - הזינו גודל כדי לבדוק" }
+              : probe.sizeMb > r.mb
+                ? skip()
+                : empty();
+          case "olderThan":
+            return probe.ageDays === null
+              ? { effect: "unknown", detail: "הקובץ לא נמצא בדיסק - הזינו לפני כמה ימים שונה" }
+              : probe.ageDays > r.days
+                ? skip()
+                : empty();
+          case "hidden":
+            return probe.hidden ? skip() : empty();
+          case "system":
+            return probe.system ? skip() : empty();
+        }
+    }
+  };
+  out.rules = rules.map(one);
+  out.globalRules = global.map(one);
+  const all = [...out.rules, ...out.globalRules];
+  out.kept = !all.some((r) => r.effect === "skips");
+  if (!out.kept) out.reason = out.folder ? "כלל סינון מדלג על התיקייה, יחד עם כל מה שבתוכה." : "כלל סינון מדלג על הקובץ.";
+  if (!base && sources.length)
+    out.notes.push("הנתיב לא נמצא בתוך אף אחת מתיקיות המקור של המשימה, אז הוא נבדק כאילו מגבים את הכונן כולו.");
+  return out;
+}
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
+/** When task 5 was paused: its state and its last run record must agree exactly (that is how the run details know it can be continued). */
+const PAUSED_AT = iso(-25);
 const src = (path: string, folderName: string) => ({ path, folderName });
 
 /** The next `n` times a schedule fires (or, with `back`, the previous ones), so mock times match the schedules shown. */
@@ -95,6 +204,15 @@ export function installDevMock() {
       enabled: false,
       schedule: { kind: "monthly", day: 1, time: "12:00" },
     },
+    {
+      ...newTask(),
+      id: "5",
+      name: "סרטים",
+      sources: [src("D:\\Videos", "Videos")],
+      destination: "E:\\Backups",
+      mode: "full",
+      schedule: { kind: "manual" },
+    },
   ];
   const states: Record<string, TaskState> = {
     "1": {
@@ -103,6 +221,7 @@ export function installDevMock() {
       lastRunAt: last(tasks[0].schedule),
       lastStatus: "success",
       lastMessage: "3 תיקיות, 3 הצליחו. הועתקו 132 קבצים",
+      lastBackup: { at: last(tasks[0].schedule)!, bytes: 9_600_000, mode: "incremental" },
     },
     "2": {
       nextRun: next(tasks[1].schedule),
@@ -110,9 +229,20 @@ export function installDevMock() {
       lastRunAt: last(tasks[1].schedule),
       lastStatus: "warning",
       lastMessage: "נמצאו פריטים לא תואמים",
+      lastBackup: { at: last(tasks[1].schedule)!, bytes: 12_345_678_901, mode: "full" },
     },
-    "3": { nextRun: iso(47), nextFullRun: null, lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין" },
+    "3": { nextRun: iso(47), nextFullRun: null, lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין",
+      lastBackup: { at: iso(-60 * 24 * 8), bytes: 61_000_000_000, mode: "full" } },
     "4": { nextRun: null, nextFullRun: null, lastRunAt: null, lastStatus: null, lastMessage: null },
+    // Paused half way: the "paused backups" card and the row's "continue" button.
+    "5": {
+      nextRun: null,
+      nextFullRun: null,
+      lastRunAt: PAUSED_AT,
+      lastStatus: "cancelled",
+      lastMessage: "הגיבוי הושהה. אפשר להמשיך מאותה נקודה",
+      resumable: true,
+    },
   };
   let settings: Settings = {
     theme: "system",
@@ -226,6 +356,43 @@ export function installDevMock() {
       sources,
     };
   });
+  // Task 5 was paused twice: the card adds both parts up.
+  history.unshift(
+    ...[-25, -60].map((at, i): RunRecord => {
+      const files = i === 0 ? 312 : 540;
+      const bytes = i === 0 ? 9_800_000_000 : 17_400_000_000;
+      const t = tasks[4];
+      return {
+        id: `p${i}`,
+        taskId: t.id,
+        taskName: t.name,
+        trigger: "manual",
+        mode: "full",
+        startedAt: iso(at - 30),
+        finishedAt: i === 0 ? PAUSED_AT : iso(at),
+        status: "cancelled",
+        message: "הגיבוי הושהה. אפשר להמשיך מאותה נקודה",
+        filesCopied: files,
+        bytesCopied: bytes,
+        backupBytes: 0,
+        freedBytes: 0,
+        filesDeleted: 0,
+        filesFailed: 0,
+        sources: [
+          {
+            ...sourceRun("Videos", "D:\\Videos", 0),
+            status: "cancelled",
+            message: "הגיבוי הושהה",
+            targetFolder: "E:\\Backups\\Videos 2026-11-11 09-00 מלא.partial",
+            filesCopied: files,
+            bytesCopied: bytes,
+            backupBytes: 0,
+            freedBytes: 0,
+          },
+        ],
+      };
+    }),
+  );
   // The task's last 3 runs as dated folders, oldest one full (all full for a full-only task).
   const stamp = (at: string) => {
     const d = new Date(at);
@@ -236,11 +403,26 @@ export function installDevMock() {
     t.sources.map((s) => ({
       source: s.path,
       folderName: s.folderName,
-      backups: occurrences(t.schedule, 3, true).map((createdAt, i) => {
-        const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
-        const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
-        return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
-      }),
+      backups: occurrences(t.schedule, 3, true)
+        .map((createdAt, i): BackupFolder => {
+          const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
+          const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
+          return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
+        })
+        // A failed last run leaves its half-done folder behind (the run details offer to continue in it).
+        .concat(
+          states[t.id]?.lastStatus === "failed"
+            ? [
+                {
+                  name: `${s.folderName} ${stamp(states[t.id].lastRunAt!)} מלא.partial`,
+                  path: `${t.destination}\\${s.folderName} ${stamp(states[t.id].lastRunAt!)} מלא.partial`,
+                  createdAt: states[t.id].lastRunAt!,
+                  kind: "full" as const,
+                  partial: true,
+                },
+              ]
+            : [],
+        ),
     }));
   // Open with the drive-connected question showing (?prompt in the URL).
   let drivePrompts = new URLSearchParams(location.search).has("prompt") ? ["1", "2"] : [];
@@ -319,12 +501,24 @@ export function installDevMock() {
         return history;
       case "list_backups":
         return backupsOf(tasks.find((t) => t.id === a.taskId) ?? tasks[0]);
+      case "disk_space":
+        // E: roomy, F: (task 3's mirror drive) not connected, anything else nearly full.
+        return (a.paths as string[]).map((p) =>
+          /^e:/i.test(p) ? { free: 412_000_000_000, total: 1_000_000_000_000 } : /^f:/i.test(p) ? null : { free: 18_500_000_000, total: 500_000_000_000 },
+        );
       case "folder_size":
         return String(a.path).endsWith("מלא") ? 12_345_678_901 : 48_200_000;
       case "read_log":
         return "Backuper - גיבוי אינקרמנטלי\nמקור: C:\\Users\\User\\Pictures\n\nהועתק\t1234\tC:\\Users\\User\\Pictures\\a.jpg\n";
       case "preview_schedule":
         return occurrences(a.schedule as Schedule, 3);
+      case "check_filters":
+        return mockFilterCheck(
+          a.rules as FilterRule[],
+          a.globalRules as FilterRule[],
+          a.sources as string[],
+          a.probe as FilterProbe,
+        );
       case "check_regex": {
         // Rough stand-in for the Rust reader: real parsing and wording live in regexcheck.rs.
         const pattern = String(a.pattern).trim();
@@ -421,7 +615,9 @@ export function installDevMock() {
         // Like the real queue: a task waiting for the Cobian decision doesn't run.
         return (a.ids as string[]).filter((id) => !tasks.find((t) => t.id === id)?.cobianPending).length;
       case "resume_task":
-        return !tasks.find((t) => t.id === a.id)?.cobianPending;
+        if (tasks.find((t) => t.id === a.id)?.cobianPending) return false;
+        states[a.id as string] = { ...states[a.id as string], resumable: false };
+        return true;
       case "plugin:app|version":
         return "0.2.0 (dev)";
       case "plugin:event|listen":

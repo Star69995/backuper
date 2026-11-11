@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupMode, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
+use crate::model::{BackupMode, FilterRule, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -167,8 +167,9 @@ pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>, fr
         .count()
 }
 
-/// Continues a task whose last run was stopped: same mode as that run, and `backup_source` picks
-/// up in the folder it left. Returns false if the task is already queued or running.
+/// Continues a task whose last run was stopped or failed (e.g. destination full): same mode as that
+/// run, and `backup_source` picks up in the folder it left. Returns false if the task is already
+/// queued or running.
 #[tauri::command]
 pub fn resume_task(core: CoreState, id: String) -> bool {
     let mode = core
@@ -178,7 +179,7 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
         .history
         .iter()
         .find(|r| r.task_id == id)
-        .filter(|r| r.status == RunStatus::Cancelled)
+        .filter(|r| matches!(r.status, RunStatus::Cancelled | RunStatus::Failed))
         .map(|r| r.mode);
     core.enqueue(Job {
         task_id: id,
@@ -282,6 +283,42 @@ pub async fn folder_size(path: String) -> Result<u64, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Free and total bytes of the drive a path is on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpace {
+    free: u64,
+    total: u64,
+}
+
+/// The drive of `path`, asked through the nearest folder that exists (a destination may not
+/// have been created yet). None = no such drive (disconnected) or it can't be read.
+fn disk_space_of(path: &str) -> Option<DiskSpace> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, avail: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+    std::path::Path::new(path).ancestors().find_map(|dir| {
+        if dir.as_os_str().is_empty() {
+            return None;
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let (mut free, mut total, mut total_free) = (0u64, 0u64, 0u64);
+        // `free` = what this user can use (quotas), which is what a backup can fill.
+        (unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) } != 0)
+            .then_some(DiskSpace { free, total })
+    })
+}
+
+/// Free space on the drives of `paths` (task destinations), in the same order.
+#[tauri::command]
+pub async fn disk_space(paths: Vec<String>) -> Result<Vec<Option<DiskSpace>>, String> {
+    tauri::async_runtime::spawn_blocking(move || paths.iter().map(|p| disk_space_of(p)).collect())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
     std::process::Command::new("explorer.exe")
@@ -301,6 +338,17 @@ pub fn preview_schedule(schedule: Schedule) -> Result<Vec<String>, String> {
 #[tauri::command]
 pub fn check_regex(pattern: String, sample: Option<String>) -> crate::model::RegexCheck {
     crate::regexcheck::check(&pattern, sample.as_deref())
+}
+
+/// The filter check: what all the rules together (task + global) do with one path, and each rule's part.
+#[tauri::command]
+pub fn check_filters(
+    rules: Vec<FilterRule>,
+    global_rules: Vec<FilterRule>,
+    sources: Vec<String>,
+    probe: crate::model::FilterProbe,
+) -> crate::model::FilterCheck {
+    crate::filtercheck::check(&rules, &global_rules, &sources, &probe)
 }
 
 #[tauri::command]

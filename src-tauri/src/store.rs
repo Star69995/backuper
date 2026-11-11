@@ -1,6 +1,6 @@
 //! JSON persistence under %APPDATA%\org.tovtech.backuper. Writes are atomic (tmp + rename).
 
-use crate::model::{Notice, RunRecord, Settings, Task, TaskState};
+use crate::model::{LastBackup, Notice, RunRecord, Settings, Task, TaskState};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -57,6 +57,7 @@ impl Store {
         };
         store.load_tasks();
         store.tasks.iter_mut().for_each(Task::migrate);
+        store.fill_last_backups();
         // The list as it was before this version kept snapshots.
         if !store.tasks.is_empty() {
             let _ = crate::tasklist::snapshot(&store.snapshots_dir(), &store.tasks);
@@ -163,6 +164,21 @@ impl Store {
         let _ = fs::remove_file(Path::new(dir).join(crate::tasklist::OLD_COPY_FILE_NAME));
         Ok(())
     }
+    /// State from before `last_backup` existed: take it from the history (newest first).
+    fn fill_last_backups(&mut self) {
+        let mut changed = false;
+        for t in &self.tasks {
+            let st = self.states.entry(t.id.clone()).or_default();
+            if st.last_backup.is_none() {
+                st.last_backup = self.history.iter().filter(|r| r.task_id == t.id).find_map(LastBackup::of);
+                changed |= st.last_backup.is_some();
+            }
+        }
+        if changed {
+            self.save_states();
+        }
+    }
+
     pub fn save_states(&self) {
         save(&self.dir.join("state.json"), &self.states);
     }

@@ -33,7 +33,7 @@ import {
   taskDrives,
   taskKind,
 } from "../lib/format";
-import type { BackupMode, DriveAction, KeepMode, Source, Task } from "../types";
+import type { BackupMode, DriveAction, FilterRule, KeepMode, Source, Task } from "../types";
 import FilterRulesEditor from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
@@ -291,13 +291,14 @@ export function DriveConnectField({ task, onChange }: { task: Task; onChange: (v
 
 export default function TaskEditor({
   task,
-  globalFilterCount,
+  globalFilters,
   groups,
   onClose,
   onSaved,
 }: {
   task: Task;
-  globalFilterCount: number;
+  /** The global rules from Settings (the filter check runs them together with the task's). */
+  globalFilters: FilterRule[];
   /** Existing group names, offered as suggestions. */
   groups: string[];
   onClose: () => void;
@@ -543,15 +544,20 @@ export default function TaskEditor({
           </Section>
 
           <Section {...sec("filters")}>
-            <FilterRulesEditor rules={t.filters} onChange={(f) => set("filters", f)} />
+            <FilterRulesEditor
+              rules={t.filters}
+              onChange={(f) => set("filters", f)}
+              sources={t.sources.map((s) => s.path)}
+              globalRules={t.useGlobalFilters ? globalFilters : []}
+            />
             <Toggle
               checked={t.useGlobalFilters}
               onChange={(v) => set("useGlobalFilters", v)}
               label="החלת כללי הסינון הכלליים"
               description={
-                globalFilterCount === 0
+                globalFilters.length === 0
                   ? "עדיין לא הוגדרו כללים כלליים (אפשר להגדיר אותם בהגדרות)."
-                  : `${globalFilterCount} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
+                  : `${globalFilters.length} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
               }
             />
           </Section>

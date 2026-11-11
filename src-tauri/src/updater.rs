@@ -8,7 +8,7 @@ use chrono::Local;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// Lets the app finish starting (and a catch-up backup get queued) before the first check.
@@ -242,13 +242,33 @@ impl Updates {
         }
         *notified = Some(version.clone());
         let sound = self.core.store.lock().unwrap().settings.sound_success.clone();
-        crate::core::toast(
-            &self.app,
-            format!("גרסה חדשה של Backuper זמינה: {version}"),
-            "פתחו את Backuper ובחרו \"עדכן עכשיו\" בהגדרות.",
-            &sound,
-        );
+        let title = format!("גרסה חדשה של Backuper זמינה: {version}");
+        let body = "לחצו כאן כדי לפתוח את Backuper ולעדכן.";
+        #[cfg(windows)]
+        {
+            use tauri_winrt_notification::{Sound, Toast};
+            let app = self.app.clone();
+            let id = self.app.config().identifier.clone();
+            let mut toast = Toast::new(&id).title(&title).text1(body).on_activated(move |_| {
+                open_update_page(&app);
+                Ok(())
+            });
+            if let Ok(s) = sound.parse::<Sound>() {
+                toast = toast.sound(Some(s));
+            }
+            if toast.show().is_ok() {
+                return;
+            }
+        }
+        crate::core::toast(&self.app, title, body, &sound);
     }
+}
+
+/// A click on the "new version" notification: brings the window up on the update page.
+#[cfg(windows)]
+fn open_update_page(app: &AppHandle) {
+    crate::tray::show_main(app);
+    let _ = app.emit("show-update", ());
 }
 
 /// Called at startup: if this launch follows an update, removes the marker, says so, and

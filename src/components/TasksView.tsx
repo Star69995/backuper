@@ -2,8 +2,10 @@ import {
   AlertTriangle,
   Archive,
   ArrowDownAZ,
+  ArrowDown,
   ArrowDownUp,
   ArrowLeft,
+  ArrowUp,
   ArrowUpZA,
   CheckCircle2,
   ChevronDown,
@@ -17,6 +19,7 @@ import {
   FolderInput,
   FolderPlus,
   FolderTree,
+  GripVertical,
   History,
   HardDrive,
   Import,
@@ -28,6 +31,7 @@ import {
   Plus,
   Power,
   PowerOff,
+  RotateCcw,
   Search,
   Pause,
   Square,
@@ -35,12 +39,23 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "../api";
-import { describeSchedule, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind, type TaskKind } from "../lib/format";
+import {
+  describeSchedule,
+  fmtBytes,
+  fmtRelative,
+  fmtSmart,
+  KIND_LABEL,
+  MODE_LABEL,
+  nextRunOf,
+  taskKind,
+  type TaskKind,
+} from "../lib/format";
 import { fitColumns, useColumnWidths } from "../lib/useColumnWidths";
-import { groupTasks, SORT_LABEL, type SortKey, sortTasks, useTaskSort } from "../lib/sortTasks";
-import type { BackupMode, RunRecord, RunStatus, Snapshot, Task } from "../types";
+import { useDiskSpace } from "../lib/useDiskSpace";
+import { groupTasks, moveInOrder, SORT_LABEL, type SortKey, sortTasks, useCustomOrder, useTaskSort } from "../lib/sortTasks";
+import type { BackupMode, DiskSpace, LastBackup, RunRecord, RunStatus, Snapshot, Task } from "../types";
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
@@ -48,8 +63,10 @@ import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
 import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
+import { useResumeTask } from "./resumeTask";
 import { useStopTask } from "./stopTask";
 import { useTaskListTransfer } from "./ImportTasksDialog";
+import PausedCard from "./PausedCard";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
 import {
@@ -90,7 +107,9 @@ export const statusBadge = (s: RunStatus, resumable = false) =>
       </Badge>
     ),
     cancelled: resumable ? (
-      <Badge icon={<Pause size={12} />}>מושהה</Badge>
+      <Badge tone="warn" icon={<Pause size={12} />}>
+        מושהה
+      </Badge>
     ) : (
       <Badge icon={<CircleSlash size={12} />}>הופסק</Badge>
     ),
@@ -124,6 +143,8 @@ const COL_FLOORS: Record<ColumnKey, number> = {
 /** Columns dropped, in this order, when the window is too narrow for all of them (the kind shows as an icon next to the task name). */
 const NARROW_DROP: ColumnKey[] = ["kind", "schedule"];
 const CHECK_COL = 40;
+/** Custom order: the checkbox column also holds the drag handle. */
+const CHECK_COL_CUSTOM = 64;
 /** Compact view: "מצב" and "סוג" show only a toggle / an icon, so they get a fixed narrow width. */
 const COMPACT_COLS: Partial<Record<ColumnKey, number>> = { enabled: 64, kind: 64 };
 const KIND_ICON: Record<TaskKind, ReactNode> = {
@@ -153,7 +174,8 @@ function useCompactView() {
   return [compact, setCompact] as const;
 }
 /** The actions column also takes any leftover width, so a dragged border follows the mouse exactly. */
-const MIN_ACTIONS_COL = 96;
+/** Room for "המשך" (a paused backup) + the menu. */
+const MIN_ACTIONS_COL = 112;
 
 /** "Run full now" / "Run incremental now" menu entries. */
 const runModeItems = (run: (mode: BackupMode) => void): MenuItem[] => [
@@ -210,6 +232,9 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     });
 
   const [sort, setSort] = useTaskSort();
+  const [order, setOrder] = useCustomOrder();
+  const custom = sort.key === "custom";
+  const checkCol = custom ? CHECK_COL_CUSTOM : CHECK_COL;
   const [compact, setCompact] = useCompactView();
   const cols = useColumnWidths("backuper.taskColumns", DEFAULT_WIDTHS);
   const colWidth = (k: ColumnKey) => (compact ? COMPACT_COLS[k] : undefined) ?? cols.widths[k];
@@ -223,7 +248,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     ro.observe(tableWrap);
     return () => ro.disconnect();
   }, [tableWrap]);
-  const room = availWidth - CHECK_COL - MIN_ACTIONS_COL;
+  const room = availWidth - checkCol - MIN_ACTIONS_COL;
   // When even the floors don't fit, the least important columns drop out (the task name and status stay readable).
   const floors: Record<ColumnKey, number> = compact ? { ...COL_FLOORS, ...COMPACT_COLS } : COL_FLOORS;
   let shownCols = RESIZABLE;
@@ -258,6 +283,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     cols.setWidth(k, Math.max(floors[k], Math.min(w, room - others)));
   };
   const transfer = useTaskListTransfer(snap.tasks, refresh);
+  // Read again whenever a backup starts or ends (it changes the free space).
+  const space = useDiskSpace(
+    snap.tasks.map((t) => t.destination).filter(Boolean),
+    `${snap.current?.runId ?? ""}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
+  );
 
   const usedGroups = groupNames(snap.tasks);
   const allGroups = [...usedGroups, ...newGroups.filter((n) => !usedGroups.some((g) => sameGroup(g, n)))];
@@ -280,10 +310,65 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     const found = q
       ? shown.filter((t) => [t.name, t.destination, ...t.sources.map((s) => s.path)].some((s) => s.toLowerCase().includes(q)))
       : shown;
-    return sortTasks(found, sort, snap.states);
+    return sortTasks(found, sort, snap.states, order);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snap.tasks, snap.states, query, sort, group]);
+  }, [snap.tasks, snap.states, query, sort, group, order]);
   const groups = useMemo(() => groupTasks(tasks, sort.key), [tasks, sort.key]);
+
+  const changeSort = (key: SortKey) => {
+    // The first switch to the custom order starts from what is shown now, so it can be fine-tuned from there.
+    if (key === "custom" && order.length === 0) setOrder(sortTasks(snap.tasks, sort, snap.states).map((t) => t.id));
+    setSort({ ...sort, key });
+  };
+
+  // Custom order: a task is dragged by its handle (pointer events, so it works the same in WebView2 and a browser)
+  // or moved with the arrow keys on the handle / the row menu.
+  const [drag, setDrag] = useState<{ id: string; over: string | null; after: boolean } | null>(null);
+  const tbodyRef = useRef<HTMLTableSectionElement>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
+  const focusHandle = (id: string) =>
+    requestAnimationFrame(() => tbodyRef.current?.querySelector<HTMLElement>(`[data-handle="${CSS.escape(id)}"]`)?.focus());
+  const moveTask = (id: string, target: string, after: boolean) => setOrder((o) => moveInOrder(snap.tasks, o, id, target, after));
+  /** One place up (-1) or down (1) among the tasks shown. */
+  const moveBy = (id: string, delta: -1 | 1) => {
+    const i = tasks.findIndex((t) => t.id === id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= tasks.length) return;
+    moveTask(id, tasks[j].id, delta > 0);
+    focusHandle(id);
+  };
+  /** The row under the pointer and whether the drop goes after it (lower half). */
+  const dropAt = (y: number) => {
+    const rows = [...(tbodyRef.current?.querySelectorAll<HTMLElement>("tr[data-task-id]") ?? [])];
+    for (let i = 0; i < rows.length; i++) {
+      const b = rows[i].getBoundingClientRect();
+      if (y < b.bottom || i === rows.length - 1) return { over: rows[i].dataset.taskId!, after: y > b.top + b.height / 2 };
+    }
+    return { over: null, after: false };
+  };
+  const startDrag = (e: ReactPointerEvent<HTMLElement>, id: string) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    let el: HTMLElement | null = e.currentTarget.parentElement;
+    while (el && !/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el = el.parentElement;
+    scrollerRef.current = el;
+    setDrag({ id, over: null, after: false });
+  };
+  const dragMove = (e: ReactPointerEvent<HTMLElement>, id: string) => {
+    if (drag?.id !== id) return;
+    const sc = scrollerRef.current;
+    if (sc) {
+      const b = sc.getBoundingClientRect();
+      if (e.clientY < b.top + 48) sc.scrollBy(0, -16);
+      else if (e.clientY > b.bottom - 48) sc.scrollBy(0, 16);
+    }
+    setDrag({ id, ...dropAt(e.clientY) });
+  };
+  const endDrag = (id: string) => {
+    if (drag?.id === id && drag.over && drag.over !== id) moveTask(id, drag.over, drag.after);
+    setDrag(null);
+  };
 
   // Drop selections of tasks that no longer exist.
   const sel = [...selected].filter((id) => snap.tasks.some((t) => t.id === id));
@@ -305,11 +390,8 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
   };
 
-  /** After a stop: the same run again, which carries on in the folder it left. */
-  const resume = async (id: string) => {
-    const queued = await api.resumeTask(id);
-    toast({ tone: "info", title: queued ? "הגיבוי ימשיך מאותה נקודה" : "המשימה כבר רצה או ממתינה בתור" });
-  };
+  const { resume, restart: restartTask } = useResumeTask();
+  const restart = (task: Task, mode: BackupMode | null) => restartTask(task.id, task.name, mode);
 
   // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
   // The question comes up when one is switched on, or when someone runs it by hand.
@@ -496,6 +578,9 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
 
   const queuedIds = new Set(snap.queue.map((j) => j.taskId));
   const runningId = snap.current?.taskId;
+  const pausedTasks = snap.tasks.filter(
+    (t) => snap.states[t.id]?.lastStatus === "cancelled" && snap.states[t.id]?.resumable && t.id !== runningId && !queuedIds.has(t.id),
+  );
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4 p-4 md:p-6">
@@ -511,25 +596,22 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         <div className="flex flex-wrap items-center gap-2">
           {snap.tasks.length > 1 && (
             <div className="flex items-center gap-1">
-              <Select
-                aria-label="מיון"
-                className="w-48"
-                value={sort.key}
-                onChange={(e) => setSort({ ...sort, key: e.target.value as SortKey })}
-              >
+              <Select aria-label="מיון" className="w-56" value={sort.key} onChange={(e) => changeSort(e.target.value as SortKey)}>
                 {(Object.keys(SORT_LABEL) as SortKey[]).map((k) => (
                   <option key={k} value={k}>
                     מיון: {SORT_LABEL[k]}
                   </option>
                 ))}
               </Select>
-              <IconButton
-                label={sort.desc ? "סדר יורד - לחצו לסדר עולה" : "סדר עולה - לחצו לסדר יורד"}
-                onClick={() => setSort({ ...sort, desc: !sort.desc })}
-                className="size-9 border border-line bg-panel"
-              >
-                {sort.desc ? <ArrowUpZA size={16} /> : <ArrowDownAZ size={16} />}
-              </IconButton>
+              {!custom && (
+                <IconButton
+                  label={sort.desc ? "סדר יורד - לחצו לסדר עולה" : "סדר עולה - לחצו לסדר יורד"}
+                  onClick={() => setSort({ ...sort, desc: !sort.desc })}
+                  className="size-9 border border-line bg-panel"
+                >
+                  {sort.desc ? <ArrowUpZA size={16} /> : <ArrowDownAZ size={16} />}
+                </IconButton>
+              )}
             </div>
           )}
           {snap.tasks.length > 0 && (
@@ -643,6 +725,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
 
       {snap.current && <RunningCard progress={snap.current} queue={snap.queue} tasks={snap.tasks} />}
 
+      <PausedCard
+        tasks={pausedTasks}
+        states={snap.states}
+        onResume={resume}
+        onRestart={restart}
+        onDetails={showLastRun}
+      />
+
       {sel.length > 0 && (
         <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2 shadow-sm">
           <span className="text-sm font-medium text-accent">נבחרו {sel.length}</span>
@@ -726,7 +816,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           <div ref={setTableWrap} className="overflow-hidden">
             <table className="w-full table-fixed text-sm">
               <colgroup>
-                <col style={{ width: CHECK_COL }} />
+                <col style={{ width: checkCol }} />
                 {shownCols.map((k) => (
                   <col key={k} style={{ width: k === "name" && nameAuto ? undefined : fitted[k] }} />
                 ))}
@@ -768,7 +858,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                   <th className="px-2 py-2.5" />
                 </tr>
               </thead>
-              <tbody>
+              <tbody ref={tbodyRef}>
                 {groups.map((g, gi) => (
                   <Fragment key={g.folder ?? gi}>
                     {g.folder !== null && (
@@ -792,22 +882,57 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                       const running = runningId === t.id;
                       const queued = queuedIds.has(t.id);
                       const checked = selected.has(t.id);
+                      const dropHere = drag && drag.over === t.id && drag.id !== t.id ? (drag.after ? "after" : "before") : null;
                       return (
                         <tr
                           key={t.id}
+                          data-task-id={t.id}
                           onDoubleClick={() => setEditing(t)}
                           className={cx(
                             "group cursor-default border-b border-line last:border-b-0 transition-colors",
                             checked ? "bg-accent-soft/60" : "hover:bg-hover/60",
                             !t.enabled && "text-muted",
+                            drag?.id === t.id && "opacity-50",
+                            dropHere === "before" && "[&>td]:shadow-[inset_0_2px_0_var(--color-accent)]",
+                            dropHere === "after" && "[&>td]:shadow-[inset_0_-2px_0_var(--color-accent)]",
                           )}
                         >
                           <td
-                            className="cursor-pointer px-3 py-3"
+                            className={cx("cursor-pointer py-3", custom ? "ps-1 pe-3" : "px-3")}
                             onClick={() => toggle(t.id, !checked)}
                             onDoubleClick={(e) => e.stopPropagation()}
                           >
-                            <Checkbox label={`בחר ${t.name}`} checked={checked} onChange={(on) => toggle(t.id, on)} />
+                            <div className="flex items-center gap-1">
+                              {custom && (
+                                <button
+                                  type="button"
+                                  data-handle={t.id}
+                                  aria-label={`שינוי המיקום של ${t.name} (חץ למעלה או למטה)`}
+                                  title="גררו כדי לשנות את המיקום"
+                                  className={cx(
+                                    "flex size-6 shrink-0 touch-none items-center justify-center rounded text-muted hover:bg-hover hover:text-fg focus-visible:outline-2 focus-visible:outline-accent",
+                                    drag?.id === t.id ? "cursor-grabbing" : "cursor-grab",
+                                  )}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onPointerDown={(e) => startDrag(e, t.id)}
+                                  onPointerMove={(e) => dragMove(e, t.id)}
+                                  onPointerUp={() => endDrag(t.id)}
+                                  onPointerCancel={() => setDrag(null)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                                      e.preventDefault();
+                                      moveBy(t.id, e.key === "ArrowUp" ? -1 : 1);
+                                    } else if (e.key === "Escape" && drag) {
+                                      e.preventDefault();
+                                      setDrag(null);
+                                    }
+                                  }}
+                                >
+                                  <GripVertical size={15} />
+                                </button>
+                              )}
+                              <Checkbox label={`בחר ${t.name}`} checked={checked} onChange={(on) => toggle(t.id, on)} />
+                            </div>
                           </td>
                           <td className="px-2 py-3">
                             <button
@@ -957,6 +1082,10 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                             ) : (
                               <span className="text-muted">טרם רץ</span>
                             )}
+                            <div className="mt-1 flex flex-col text-xs text-muted">
+                              {st?.lastBackup && <BackupSize last={st.lastBackup} />}
+                              <FreeSpace space={space[t.destination]} last={st?.lastBackup} />
+                            </div>
                           </td>
                           <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-0.5">
@@ -974,9 +1103,16 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   <X size={15} />
                                 </IconButton>
                               ) : st?.lastStatus === "cancelled" && st.resumable ? (
-                                <IconButton label="המשך מאותה נקודה" onClick={() => resume(t.id)}>
-                                  <RunIcon size={16} />
-                                </IconButton>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  className="gap-1 border-warn/40 px-2 text-warn hover:bg-warn-soft"
+                                  icon={<RunIcon size={14} />}
+                                  title="המשך את הגיבוי המושהה מאותה נקודה"
+                                  onClick={() => resume(t.id)}
+                                >
+                                  המשך
+                                </Button>
                               ) : taskKind(t) === "combined" ? (
                                 <Menu
                                   trigger={(open) => (
@@ -998,8 +1134,38 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   </IconButton>
                                 )}
                                 items={[
-                                  ...runModeItems((mode) => run([t.id], mode)),
+                                  ...(st?.lastStatus === "cancelled" && st.resumable && !running && !queued
+                                    ? ([
+                                        {
+                                          label: "המשך מאותה נקודה",
+                                          icon: <RunIcon size={14} />,
+                                          onClick: () => resume(t.id),
+                                        },
+                                        {
+                                          label: "התחל מחדש",
+                                          icon: <RotateCcw size={14} />,
+                                          onClick: () => restart(t, null),
+                                        },
+                                      ] satisfies MenuItem[])
+                                    : runModeItems((mode) => run([t.id], mode))),
                                   "separator",
+                                  ...(custom
+                                    ? ([
+                                        {
+                                          label: "הזזה למעלה",
+                                          icon: <ArrowUp size={14} />,
+                                          disabled: tasks[0]?.id === t.id,
+                                          onClick: () => moveBy(t.id, -1),
+                                        },
+                                        {
+                                          label: "הזזה למטה",
+                                          icon: <ArrowDown size={14} />,
+                                          disabled: tasks[tasks.length - 1]?.id === t.id,
+                                          onClick: () => moveBy(t.id, 1),
+                                        },
+                                        "separator",
+                                      ] as MenuItem[])
+                                    : []),
                                   { label: "עריכה", icon: <Pencil size={14} />, onClick: () => setEditing(t) },
                                   { label: "שכפול", icon: <Copy size={14} />, onClick: () => duplicate(t) },
                                   ...moveItems([t], true),
@@ -1037,12 +1203,17 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           </div>
         )}
       </section>
-      {snap.tasks.length > 0 && <p className="text-xs text-muted">טיפ: לחיצה על שורה בוחרת אותה, לחיצה כפולה פותחת עריכה.</p>}
+      {snap.tasks.length > 0 && (
+        <p className="text-xs text-muted">
+          טיפ: לחיצה על שורה בוחרת אותה, לחיצה כפולה פותחת עריכה.
+          {custom && " בסדר מותאם אישית גוררים משימה בידית שליד תיבת הסימון כדי לשנות את מקומה."}
+        </p>
+      )}
 
       {editing && (
         <TaskEditor
           task={editing}
-          globalFilterCount={snap.settings.globalFilters.length}
+          globalFilters={snap.settings.globalFilters}
           groups={allGroups}
           onClose={() => setEditing(null)}
           onSaved={(saved, isNew) => {
@@ -1102,6 +1273,39 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   function openPath(p: string) {
     api.openPath(p).catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את התיקייה", message: errorText(e) }));
   }
+}
+
+/** Size of the newest backup (it may be older than the last run, if that one failed). */
+function BackupSize({ last }: { last: LastBackup }) {
+  return (
+    <span
+      title={`גודל הגיבוי האחרון שנשמר (${MODE_LABEL[last.mode]}) - ${fmtSmart(last.at)}`}
+    >
+      גודל <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(last.bytes)}</bdi>
+    </span>
+  );
+}
+
+/** Free space on the destination drive; warns when the last full backup wouldn't fit again. */
+function FreeSpace({ space, last }: { space: DiskSpace | null | undefined; last: LastBackup | null | undefined }) {
+  if (space === undefined) return null;
+  if (space === null) return <span title="כונן היעד לא מחובר כרגע, או שאי אפשר לקרוא אותו">היעד לא מחובר</span>;
+  const low = last?.mode === "full" && space.free < last.bytes;
+  return (
+    <span
+      className={cx("flex items-center gap-1", low && "text-warn")}
+      title={
+        low
+          ? `בכונן היעד פנוי פחות מגודל הגיבוי המלא האחרון (${fmtBytes(last.bytes)}) - ייתכן שהגיבוי המלא הבא לא ייכנס. כדאי לפנות מקום או לשמור פחות גיבויים`
+          : `מקום פנוי בכונן היעד, מתוך ${fmtBytes(space.total)}`
+      }
+    >
+      {low && <AlertTriangle size={12} />}
+      <span>
+        פנוי <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(space.free)}</bdi>
+      </span>
+    </span>
+  );
 }
 
 function GroupTab({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {

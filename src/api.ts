@@ -6,10 +6,14 @@ import type {
   AdoptResult,
   BackupMode,
   CobianLists,
+  DiskSpace,
   ImportPreview,
   ImportSplit,
   Progress,
   RegexCheck,
+  FilterCheck,
+  FilterProbe,
+  FilterRule,
   RunRecord,
   Schedule,
   Settings,
@@ -40,10 +44,15 @@ export const api = {
   listBackups: (taskId: string) => invoke<SourceBackups[]>("list_backups", { taskId }),
   deleteBackup: (taskId: string, folderName: string, name: string) => invoke<void>("delete_backup", { taskId, folderName, name }),
   folderSize: (path: string) => invoke<number>("folder_size", { path }),
+  /** Free space on the drive of each path (null = drive not connected), same order. */
+  diskSpace: (paths: string[]) => invoke<(DiskSpace | null)[]>("disk_space", { paths }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
   /** Validates a regex filter, explains it, and tries it on `sample` (a file or folder name). */
   checkRegex: (pattern: string, sample: string | null) => invoke<RegexCheck>("check_regex", { pattern, sample }),
+  /** What all the rules together (+ the global ones) do with one path, and each rule's part in it. */
+  checkFilters: (rules: FilterRule[], globalRules: FilterRule[], sources: string[], probe: FilterProbe) =>
+    invoke<FilterCheck>("check_filters", { rules, globalRules, sources, probe }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   importTasks: (path: string, split?: ImportSplit) => invoke<ImportPreview>("import_tasks", { path, split }),
@@ -88,6 +97,7 @@ export const api = {
     const r = await open({ directory: true, multiple: true, title });
     return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
   },
+  onShowUpdate: (cb: () => void) => listen("show-update", cb),
   onSnapshotChanged: (cb: () => void) => listen("snapshot-changed", cb),
   onProgress: (cb: (p: Progress) => void) => listen<Progress>("progress", (e) => cb(e.payload)),
 };
