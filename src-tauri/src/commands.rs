@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupMode, FilterRule, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
+use crate::model::{BackupMode, FilterRule, FullSpace, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -317,6 +317,21 @@ pub async fn disk_space(paths: Vec<String>) -> Result<Vec<Option<DiskSpace>>, St
     tauri::async_runtime::spawn_blocking(move || paths.iter().map(|p| disk_space_of(p)).collect())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// `backup::full_space` for each task id, in the same order (None = no full backup expected).
+#[tauri::command]
+pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Vec<Option<FullSpace>>, String> {
+    let tasks: Vec<Option<Task>> = {
+        let store = core.store.lock().unwrap();
+        task_ids.iter().map(|id| store.task(id).cloned()).collect()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = chrono::Local::now();
+        tasks.iter().map(|t| t.as_ref().and_then(|t| backup::full_space(t, now))).collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

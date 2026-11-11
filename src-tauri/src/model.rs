@@ -495,6 +495,16 @@ pub struct SourceBackups {
     pub backups: Vec<BackupFolder>,
 }
 
+/// What a task's next full backup needs on the destination drive (see `backup::full_space`).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FullSpace {
+    /// About the size of the previous full backup(s), all sources.
+    pub needed: u64,
+    /// What delete-before removes first (0 without it), which counts as free space.
+    pub freed: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
