@@ -139,7 +139,7 @@ export default function DeleteProblemDialog({ snap, refresh }: { snap: Snapshot;
 
   return (
     <Modal
-      size="md"
+      size="lg"
       title={
         <span className="flex items-center gap-2">
           <AlertTriangle size={18} className="text-warn" />
@@ -155,7 +155,7 @@ export default function DeleteProblemDialog({ snap, refresh }: { snap: Snapshot;
       dismissable={!busy}
       footer={
         <>
-          <Button onClick={close} disabled={busy} icon={waiting ? <SkipIcon size={15} /> : undefined}>
+          <Button className="me-auto" onClick={close} disabled={busy} icon={waiting ? <SkipIcon size={15} /> : undefined}>
             {waiting ? "דילוג על המחיקה והמשך הגיבוי" : "לא עכשיו"}
           </Button>
           <Button
