@@ -89,7 +89,7 @@ export default function ScheduleEditor({
       />
 
       {value.kind === "manual" && (
-        <p className="text-[13px] text-muted">המשימה תרוץ רק כשתפעילו אותה בעצמכם (כפתור "הרץ עכשיו").</p>
+        <p className="text-[13px] text-muted">המשימה תרוץ רק כשתפעילו אותה בעצמכם (כפתור "הרצה עכשיו").</p>
       )}
 
       {value.kind === "once" && (

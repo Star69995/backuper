@@ -179,8 +179,8 @@ const MIN_ACTIONS_COL = 112;
 
 /** "Run full now" / "Run incremental now" menu entries. */
 const runModeItems = (run: (mode: BackupMode) => void): MenuItem[] => [
-  { label: "הרץ גיבוי מלא עכשיו", icon: <RunIcon size={14} />, onClick: () => run("full") },
-  { label: "הרץ גיבוי אינקרמנטלי עכשיו", icon: <RunIcon size={14} />, onClick: () => run("incremental") },
+  { label: "הרצת גיבוי מלא עכשיו", icon: <RunIcon size={14} />, onClick: () => run("full") },
+  { label: "הרצת גיבוי אינקרמנטלי עכשיו", icon: <RunIcon size={14} />, onClick: () => run("incremental") },
 ];
 
 const GROUP_KEY = "backuper.taskGroup";
@@ -420,7 +420,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           "אפשר להמשיך אותו מאותה נקודה, או להתחיל גיבוי חדש מההתחלה. הגיבוי החלקי הישן יימחק בהמשך, אחרי שגיבוי חדש יסתיים.",
         options: [
           { value: "continue", label: "המשך מאותה נקודה" },
-          { value: "fresh", label: "התחל מחדש" },
+          { value: "fresh", label: "התחלה מחדש" },
         ],
       });
       if (answer === "continue") go.push(id);
@@ -501,7 +501,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     const ok = await confirm({
       title: list.length === 1 ? `למחוק את המשימה "${list[0].name}"?` : `למחוק ${list.length} משימות?`,
       message: "המשימות יוסרו מהתוכנה. קבצי הגיבוי שכבר נוצרו ביעד לא יימחקו.",
-      confirmLabel: "מחק",
+      confirmLabel: "מחיקה",
       danger: true,
     });
     if (!ok) return;
@@ -748,7 +748,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             <Menu
               trigger={(open) => (
                 <Button size="sm" variant="ghost" icon={<RunIcon size={15} />} onClick={open}>
-                  הרץ
+                  הרצה
                 </Button>
               )}
               items={[
@@ -758,7 +758,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             />
           ) : (
             <Button size="sm" variant="ghost" icon={<RunIcon size={15} />} onClick={() => run(sel)}>
-              הרץ
+              הרצה
             </Button>
           )}
           <Button size="sm" variant="ghost" icon={<ListChecks size={15} />} onClick={() => setBulk(selTasks)}>
@@ -767,7 +767,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           <Menu
             trigger={(open) => (
               <Button size="sm" variant="ghost" icon={<FolderInput size={15} />} onClick={open}>
-                העבר לקבוצה
+                העברה לקבוצה
               </Button>
             )}
             items={moveItems(selTasks)}
@@ -776,13 +776,13 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             ייצוא
           </Button>
           <Button size="sm" variant="ghost" icon={<Power size={15} />} onClick={() => setEnabled(selTasks, true)}>
-            הפעל
+            הפעלה
           </Button>
           <Button size="sm" variant="ghost" icon={<PowerOff size={15} />} onClick={() => setEnabled(selTasks, false)}>
-            השבת
+            השבתה
           </Button>
           <Button size="sm" variant="ghost" className="text-bad" icon={<Trash2 size={15} />} onClick={() => remove(selTasks)}>
-            מחק
+            מחיקה
           </Button>
           <IconButton label="ניקוי בחירה" className="ms-auto" onClick={() => setSelected(new Set())}>
             <X size={16} />
@@ -805,7 +805,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           </EmptyState>
         ) : groupTasksList.length === 0 ? (
           <EmptyState icon={<FolderPlus size={26} />} title={`אין עדיין משימות בקבוצה "${group}"`}>
-            <p>צרו משימה חדשה בקבוצה, או סמנו משימות ברשימה של כל המשימות והעבירו אותן לכאן עם &quot;העבר לקבוצה&quot;.</p>
+            <p>צרו משימה חדשה בקבוצה, או סמנו משימות ברשימה של כל המשימות והעבירו אותן לכאן עם &quot;העברה לקבוצה&quot;.</p>
             <div className="mt-4 flex flex-wrap justify-center gap-2">
               <Button
                 variant="primary"
@@ -833,7 +833,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                 <tr className="border-b border-line bg-panel2 text-xs text-muted">
                   <th className="px-3 py-2.5">
                     <Checkbox
-                      label="בחר הכול"
+                      label="בחירת הכול"
                       checked={allChecked}
                       indeterminate={someChecked && !allChecked}
                       onChange={(on) =>
@@ -938,7 +938,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   <GripVertical size={15} />
                                 </button>
                               )}
-                              <Checkbox label={`בחר ${t.name}`} checked={checked} onChange={(on) => toggle(t.id, on)} />
+                              <Checkbox label={`בחירת ${t.name}`} checked={checked} onChange={(on) => toggle(t.id, on)} />
                             </div>
                           </td>
                           <td className="px-2 py-3">
@@ -1098,15 +1098,15 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                             <div className="flex items-center justify-end gap-0.5">
                               {running ? (
                                 <>
-                                  <IconButton label="השהה (אפשר להמשיך אחר כך)" onClick={() => api.cancelTask(t.id)}>
+                                  <IconButton label="השהיה (אפשר להמשיך אחר כך)" onClick={() => api.cancelTask(t.id)}>
                                     <Pause size={15} />
                                   </IconButton>
-                                  <IconButton label="עצור" tone="danger" onClick={() => stopTask(t.id, t.name)}>
+                                  <IconButton label="עצירה" tone="danger" onClick={() => stopTask(t.id, t.name)}>
                                     <Square size={15} />
                                   </IconButton>
                                 </>
                               ) : queued ? (
-                                <IconButton label="הסר מהתור" onClick={() => api.cancelTask(t.id)}>
+                                <IconButton label="הסרה מהתור" onClick={() => api.cancelTask(t.id)}>
                                   <X size={15} />
                                 </IconButton>
                               ) : st?.lastStatus === "cancelled" && st.resumable ? (
@@ -1115,7 +1115,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   variant="secondary"
                                   className="gap-1 border-warn/40 px-2 text-warn hover:bg-warn-soft"
                                   icon={<RunIcon size={14} />}
-                                  title="המשך את הגיבוי המושהה מאותה נקודה"
+                                  title="המשך הגיבוי המושהה מאותה נקודה"
                                   onClick={() => resume(t.id)}
                                 >
                                   המשך
@@ -1123,14 +1123,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               ) : taskKind(t) === "combined" ? (
                                 <Menu
                                   trigger={(open) => (
-                                    <IconButton label="הרץ עכשיו" onClick={open}>
+                                    <IconButton label="הרצה עכשיו" onClick={open}>
                                       <RunIcon size={16} />
                                     </IconButton>
                                   )}
                                   items={runModeItems((mode) => run([t.id], mode))}
                                 />
                               ) : (
-                                <IconButton label="הרץ עכשיו" onClick={() => run([t.id])}>
+                                <IconButton label="הרצה עכשיו" onClick={() => run([t.id])}>
                                   <RunIcon size={16} />
                                 </IconButton>
                               )}
@@ -1149,7 +1149,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                           onClick: () => resume(t.id),
                                         },
                                         {
-                                          label: "התחל מחדש",
+                                          label: "התחלה מחדש",
                                           icon: <RotateCcw size={14} />,
                                           onClick: () => restart(t, null),
                                         },

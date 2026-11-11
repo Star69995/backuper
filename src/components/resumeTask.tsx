@@ -19,7 +19,7 @@ export function useResumeTask() {
       title: `להתחיל את "${taskName}" מחדש?`,
       message:
         "הגיבוי יתחיל מההתחלה בתיקייה חדשה, במקום להמשיך את המושהה. הגיבוי החלקי הישן יימחק בהמשך, אחרי שגיבוי חדש יסתיים.",
-      confirmLabel: "התחל מחדש",
+      confirmLabel: "התחלה מחדש",
     });
     if (!ok) return false;
     const n = await api.runTasks([taskId], mode, true);

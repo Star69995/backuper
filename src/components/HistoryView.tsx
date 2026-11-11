@@ -37,7 +37,7 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
       !(await confirm({
         title: "לנקות את יומן הריצות?",
         message: "כל רשומות הריצות והיומנים המפורטים יימחקו. הגיבויים עצמם לא יושפעו.",
-        confirmLabel: "נקה",
+        confirmLabel: "ניקוי",
         danger: true,
       }))
     )
@@ -208,7 +208,7 @@ function ErrorGroup({
         {kind.fix}
       </p>
       <details className="group">
-        <summary className="cursor-pointer text-xs text-muted select-none hover:text-fg">הצג את הקבצים</summary>
+        <summary className="cursor-pointer text-xs text-muted select-none hover:text-fg">הצגת הקבצים</summary>
         <ul className="mt-1.5 flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
           {errors.map((e, i) => (
             <li key={i} className="min-w-0">
@@ -381,7 +381,7 @@ function SourceCard({
             icon={<FolderOpen size={14} />}
             onClick={() => api.openPath(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}
           >
-            פתח את תיקיית הגיבוי
+            פתיחת תיקיית הגיבוי
           </Button>
         )}
         {src.logFile && (
@@ -526,10 +526,10 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
               icon={<RotateCcw size={15} />}
               onClick={() => restart(r.taskId, r.taskName, r.mode).then((ok) => ok && onClose())}
             >
-              התחל מחדש
+              התחלה מחדש
             </Button>
             <Button variant="ghost" onClick={onClose}>
-              סגור
+              סגירה
             </Button>
           </>
         ) : (
@@ -540,7 +540,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
               </Button>
             )}
             <Button variant={canResume ? "secondary" : "primary"} onClick={onClose}>
-              סגור
+              סגירה
             </Button>
           </>
         )
@@ -703,7 +703,7 @@ function SkipDialog({
             disabled={problem !== null}
             onClick={() => onSkip(kind === "file" ? { kind: "file", value: clean } : { kind: "folder", value })}
           >
-            {kind === "file" ? "דלג על הקובץ" : "דלג על התיקייה"}
+            {kind === "file" ? "דילוג על הקובץ" : "דילוג על התיקייה"}
           </Button>
           <Button variant="ghost" onClick={onClose}>
             ביטול

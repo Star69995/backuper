@@ -422,7 +422,7 @@ export function Modal({
             <h2 className="text-base font-semibold">{title}</h2>
             {subtitle && <div className="mt-0.5 text-[13px] text-muted">{subtitle}</div>}
           </div>
-          <IconButton label="סגור" onClick={onClose} className="-me-2 -mt-1">
+          <IconButton label="סגירה" onClick={onClose} className="-me-2 -mt-1">
             <X size={18} />
           </IconButton>
         </div>

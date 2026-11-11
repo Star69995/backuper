@@ -58,7 +58,7 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="secondary" icon={<Pause size={14} />} onClick={() => api.cancelTask(p.taskId)}>
-            השהה
+            השהיה
           </Button>
           <Button
             size="sm"
@@ -67,7 +67,7 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
             icon={<Square size={14} />}
             onClick={() => stopTask(p.taskId, p.taskName)}
           >
-            עצור
+            עצירה
           </Button>
         </div>
       </div>
@@ -119,7 +119,7 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
                 title="ההעתקה ממשיכה כרגיל, בלי אחוזים וזמן סיום משוער"
                 onClick={() => api.skipTotalsScan()}
               >
-                דלג על החישוב
+                דילוג על החישוב
               </Button>
             )}
           </span>
