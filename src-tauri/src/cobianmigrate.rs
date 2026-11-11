@@ -7,6 +7,12 @@
 //! `yyyy-mm-dd hh;nn;ss`) and the type is optional, so names are read leniently. A task without
 //! "separated backups" writes into one folder named like the source (no timestamp).
 //!
+//! The takeover runs right before the task's first backup here (`Task.cobian_takeover`, set when the
+//! user chooses to continue from Cobian's backups), so until then Cobian still sees its folders.
+//! Every rename is recorded (`CobianRename`, `cobian-renames.json`) so `restore_plan` / `restore`
+//! can put Cobian's names back. Takeovers from older versions have no record: their names are rebuilt
+//! in a format the user picks (`CobianNaming`), only for tasks that never wrote a backup here.
+//!
 //! The takeover only renames those folders to this app's names (`<folderName> <date> מלא|אינקרמנטלי`,
 //! same drive, instant). After that they are ordinary backups here: the incremental diff reads them
 //! (an index file is built on first use), retention counts them, the backups dialog lists them.
@@ -15,9 +21,9 @@
 //! for retention (a chain is kept whole).
 
 use crate::backup::{self, dated_folder_name, normalize, parse_folder, rename_retry};
-use crate::model::{BackupMode, Task};
+use crate::model::{BackupMode, CobianRename, Task};
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -174,6 +180,9 @@ impl AdoptPlan {
 pub struct AdoptResult {
     pub renamed: usize,
     pub errors: Vec<String>,
+    /// What was renamed (Cobian's name, the new name), for the rename journal.
+    #[serde(skip)]
+    pub done: Vec<AdoptFolder>,
 }
 
 /// The name Cobian gives a source's backups: its last folder name ("" for a drive root).
@@ -467,7 +476,158 @@ pub fn apply(task: &Task, others: &[Task]) -> AdoptResult {
     let mut result = AdoptResult::default();
     for f in p.sources.iter().flat_map(|s| s.folders.iter()) {
         match rename_retry(&dest.join(&f.from), &dest.join(&f.to)) {
-            Ok(()) => result.renamed += 1,
+            Ok(()) => {
+                result.renamed += 1;
+                result.done.push(f.clone());
+            }
+            Err(e) => result.errors.push(format!("{}: {e}", f.from)),
+        }
+    }
+    result
+}
+
+// ---- Putting Cobian's names back ----
+
+/// How Cobian named its backups. Only for folders taken over before the renames were recorded:
+/// their original names are gone, so they are rebuilt in this format (the user picks it).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CobianNaming {
+    /// "ymd-hms" (Cobian's default, `yyyy-mm-dd hh;nn;ss`) | "ymd-hm" | "yy-hms" | "yy-hm"
+    pub date: String,
+    /// "" = no type | "word" = " Full" | "paren" = " (Full)"
+    pub kind: String,
+}
+
+impl CobianNaming {
+    fn name(&self, prefix: &str, at: NaiveDateTime, kind: BackupMode) -> String {
+        let fmt = match self.date.as_str() {
+            "ymd-hm" => "%Y-%m-%d %H;%M",
+            "yy-hms" => "%y-%m-%d %H;%M;%S",
+            "yy-hm" => "%y-%m-%d %H;%M",
+            _ => "%Y-%m-%d %H;%M;%S",
+        };
+        let word = if kind == BackupMode::Full { "Full" } else { "Incremental" };
+        let tag = match self.kind.as_str() {
+            "word" => format!(" {word}"),
+            "paren" => format!(" ({word})"),
+            _ => String::new(),
+        };
+        format!("{prefix} {}{tag}", at.format(fmt))
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreFolder {
+    /// Its name now (this app's).
+    pub from: String,
+    /// The name it gets back (Cobian's).
+    pub to: String,
+    pub kind: BackupMode,
+    /// Why it can't be renamed back; None = it can.
+    pub problem: Option<String>,
+    /// The folder that holds it.
+    #[serde(skip)]
+    dir: PathBuf,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePlan {
+    pub task_id: String,
+    pub destination: String,
+    pub folders: Vec<RestoreFolder>,
+    /// No record of the renames (an older version took them over): names rebuilt from `CobianNaming`.
+    pub legacy: bool,
+}
+
+const NO_DEST: &str = "תיקיית היעד לא נמצאה - האם הכונן מחובר?";
+const NAME_TAKEN: &str = "כבר קיימת ביעד תיקייה בשם הזה, ולכן התיקייה לא מקבלת אותו";
+
+/// Which folders get Cobian's names back. `journal` = all recorded renames; `never_backed_up` = the
+/// task hasn't written a backup here, so all its dated folders came from a takeover (only then are
+/// unrecorded ones rebuilt with `naming`).
+pub fn restore_plan(task: &Task, journal: &[CobianRename], never_backed_up: bool, naming: &CobianNaming) -> RestorePlan {
+    let dest = task.destination.trim();
+    let mut folders = Vec::new();
+    let recorded: Vec<&CobianRename> = journal.iter().filter(|r| r.task_id == task.id).collect();
+    let legacy = recorded.is_empty() && never_backed_up;
+    // Names given in this plan (two folders can't both get one).
+    let mut taken: HashSet<(PathBuf, String)> = HashSet::new();
+    let mut check = |dir: &Path, from: &str, to: &str| -> Option<String> {
+        if !dir.is_dir() {
+            Some(NO_DEST.into())
+        } else if !dir.join(from).is_dir() {
+            Some("התיקייה כבר לא קיימת ביעד: היא נמחקה לפי הגדרת השמירה, או שגיבוי מלא השתמש בה מחדש".into())
+        } else if dir.join(to).exists() || !taken.insert((dir.to_path_buf(), to.to_lowercase())) {
+            Some(NAME_TAKEN.into())
+        } else {
+            None
+        }
+    };
+    for r in &recorded {
+        let dir = PathBuf::from(r.destination.trim());
+        // Renamed since, to a newer version's time format.
+        let now_named = backup::current_name(&dir, &r.to);
+        let problem = check(&dir, &now_named, &r.from);
+        folders.push(RestoreFolder {
+            from: now_named,
+            to: r.from.clone(),
+            kind: r.kind,
+            problem,
+            dir,
+        });
+    }
+    if legacy {
+        let dir = PathBuf::from(dest);
+        for src in &task.sources {
+            let short = cobian_short_name(&src.path);
+            if short.is_empty() {
+                continue;
+            }
+            for b in backup::list_backups(dest, &src.folder_name)
+                .into_iter()
+                .filter(|b| !b.partial)
+            {
+                let to = naming.name(&short, b.created_at.naive_local(), b.kind);
+                let problem = check(&dir, &b.name, &to);
+                folders.push(RestoreFolder {
+                    from: b.name,
+                    to,
+                    kind: b.kind,
+                    problem,
+                    dir: dir.clone(),
+                });
+            }
+        }
+        folders.reverse(); // oldest first, like the recorded ones
+    }
+    RestorePlan {
+        task_id: task.id.clone(),
+        destination: dest.to_string(),
+        folders,
+        legacy,
+    }
+}
+
+/// Renames the plan's folders back (those without a problem) and removes this app's index file
+/// from them. `done` holds them as (Cobian's name = `from`, this app's name = `to`).
+pub fn restore(plan: &RestorePlan) -> AdoptResult {
+    let mut result = AdoptResult::default();
+    for f in plan.folders.iter().filter(|f| f.problem.is_none()) {
+        let to = f.dir.join(&f.to);
+        match rename_retry(&f.dir.join(&f.from), &to) {
+            Ok(()) => {
+                crate::manifest::remove(&to);
+                result.renamed += 1;
+                result.done.push(AdoptFolder {
+                    from: f.to.clone(),
+                    to: f.from.clone(),
+                    kind: f.kind,
+                    created_at: Local::now(),
+                });
+            }
             Err(e) => result.errors.push(format!("{}: {e}", f.from)),
         }
     }
@@ -553,7 +713,7 @@ mod tests {
             "Docs 2026-09-29 03;00;00",
             "Docs 2026-09-30 03;00;00 (Full)",
             "Docs 2026-10-01 03;00;12 (Incremental)",
-            "Docs 2026-10-01 03-00 אינקרמנטלי", // already ours
+            "Docs 2026-10-01 03h00 אינקרמנטלי", // already ours
             "Pics 2026-10-01 03;00;00",
             "Docs old", // not Cobian's
         ] {
@@ -567,11 +727,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("Docs 2026-09-28 03;00;00", "Docs 2026-09-28 03-00 מלא"),
-                ("Docs 2026-09-29 03;00;00", "Docs 2026-09-29 03-00 אינקרמנטלי"),
-                ("Docs 2026-09-30 03;00;00 (Full)", "Docs 2026-09-30 03-00 מלא"),
+                ("Docs 2026-09-28 03;00;00", "Docs 2026-09-28 03h00 מלא"),
+                ("Docs 2026-09-29 03;00;00", "Docs 2026-09-29 03h00 אינקרמנטלי"),
+                ("Docs 2026-09-30 03;00;00 (Full)", "Docs 2026-09-30 03h00 מלא"),
                 // The minute is taken by our own folder: with seconds.
-                ("Docs 2026-10-01 03;00;12 (Incremental)", "Docs 2026-10-01 03-00-12 אינקרמנטלי"),
+                ("Docs 2026-10-01 03;00;12 (Incremental)", "Docs 2026-10-01 03h00m12s אינקרמנטלי"),
             ]
         );
         assert!(p.sources[1].folders.is_empty());
@@ -628,5 +788,74 @@ mod tests {
         assert_eq!(p.sources[1].folders.len(), 1);
         assert!(p.sources[1].folders[0].to.starts_with("Mail "));
         assert!(p.sources[1].folders[0].to.ends_with(" מלא"));
+    }
+
+    #[test]
+    fn restores_cobian_names() {
+        let root = Tmp(std::env::temp_dir().join(format!("backuper-cobian-{}", uuid::Uuid::new_v4())));
+        let dest = root.0.join("dst");
+        for d in ["Docs 2026-09-28 03;00;07 (Full)", "Docs 2026-09-29 03;00;00 (Incremental)"] {
+            fs::create_dir_all(dest.join(d)).unwrap();
+        }
+        let t = task(&dest, &["C:\\Docs"], BackupMode::Incremental);
+        let r = apply(&t, &[]);
+        assert_eq!(r.done.len(), 2);
+        let journal: Vec<CobianRename> = r
+            .done
+            .iter()
+            .map(|f| CobianRename {
+                task_id: t.id.clone(),
+                destination: t.destination.clone(),
+                from: f.from.clone(),
+                to: f.to.clone(),
+                kind: f.kind,
+                at: Local::now(),
+            })
+            .collect();
+        // A backup this app made later, and the index file a run left in a taken-over folder.
+        fs::create_dir_all(dest.join("Docs 2026-10-01 03h00 אינקרמנטלי")).unwrap();
+        crate::manifest::write(&dest.join(&journal[0].to), &[]);
+        assert!(crate::manifest::read(&dest.join(&journal[0].to)).is_some());
+
+        let p = restore_plan(&t, &journal, false, &CobianNaming::default());
+        assert!(!p.legacy);
+        assert_eq!(p.folders.len(), 2);
+        assert!(p.folders.iter().all(|f| f.problem.is_none()), "{:?}", p.folders);
+        let r = restore(&p);
+        assert_eq!((r.renamed, r.errors.len()), (2, 0));
+        assert!(dest.join("Docs 2026-09-28 03;00;07 (Full)").is_dir(), "the exact original name");
+        assert!(dest.join("Docs 2026-09-29 03;00;00 (Incremental)").is_dir());
+        assert!(crate::manifest::read(&dest.join("Docs 2026-09-28 03;00;07 (Full)")).is_none(), "index removed");
+        let left: Vec<String> = backup::list_backups(&t.destination, "Docs").into_iter().map(|b| b.name).collect();
+        assert_eq!(left, ["Docs 2026-10-01 03h00 אינקרמנטלי"], "this app's own backup stays");
+
+        // Recorded renames whose folders are gone (or already back) can't be restored again.
+        let p = restore_plan(&t, &journal, false, &CobianNaming::default());
+        assert!(p.folders.iter().all(|f| f.problem.is_some()));
+
+        // Taken over by an older version (no record), task never backed up: names rebuilt.
+        fs::remove_dir_all(dest.join("Docs 2026-10-01 03h00 אינקרמנטלי")).unwrap();
+        apply(&t, &[]);
+        assert!(restore_plan(&t, &[], false, &CobianNaming::default()).folders.is_empty(), "the task has backups of its own");
+        let naming = CobianNaming {
+            date: "ymd-hm".into(),
+            kind: "paren".into(),
+        };
+        let p = restore_plan(&t, &[], true, &naming);
+        assert!(p.legacy);
+        let names: Vec<(&str, &str)> = p.folders.iter().map(|f| (f.from.as_str(), f.to.as_str())).collect();
+        assert_eq!(
+            names,
+            [
+                ("Docs 2026-09-28 03h00 מלא", "Docs 2026-09-28 03;00 (Full)"),
+                ("Docs 2026-09-29 03h00 אינקרמנטלי", "Docs 2026-09-29 03;00 (Incremental)"),
+            ]
+        );
+        assert_eq!(
+            CobianNaming::default().name("Docs", dt("2026-09-28 03:00:07"), BackupMode::Full),
+            "Docs 2026-09-28 03;00;07"
+        );
+        assert_eq!(restore(&p).renamed, 2);
+        assert!(dest.join("Docs 2026-09-28 03;00 (Full)").is_dir());
     }
 }

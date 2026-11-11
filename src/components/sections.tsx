@@ -21,16 +21,20 @@ export type SectionInfo<Id extends string = string> = {
 export function Section({
   info,
   sectionRef,
+  hidden,
   children,
 }: {
   info: SectionInfo;
   sectionRef: (el: HTMLElement | null) => void;
+  /** Filtered out by a search. Stays mounted, so its text can still be searched and its fields keep their state. */
+  hidden?: boolean;
   children: ReactNode;
 }) {
   const Icon = info.icon;
   return (
     <section
       ref={sectionRef}
+      hidden={hidden}
       aria-labelledby={`sec-${info.id}`}
       className="scroll-mt-16 overflow-hidden rounded-xl border border-line bg-panel md:scroll-mt-4"
     >

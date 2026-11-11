@@ -101,7 +101,8 @@ export function kindFields(kind: TaskKind, prevFull: Schedule | null): Pick<Task
 /** The task's next scheduled run (earliest of its schedules) and its type. A full wins a tie. */
 export function nextRunOf(t: Task, st: TaskState | undefined): { at: string; mode: BackupMode } | null {
   if (!t.enabled || !st) return null;
-  const main = t.schedule.kind !== "manual" && st.nextRun ? { at: st.nextRun, mode: t.mode } : null;
+  const main =
+    t.schedule.kind !== "manual" && st.nextRun ? { at: st.nextRun, mode: st.fullNext ? ("full" as const) : t.mode } : null;
   const full = t.fullSchedule && st.nextFullRun ? { at: st.nextFullRun, mode: "full" as const } : null;
   if (!main || !full) return main ?? full;
   return new Date(full.at).getTime() <= new Date(main.at).getTime() ? full : main;

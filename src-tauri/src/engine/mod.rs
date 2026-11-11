@@ -5,9 +5,17 @@ pub mod native;
 pub mod robocopy;
 
 use crate::model::FileError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
+
+/// Win32 "disk full" codes (ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL). Every further file would fail
+/// the same way, so engines stop at the first one instead of working through the whole tree.
+pub fn is_disk_full(code: Option<u32>) -> bool {
+    matches!(code, Some(39 | 112))
+}
+
+pub const DISK_FULL_MESSAGE: &str = "אין מספיק מקום פנוי בכונן היעד, והגיבוי נעצר. פנו מקום בכונן (או הקטינו את מספר הגיבויים שנשמרים) והמשיכו את הגיבוי מאותה נקודה.";
 
 /// Make `target` identical to `source` (a full backup).
 pub struct CopyJob {
@@ -64,6 +72,36 @@ pub struct Filters {
     pub exclude_system: bool,
 }
 
+/// "C:\..." or "\\server\share\...".
+fn is_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\') || p.starts_with("\\\\")
+}
+
+impl Filters {
+    /// The filters for one source: a folder / file entry with a backslash that isn't a full path is
+    /// relative to the source (`Projects\cache`; one starting with `*` or `?` is left as it is) and becomes `<source>\Projects\cache`. robocopy only
+    /// understands full paths (a relative one silently matches nothing), so the engines get these.
+    pub fn for_source(&self, source: &Path) -> Filters {
+        let base = source.to_string_lossy().replace('/', "\\");
+        let base = base.trim_end_matches('\\');
+        let mut out = self.clone();
+        if base.is_empty() {
+            return out;
+        }
+        let abs = |e: &mut String| {
+            let t = e.trim();
+            // "*\Users\x" already matches at any depth (a wildcard also spans backslashes).
+            if t.contains('\\') && !is_absolute(t) && !t.starts_with(['*', '?']) {
+                *e = format!("{base}\\{}", t.trim_start_matches('\\'));
+            }
+        };
+        out.exclude_dirs.iter_mut().for_each(abs);
+        out.exclude_files.iter_mut().for_each(abs);
+        out
+    }
+}
+
 /// A file under some root (a source that passed the filters, or a file in a backup folder).
 #[derive(Debug, Clone)]
 pub struct ListedFile {
@@ -77,7 +115,7 @@ pub struct ListedFile {
 pub enum EngineEvent {
     /// The run moved on to the next source folder.
     SourceStarted,
-    /// "scanning" | "deleting" (old backups, before a full) | "copying"
+    /// "scanning" | "deleting" (old backups, before a full) | "pruning" (items the rules skip, removed from a reused folder) | "copying"
     Phase(&'static str),
     /// How much work the copy will do. `exact` = counted (a scan), not estimated from an older backup.
     Totals { files: u64, bytes: u64, exact: bool },
@@ -87,6 +125,9 @@ pub enum EngineEvent {
     TotalsUnavailable,
     /// A file copy started.
     File { path: String, size: u64 },
+    /// How much of the file that started last has been written so far (an estimate from the engine's
+    /// own I/O, so a huge file moves the progress instead of freezing it until it is done).
+    FileBytes(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +147,8 @@ pub struct CopyStats {
     pub files_failed: u64,
     pub errors: Vec<FileError>,
     pub exit_code: Option<i32>,
+    /// Lines for `SourceRun.debug`.
+    pub debug: Vec<String>,
 }
 
 pub struct CopyResult {

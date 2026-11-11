@@ -1,6 +1,6 @@
 [package]
 name = "backuper"
-version = "0.3.16"
+version = "0.3.19"
 edition = "2021"
 license = "GPL-3.0-only"
 
@@ -24,6 +24,9 @@ tauri-plugin-notification = "2.5.1"
 tauri-plugin-single-instance = "2.5.2"
 tauri-plugin-updater = "2"
 uuid = { version = "1.26.1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.8"
 
 [profile.release]
 opt-level = "s"

@@ -21,7 +21,8 @@
   --color-bad: var(--bad);
   --color-bad-soft: var(--bad-soft);
   --font-sans: "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, monospace;
+  /* Cascadia/Consolas have no Hebrew; without a Hebrew-capable fallback before `monospace`, the browser picks a serif-looking mono font for it. */
+  --font-mono: "Cascadia Mono", Consolas, "Segoe UI Variable Text", "Segoe UI", monospace;
 }
 
 :root {

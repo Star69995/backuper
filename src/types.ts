@@ -14,6 +14,7 @@ export type ScheduleKind = Schedule["kind"];
 
 export type FilterRule =
   | { kind: "include"; value: string }
+  | { kind: "includeName"; value: string }
   | { kind: "extension"; value: string }
   | { kind: "pattern"; value: string }
   /** `folders`: matches folder names (always skipped, with their contents) instead of file names. */
@@ -28,6 +29,12 @@ export type FilterRule =
 
 export type FilterKind = FilterRule["kind"];
 
+/** What reading a filter list file gave: the valid rules, and how many entries were left out. */
+export interface FilterImport {
+  rules: FilterRule[];
+  skipped: number;
+}
+
 /** Live reading of a regex filter: why it is invalid, what it says piece by piece, and a try-out on a sample name. */
 export interface RegexCheck {
   error: string | null;
@@ -36,6 +43,41 @@ export interface RegexCheck {
   /** null = no sample name given. */
   matched: boolean | null;
   matchedText: string | null;
+}
+
+/** A path to run through all the filter rules together (the filter check under the rule list). */
+export interface FilterProbe {
+  /** Full path, or relative to the task's source. Ending with "\\" = a folder. */
+  path: string;
+  /** Used only when the path isn't on disk. */
+  sizeMb: number | null;
+  ageDays: number | null;
+  hidden: boolean;
+  system: boolean;
+}
+
+export type RuleEffect = "none" | "skips" | "keeps" | "unknown" | "invalid";
+
+export interface RuleResult {
+  effect: RuleEffect;
+  detail: string | null;
+}
+
+export interface FilterCheck {
+  /** null = nothing to check (see notes). */
+  kept: boolean | null;
+  folder: boolean;
+  /** The checked path in full (a relative one under the task's first source); null with no source to read it under. */
+  fullPath: string | null;
+  /** The same path as a folder, for a name that isn't on disk and wasn't typed with a trailing `\`. */
+  asFolder: FilterCheck | null;
+  reason: string | null;
+  /** The real file the check used, when the path exists. */
+  onDisk: { size: number; modified: string | null; hidden: boolean; system: boolean } | null;
+  notes: string[];
+  /** One per rule, in order. */
+  rules: RuleResult[];
+  globalRules: RuleResult[];
 }
 
 /** What a task does when its drives (destination / sources) get connected. */
@@ -59,6 +101,8 @@ export interface Task {
   group: string;
   /** Imported from Cobian; waiting for the user to take over (or decline) Cobian's backups. Nothing runs meanwhile. */
   cobianPending: boolean;
+  /** Continue from Cobian's backups: they are renamed right before the task's next run (not before). */
+  cobianTakeover: boolean;
   sources: Source[];
   destination: string;
   /** Backup type of the main schedule. */
@@ -91,6 +135,31 @@ export interface TaskState {
   lastMessage: string | null;
   /** The last run was paused and its folder is still there: the next run continues in it. */
   resumable?: boolean;
+  /** The newest backup that was written (a failed or stopped run doesn't replace it). */
+  lastBackup?: LastBackup | null;
+  /** The next automatic run (scheduled, catch-up, drive connected) is a full backup, once. */
+  fullNext?: boolean;
+}
+
+/** Size of a task's newest backup (all its sources). Full if any source made a full one. */
+export interface LastBackup {
+  at: string;
+  bytes: number;
+  mode: BackupMode;
+}
+
+/** Free and total bytes of a drive. */
+export interface DiskSpace {
+  free: number;
+  total: number;
+}
+
+/** What a task's next full backup needs on the destination (null = no full backup expected). */
+export interface FullSpace {
+  /** About the size of the previous full backup(s). */
+  needed: number;
+  /** What delete-before removes first (0 without it); counts as free space. */
+  freed: number;
 }
 
 export interface Progress {
@@ -98,7 +167,7 @@ export interface Progress {
   taskId: string;
   taskName: string;
   mode: BackupMode;
-  phase: "scanning" | "deleting" | "copying";
+  phase: "scanning" | "deleting" | "pruning" | "copying";
   startedAt: string;
   sourceIndex: number;
   sourceCount: number;
@@ -115,6 +184,10 @@ export interface Progress {
   copyStartedAt: string | null;
   /** Bytes per second of the task's last real copy. */
   expectedRate: number | null;
+  /** Bytes the sources after the current one are expected to copy, from their last runs (null = unknown, 0 = last source). */
+  laterBytes: number | null;
+  /** Bytes the sources before the current one copied in this run. */
+  earlierBytes: number;
   currentFile: string;
 }
 
@@ -140,6 +213,8 @@ export interface Settings {
   globalFilters: FilterRule[];
   /** auto = download and install by itself (from the tray, between backups); notify = only say so. */
   updateMode: "auto" | "notify" | "off";
+  /** "auto" also installs with the window open after this many idle minutes (0 = only when closed/minimized). */
+  updateIdleMinutes: number;
   /** Walk the whole tree once before a full copy, just for an exact percentage (slow on big drives). */
   exactProgress: boolean;
   backgroundTotals: boolean;
@@ -158,6 +233,8 @@ export interface UpdateStatus {
   error: string | null;
   /** The user asked to install; it waits for the running/queued backups to finish. */
   installWaiting: boolean;
+  /** Show the update dialog: the "new version" notification was clicked (or the window opened after it). */
+  prompt: boolean;
 }
 
 export interface Snapshot {
@@ -169,9 +246,27 @@ export interface Snapshot {
   autostart: boolean;
   /** Ids of tasks whose drive was connected, waiting for "back up now?". */
   drivePrompts: string[];
+  /** Backup folders that should have been deleted but weren't (shown by DeleteProblemDialog). */
+  deleteProblems: DeleteProblem[];
   /** Shown until dismissed (e.g. the task list was recovered from a backup). */
   notice: Notice | null;
   update: UpdateStatus;
+  /** Per task id: how many of its folders a Cobian takeover renamed (their names can be put back). */
+  cobianRenamed: Record<string, number>;
+}
+
+/** A backup folder that should have been deleted but wasn't (model.rs `DeleteProblem`). */
+export interface DeleteProblem {
+  taskId: string;
+  taskName: string;
+  path: string;
+  /** access = needs admin, inUse = a program has a file open. */
+  reason: "access" | "inUse" | "other";
+  /** Windows's own message. */
+  message: string;
+  at: string;
+  /** The running backup waits for the answer before it copies (a delete-before failed). */
+  blocking: boolean;
 }
 
 export interface Notice {
@@ -186,6 +281,8 @@ export interface FileError {
   path: string;
   code: number | null;
   message: string;
+  /** What the file looked like when it failed (attributes, size, destination...); only in the copied error text. */
+  debug?: string;
 }
 
 export interface SourceRun {
@@ -206,6 +303,8 @@ export interface SourceRun {
   errors: FileError[];
   exitCode: number | null;
   logFile: string | null;
+  /** How the source was copied (engine command line, volumes...); only in the copied error text. */
+  debug?: string[];
 }
 
 export interface RunRecord {
@@ -235,6 +334,8 @@ export interface BackupFolder {
   createdAt: string;
   kind: BackupMode;
   partial: boolean;
+  /** Size of the folder's files; null when not known (a partial folder). */
+  bytes: number | null;
 }
 
 export interface SourceBackups {
@@ -323,6 +424,33 @@ export interface AdoptResult {
   errors: string[];
 }
 
+/**
+ * How Cobian named its backups - only for folders taken over by an older version, whose original
+ * names weren't recorded. `date`: "ymd-hms" (Cobian's default) | "ymd-hm" | "yy-hms" | "yy-hm";
+ * `kind`: "" (no type) | "word" (" Full") | "paren" (" (Full)").
+ */
+export interface CobianNaming {
+  date: string;
+  kind: string;
+}
+
+/** One taken-over folder and the Cobian name it gets back. */
+export interface RestoreFolder {
+  from: string;
+  to: string;
+  kind: BackupMode;
+  /** Why it can't be renamed back; null = it can. */
+  problem: string | null;
+}
+
+export interface RestorePlan {
+  taskId: string;
+  destination: string;
+  folders: RestoreFolder[];
+  /** No record of the renames: names rebuilt from `CobianNaming`. */
+  legacy: boolean;
+}
+
 /** An automatic copy of the task list, taken whenever it changed. */
 export interface TaskSnapshot {
   path: string;
@@ -335,6 +463,7 @@ export const newTask = (): Task => ({
   name: "",
   group: "",
   cobianPending: false,
+  cobianTakeover: false,
   sources: [],
   destination: "",
   mode: "incremental",

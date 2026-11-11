@@ -101,7 +101,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
                 {t.action.label}
               </Button>
             )}
-            <button type="button" aria-label="סגור" onClick={() => dismiss(t.id)} className="text-muted hover:text-fg">
+            <button type="button" aria-label="סגירה" onClick={() => dismiss(t.id)} className="text-muted hover:text-fg">
               <X size={16} />
             </button>
           </div>

@@ -13,12 +13,14 @@ import {
   Info,
   Layers,
   RefreshCw,
+  Search,
   Settings2,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errorText } from "../api";
+import { useUnsaved } from "../lib/unsaved";
 import {
   DRIVE_ACTION_LABEL,
   defaultFolderName,
@@ -34,12 +36,12 @@ import {
   taskDrives,
   taskKind,
 } from "../lib/format";
-import type { BackupMode, DriveAction, KeepMode, Source, Task } from "../types";
+import type { BackupMode, DriveAction, FilterRule, KeepMode, Source, Task } from "../types";
 import FilterRulesEditor from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { Section, type SectionInfo, SectionNav, useScrollSpy } from "./sections";
-import { Button, cx, Field, IconButton, Modal, NumberInput, Segmented, TextInput, Toggle } from "./ui";
+import { AutoGrowInput, Button, cx, EmptyState, Field, IconButton, Modal, NumberInput, SearchBox, Segmented, TextInput, Toggle } from "./ui";
 
 type SectionId = "general" | "sources" | "destination" | "kind" | "retention" | "schedule" | "filters" | "advanced";
 
@@ -55,14 +57,8 @@ export function PathPicker({
   placeholder: string;
 }) {
   return (
-    <div className="flex gap-2">
-      <TextInput
-        dir="ltr"
-        className="text-left"
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-      />
+    <div className="flex items-start gap-2">
+      <AutoGrowInput dir="ltr" joiner="" className="text-left" value={value} placeholder={placeholder} onChange={onChange} />
       <Button
         icon={<FolderOpen size={16} />}
         onClick={async () => {
@@ -300,15 +296,31 @@ export function DriveConnectField({ task, onChange }: { task: Task; onChange: (v
 }
 
 
+/** What the editor's search looks at in a section: its text plus what is typed or picked in its fields (not their toggles). */
+function searchText(section: HTMLElement | null | undefined) {
+  if (!section) return "";
+  const values = [...section.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select")]
+    .map((el) =>
+      el instanceof HTMLSelectElement
+        ? (el.selectedOptions[0]?.text ?? "")
+        : el instanceof HTMLInputElement && ["checkbox", "radio", "button", "submit"].includes(el.type)
+          ? ""
+          : el.value,
+    )
+    .join("\n");
+  return `${section.textContent ?? ""}\n${values}`.toLowerCase();
+}
+
 export default function TaskEditor({
   task,
-  globalFilterCount,
+  globalFilters,
   groups,
   onClose,
   onSaved,
 }: {
   task: Task;
-  globalFilterCount: number;
+  /** The global rules from Settings (the filter check runs them together with the task's). */
+  globalFilters: FilterRule[];
   /** Existing group names, offered as suggestions. */
   groups: string[];
   onClose: () => void;
@@ -323,6 +335,7 @@ export default function TaskEditor({
   const kind = taskKind(t);
   const keepsOne = t.keepMode === "count" && t.keepCount === 1;
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
+  useUnsaved(dirty ? (isNew ? "משימה חדשה" : `עריכת המשימה "${task.name}"`) : null);
   // Existing backups are found by destination + folder name. A new destination leaves them behind;
   // a new folder name renames them (now, or when the destination drive is connected).
   const destinationChanged = !isNew && t.destination.trim() !== task.destination;
@@ -396,8 +409,24 @@ export default function TaskEditor({
       icon: SlidersHorizontal,
     },
   ];
-  const spy = useScrollSpy(sections.map((s) => s.id));
-  const sec = (id: SectionId) => ({ info: sections.find((s) => s.id === id)!, sectionRef: spy.register(id) });
+  // Search: sections that don't contain the text are hidden (they stay mounted, so their text can be searched).
+  const [query, setQuery] = useState("");
+  const els = useRef<Partial<Record<SectionId, HTMLElement | null>>>({});
+  const q = query.trim().toLowerCase();
+  const visible = sections.filter((s) => !q || searchText(els.current[s.id]).includes(q));
+  const spy = useScrollSpy(visible.map((s) => s.id));
+  const active = visible.some((s) => s.id === spy.active) ? spy.active : visible[0]?.id;
+  const sec = (id: SectionId) => ({
+    info: sections.find((s) => s.id === id)!,
+    hidden: !visible.some((s) => s.id === id),
+    sectionRef: (el: HTMLElement | null) => {
+      els.current[id] = el;
+      spy.register(id)(el);
+    },
+  });
+  useEffect(() => {
+    if (spy.body.current) spy.body.current.scrollTop = 0;
+  }, [q, spy.body]);
 
   const save = async () => {
     setSaving(true);
@@ -419,6 +448,22 @@ export default function TaskEditor({
       bodyRef={spy.body}
       title={isNew ? "משימת גיבוי חדשה" : `עריכת משימה: ${task.name}`}
       onClose={onClose}
+      toolbar={
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          placeholder="חיפוש בהגדרות המשימה..."
+          aria-label="חיפוש בהגדרות המשימה"
+          className="w-full"
+          onKeyDown={(e) => {
+            // Escape clears the search first; the dialog closes on the next one.
+            if (e.key === "Escape" && query) {
+              e.stopPropagation();
+              setQuery("");
+            }
+          }}
+        />
+      }
       footer={
         <>
           {error && (
@@ -429,14 +474,19 @@ export default function TaskEditor({
           )}
           <Button onClick={onClose}>ביטול</Button>
           <Button variant="primary" onClick={save} disabled={saving}>
-            {isNew ? "צור משימה" : "שמור שינויים"}
+            {isNew ? "יצירת משימה" : "שמירת השינויים"}
           </Button>
         </>
       }
     >
       <div className="md:flex md:items-start md:gap-6">
-        <SectionNav label="מקטעי המשימה" sections={sections} active={spy.active} onSelect={spy.jump} />
+        <SectionNav label="מקטעי המשימה" sections={visible} active={active ?? "general"} onSelect={spy.jump} />
         <div className="flex min-w-0 flex-1 flex-col gap-5">
+          {visible.length === 0 && (
+            <EmptyState icon={<Search size={26} />} title="לא נמצא דבר">
+              נסו מילה אחרת, או נקו את החיפוש כדי לראות את כל ההגדרות.
+            </EmptyState>
+          )}
           <Section {...sec("general")}>
             <div className="flex flex-wrap items-end gap-4">
               <Field label="שם המשימה" className="min-w-52 flex-1">
@@ -562,15 +612,20 @@ export default function TaskEditor({
           </Section>
 
           <Section {...sec("filters")}>
-            <FilterRulesEditor rules={t.filters} onChange={(f) => set("filters", f)} />
+            <FilterRulesEditor
+              rules={t.filters}
+              onChange={(f) => set("filters", f)}
+              sources={t.sources.map((s) => s.path)}
+              globalRules={t.useGlobalFilters ? globalFilters : []}
+            />
             <Toggle
               checked={t.useGlobalFilters}
               onChange={(v) => set("useGlobalFilters", v)}
               label="החלת כללי הסינון הכלליים"
               description={
-                globalFilterCount === 0
+                globalFilters.length === 0
                   ? "עדיין לא הוגדרו כללים כלליים (אפשר להגדיר אותם בהגדרות)."
-                  : `${globalFilterCount} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
+                  : `${globalFilters.length} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
               }
             />
           </Section>

@@ -2,28 +2,20 @@ import { AlertTriangle, ArrowLeft, ChevronDown, FileText, FolderOpen, History, I
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtDate, fmtDateTime, MODE_LABEL } from "../lib/format";
-import type { AdoptPlan, AdoptResult, CobianList, CobianLists, Task } from "../types";
+import type { AdoptPlan, CobianList, CobianLists, CobianNaming, RestorePlan, Task } from "../types";
 import { useFeedback } from "./feedback";
-import { Badge, Button, cx, EmptyState, Modal, PathText, Spinner } from "./ui";
+import { Badge, Button, cx, EmptyState, Field, Modal, PathText, Select, Spinner } from "./ui";
 
 const TYPICAL_DIR = "C:\\Program Files\\Cobian Reflector\\Lists";
 
 export const planFolderCount = (p: AdoptPlan | undefined) => p?.sources.reduce((n, s) => n + s.folders.length, 0) ?? 0;
 
-/** Toast text for a finished takeover. */
-export function takeoverToast(r: AdoptResult) {
-  return r.errors.length === 0
-    ? {
-        tone: "ok" as const,
-        title: r.renamed === 1 ? "גיבוי אחד של Cobian הומר" : `${r.renamed} גיבויים של Cobian הומרו`,
-        message: "הגיבוי הבא ימשיך מהגיבוי האחרון של Cobian.",
-      }
-    : {
-        tone: "warn" as const,
-        title: `${r.renamed} גיבויים הומרו, ${r.errors.length} לא`,
-        message: `${r.errors.slice(0, 3).join("; ")}. ודאו שהתיקיות לא פתוחות בתוכנה אחרת (כמו Cobian או סייר הקבצים), ונסו שוב מתפריט המשימה - "המשך מגיבויי Cobian".`,
-      };
-}
+/** Toast after choosing to continue from Cobian's backups (nothing is renamed yet). */
+const TAKEOVER_SET = {
+  tone: "ok" as const,
+  title: "הגיבוי הבא ימשיך מהגיבויים של Cobian",
+  message: "שמות התיקיות של Cobian ישתנו רק כשהמשימה תרוץ כאן בפעם הראשונה. עד אז Cobian ממשיך לזהות אותן.",
+};
 
 /**
  * Picks a Cobian task list: the lists found on this computer, or any file (the dialog opens
@@ -238,15 +230,14 @@ export function CobianPendingDialog({
     setBusy(true);
     try {
       if (takeOver) {
-        const r = await api.takeOverCobian(ids);
-        toast(takeoverToast(r));
-        if (r.errors.length > 0) return setBusy(false);
+        await api.takeOverCobian(ids);
+        toast(TAKEOVER_SET);
       } else {
         await api.declineCobianTakeover(ids);
       }
       onResolved();
     } catch (e) {
-      toast({ tone: "bad", title: takeOver ? "ההמרה נכשלה" : "העדכון נכשל", message: errorText(e) });
+      toast({ tone: "bad", title: "העדכון נכשל", message: errorText(e) });
       setBusy(false);
     }
   };
@@ -266,7 +257,7 @@ export function CobianPendingDialog({
             בלי להמשיך
           </Button>
           <Button variant="primary" disabled={busy} onClick={() => answer(true)}>
-            {busy ? "ממיר..." : "המשך מגיבויי Cobian"}
+            המשך מגיבויי Cobian
           </Button>
         </>
       }
@@ -274,14 +265,14 @@ export function CobianPendingDialog({
       <div className="flex flex-col gap-3 text-[13px]">
         <p>
           {found.length === 1 ? "המשימה יובאה" : "המשימות יובאו"} מ-Cobian, וביעד {found.length === 1 ? "שלה" : "שלהן"} נמצאו
-          גיבויים ש-Cobian כבר יצר. אם ממשיכים מהם, התיקיות מקבלות את השמות של התוכנה הזו (רק שינוי שם, בלי להעתיק דבר), והגיבוי
-          האינקרמנטלי הבא מעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian. בלי להמשיך, הגיבוי הראשון יהיה מלא והתיקיות של Cobian לא
-          ייגעו.
+          גיבויים ש-Cobian כבר יצר. אם ממשיכים מהם, בריצה הראשונה כאן התיקיות מקבלות את השמות של התוכנה הזו (רק שינוי שם, בלי
+          להעתיק דבר), והגיבוי מעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian. בלי להמשיך, הגיבוי הראשון יהיה מלא והתיקיות של
+          Cobian לא ייגעו.
         </p>
         <p className="text-muted">
           ביטול משאיר את {found.length === 1 ? "המשימה" : "המשימות"} מושבתות, ותישאלו שוב כשתפעילו{" "}
-          {found.length === 1 ? "אותה" : "אותן"}. אחרי ההמשך מהגיבויים Cobian כבר לא מזהה את התיקיות - השביתו את המשימות ב-Cobian,
-          כדי שלא ירוצו בשתי התוכנות.
+          {found.length === 1 ? "אותה" : "אותן"}. מהריצה הראשונה כאן Cobian כבר לא מזהה את התיקיות (אפשר להחזיר לו אותן מתפריט
+          המשימה) - השביתו את המשימות ב-Cobian, כדי שלא ירוצו בשתי התוכנות.
         </p>
         <ul className="flex flex-col gap-2">
           {found.map((t) => (
@@ -296,7 +287,10 @@ export function CobianPendingDialog({
   );
 }
 
-/** For a saved task: finds its Cobian backups in the destination and takes them over. */
+/**
+ * For a saved task: finds its Cobian backups in the destination and sets the task to continue from them
+ * (renamed at its next run), or cancels that while it hasn't run yet.
+ */
 export function CobianTakeoverDialog({ task, onClose, onDone }: { task: Task; onClose: () => void; onDone: () => void }) {
   const { toast } = useFeedback();
   const [plan, setPlan] = useState<AdoptPlan | null>(null);
@@ -311,14 +305,21 @@ export function CobianTakeoverDialog({ task, onClose, onDone }: { task: Task; on
       });
   }, [task, toast, onClose]);
   const count = planFolderCount(plan ?? undefined);
+  const planned = task.cobianTakeover;
 
   const apply = async () => {
     setBusy(true);
     try {
-      toast(takeoverToast(await api.takeOverCobian([task.id])));
+      if (planned) {
+        await api.declineCobianTakeover([task.id]);
+        toast({ tone: "info", title: "ההמשך מהגיבויים של Cobian בוטל", message: "שמות התיקיות של Cobian לא ישתנו." });
+      } else {
+        await api.takeOverCobian([task.id]);
+        toast(TAKEOVER_SET);
+      }
       onDone();
     } catch (e) {
-      toast({ tone: "bad", title: "ההמרה נכשלה", message: errorText(e) });
+      toast({ tone: "bad", title: "העדכון נכשל", message: errorText(e) });
       setBusy(false);
     }
   };
@@ -330,10 +331,10 @@ export function CobianTakeoverDialog({ task, onClose, onDone }: { task: Task; on
       onClose={onClose}
       footer={
         <>
-          <Button onClick={onClose}>{count > 0 ? "ביטול" : "סגירה"}</Button>
-          {count > 0 && (
-            <Button variant="primary" disabled={busy} onClick={apply}>
-              {busy ? "ממיר..." : count === 1 ? "המרת גיבוי אחד" : `המרת ${count} גיבויים`}
+          <Button onClick={onClose}>{count > 0 || planned ? "ביטול" : "סגירה"}</Button>
+          {(count > 0 || planned) && (
+            <Button variant={planned ? "secondary" : "primary"} disabled={busy} onClick={apply}>
+              {planned ? "לא להמשיך מהם" : "להמשיך מהם בריצה הבאה"}
             </Button>
           )}
         </>
@@ -346,16 +347,222 @@ export function CobianTakeoverDialog({ task, onClose, onDone }: { task: Task; on
         </div>
       ) : (
         <div className="flex flex-col gap-3 text-[13px]">
-          <p>
-            התיקיות ש-Cobian יצר ביעד מקבלות את השמות של התוכנה הזו (רק שינוי שם, בלי להעתיק דבר). מאותו רגע הן נחשבות לגיבויים של
-            המשימה: הגיבוי האינקרמנטלי הבא יעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian, והן יימחקו לפי הגדרת השמירה של המשימה.
-          </p>
+          {planned ? (
+            <p>
+              המשימה כבר מוגדרת להמשיך מהגיבויים של Cobian. שמות התיקיות עוד לא השתנו - הם ישתנו כשהמשימה תרוץ כאן בפעם הראשונה.
+              אפשר לבטל את זה עכשיו, ואז הגיבוי הראשון יהיה מלא והתיקיות של Cobian לא ייגעו.
+            </p>
+          ) : (
+            <p>
+              כשהמשימה תרוץ כאן בפעם הבאה, התיקיות ש-Cobian יצר ביעד יקבלו את השמות של התוכנה הזו (רק שינוי שם, בלי להעתיק דבר),
+              והגיבוי יעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian. מאותו רגע הן נחשבות לגיבויים של המשימה, ויימחקו לפי הגדרת
+              השמירה שלה. עד אז שום שם לא משתנה.
+            </p>
+          )}
           <p className="text-muted">
-            אחרי ההמרה Cobian כבר לא מזהה את התיקיות האלה - השביתו את המשימה ב-Cobian, כדי שלא תרוץ בשתי התוכנות.
+            מהריצה הראשונה כאן Cobian כבר לא מזהה את התיקיות האלה (אפשר להחזיר לו אותן מתפריט המשימה - "החזרת השמות של Cobian").
+            השביתו את המשימה ב-Cobian, כדי שלא תרוץ בשתי התוכנות.
           </p>
           <TakeoverSummary plan={plan} defaultOpen />
         </div>
       )}
     </Modal>
+  );
+}
+
+const DATE_FORMATS = [
+  { value: "ymd-hms", label: "2026-10-01 03;00;00" },
+  { value: "ymd-hm", label: "2026-10-01 03;00" },
+  { value: "yy-hms", label: "26-10-01 03;00;00" },
+  { value: "yy-hm", label: "26-10-01 03;00" },
+];
+const KIND_FORMATS = [
+  { value: "", label: "בלי סוג" },
+  { value: "word", label: "Full / Incremental" },
+  { value: "paren", label: "(Full) / (Incremental)" },
+];
+
+/**
+ * Gives the taken-over folders of one or more tasks Cobian's names back. Recorded renames go back
+ * exactly; folders an older version took over (no record) get names rebuilt in a format the user picks.
+ */
+export function CobianRestoreDialog({ tasks, onClose, onDone }: { tasks: Task[]; onClose: () => void; onDone: () => void }) {
+  const { toast } = useFeedback();
+  const [naming, setNaming] = useState<CobianNaming>({ date: "ymd-hms", kind: "" });
+  const [plans, setPlans] = useState<RestorePlan[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ids = tasks.map((t) => t.id);
+  const key = ids.join(",");
+  useEffect(() => {
+    let live = true;
+    api
+      .planCobianRestore(ids, naming)
+      .then((p) => live && setPlans(p))
+      .catch((e) => {
+        toast({ tone: "bad", title: "החיפוש נכשל", message: errorText(e) });
+        onClose();
+      });
+    return () => {
+      live = false;
+    };
+    // Re-planned when the format changes (or the tasks); not when the parent re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, naming.date, naming.kind]);
+  const all = plans?.flatMap((p) => p.folders) ?? [];
+  const ready = all.filter((f) => !f.problem);
+  const blocked = all.filter((f) => f.problem);
+  const withFolders = plans?.filter((p) => p.folders.length > 0) ?? [];
+  const multi = tasks.length > 1;
+  const nameOf = (id: string) => tasks.find((t) => t.id === id)?.name ?? "";
+  // Only tasks that get names back are switched off.
+  const switching = plans?.filter((p) => p.folders.some((f) => !f.problem)).length ?? 0;
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      const r = await api.restoreCobianNames(ids, naming);
+      const off = switching === 1 ? "המשימה כאן הושבתה" : "המשימות כאן הושבתו";
+      toast(
+        r.errors.length === 0
+          ? {
+              tone: "ok",
+              title: r.renamed === 1 ? "השם של Cobian הוחזר לתיקייה אחת" : `השמות של Cobian הוחזרו ל-${r.renamed} תיקיות`,
+              message: `Cobian מזהה אותן שוב. ${off}, כדי שלא ירוצו יחד עם Cobian.`,
+            }
+          : {
+              tone: "warn",
+              title: `${r.renamed} תיקיות קיבלו את השם של Cobian, ${r.errors.length} לא`,
+              message: `${r.errors.slice(0, 3).join("; ")}. ודאו שהתיקיות לא פתוחות בתוכנה אחרת (כמו Cobian או סייר הקבצים), ונסו שוב.`,
+            },
+      );
+      onDone();
+    } catch (e) {
+      toast({ tone: "bad", title: "החזרת השמות נכשלה", message: errorText(e) });
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="החזרת השמות של Cobian"
+      subtitle={multi ? `${tasks.length} משימות` : tasks[0]?.name}
+      size="lg"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>{ready.length > 0 ? "ביטול" : "סגירה"}</Button>
+          {ready.length > 0 && (
+            <Button variant="primary" disabled={busy} onClick={apply}>
+              {busy ? "משנה שמות..." : ready.length === 1 ? "החזרת השם לתיקייה אחת" : `החזרת השמות ל-${ready.length} תיקיות`}
+            </Button>
+          )}
+        </>
+      }
+    >
+      {!plans ? (
+        <div className="flex items-center justify-center gap-2 p-8 text-sm text-muted">
+          <Spinner /> מחפש את התיקיות שהומרו
+          {!multi && (
+            <>
+              {" "}
+              ב-
+              <PathText path={tasks[0].destination} className="inline" />
+            </>
+          )}
+        </div>
+      ) : all.length === 0 ? (
+        <EmptyState icon={<History size={26} />} title="אין תיקיות להחזיר ל-Cobian">
+          <p>
+            {tasks.some((t) => t.cobianTakeover)
+              ? "שמות התיקיות של Cobian עוד לא השתנו - הם ישתנו רק כשהמשימה תרוץ כאן. כדי שלא ישתנו בכלל, בחרו בתפריט המשימה \"המשך מגיבויי Cobian\" ואז \"לא להמשיך מהם\"."
+              : multi
+                ? "לא נמצאו תיקיות של Cobian שהמשימות האלה שינו את השם שלהן."
+                : "לא נמצאו תיקיות של Cobian שהמשימה הזו שינתה את השם שלהן."}
+          </p>
+        </EmptyState>
+      ) : (
+        <div className="flex flex-col gap-3 text-[13px]">
+          <p>
+            התיקיות ש-Cobian יצר וקיבלו את השמות של התוכנה הזו יקבלו בחזרה את השמות של Cobian (רק שינוי שם, בלי להעתיק או למחוק דבר),
+            כך ש-Cobian יזהה אותן שוב. {multi ? "כל משימה שתיקיות שלה יחזרו ל-Cobian תושבת" : "המשימה כאן תושבת"}, כדי שלא תרוץ יחד
+            עם Cobian. גיבויים שהתוכנה הזו עצמה יצרה נשארים כמו שהם.
+          </p>
+          {plans.some((p) => p.legacy && p.folders.length > 0) && (
+            <div className="flex flex-col gap-2 rounded-lg border border-warn/40 bg-warn/10 p-3">
+              <p>
+                {multi ? "חלק מהתיקיות הומרו" : "התיקיות האלה הומרו"} בגרסה קודמת, שלא שמרה את השמות המקוריים, ולכן השמות של Cobian
+                נבנים מחדש מהתאריך. בחרו את הפורמט ש-Cobian השתמש בו - אפשר לראות אותו ביומן של Cobian, או בתיקייה ש-Cobian יצר אחרי
+                המעבר. אם בשם המקורי היו שניות אחרות מ-00, תקנו את השם ידנית אחר כך.
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Field label="פורמט התאריך" hint="הראשון הוא ברירת המחדל של Cobian">
+                  <Select dir="ltr" value={naming.date} onChange={(e) => setNaming({ ...naming, date: e.target.value })}>
+                    {DATE_FORMATS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="סוג הגיבוי בסוף השם">
+                  <Select dir="ltr" value={naming.kind} onChange={(e) => setNaming({ ...naming, kind: e.target.value })}>
+                    {KIND_FORMATS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            </div>
+          )}
+          {withFolders.map((p) => (
+            <div key={p.taskId} className="flex flex-col gap-1.5">
+              {multi && <span className="text-sm font-medium">{nameOf(p.taskId)}</span>}
+              <RestoreList plan={p} />
+            </div>
+          ))}
+          {multi && withFolders.length < tasks.length && (
+            <p className="text-muted">
+              אין מה להחזיר ב:{" "}
+              {plans
+                .filter((p) => p.folders.length === 0)
+                .map((p) => nameOf(p.taskId))
+                .join(", ")}
+              .
+            </p>
+          )}
+          {blocked.length > 0 && ready.length > 0 && (
+            <p className="text-muted">
+              {blocked.length === 1 ? "תיקייה אחת לא תקבל" : `${blocked.length} תיקיות לא יקבלו`} את השם של Cobian - הסיבה מופיעה ליד
+              כל אחת.
+            </p>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function RestoreList({ plan }: { plan: RestorePlan }) {
+  return (
+    <ul className="flex flex-col gap-1 rounded-lg border border-line bg-panel2/60 p-2">
+      {[...plan.folders].reverse().map((f) => (
+        <li key={f.from} className="flex flex-col gap-0.5 text-xs">
+          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+            <Badge tone={f.kind === "full" ? "accent" : "neutral"}>{MODE_LABEL[f.kind]}</Badge>
+            <bdi className="text-muted">{f.from}</bdi>
+            <ArrowLeft size={12} className="shrink-0 text-muted" />
+            <bdi className={cx(f.problem && "text-muted line-through")}>{f.to}</bdi>
+          </span>
+          {f.problem && (
+            <span className="flex gap-1.5 text-warn">
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              {f.problem}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

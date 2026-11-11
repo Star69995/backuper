@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { ChevronLeft, ChevronRight, type LucideProps, Play, Search, SkipForward, X } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type Ref,
   type SelectHTMLAttributes,
+  type TextareaHTMLAttributes,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -14,6 +15,15 @@ import {
 import { createPortal } from "react-dom";
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
+
+/**
+ * Run icons, mirrored for RTL: lucide draws "forward" pointing right, in Hebrew forward is to the left.
+ * Always use these instead of lucide's Play / SkipForward (a direction-neutral icon like Pause needs nothing).
+ */
+export const RunIcon = ({ className, ...p }: LucideProps) => <Play {...p} className={cx("-scale-x-100", className)} />;
+export const SkipIcon = ({ className, ...p }: LucideProps) => (
+  <SkipForward {...p} className={cx("-scale-x-100", className)} />
+);
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
 
@@ -107,6 +117,71 @@ export const inputCls =
 
 export function TextInput({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cx(inputCls, withWidth(className))} {...rest} />;
+}
+
+/**
+ * A one-line field that wraps and grows in height with its text, for values that can get long (a list of
+ * extensions, a path). Still a single value: Enter does nothing and pasted line breaks become `joiner`
+ * (", " for a list; pass "" for a path).
+ */
+export function AutoGrowInput({
+  className,
+  value,
+  onChange,
+  joiner = ", ",
+  ...rest
+}: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange" | "rows"> & {
+  value: string;
+  onChange: (v: string) => void;
+  joiner?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  useLayoutEffect(fit, [value]);
+  // The width changes with the window / the row's other controls, and so does where the text wraps.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      className={cx(inputCls, "h-auto min-h-9 resize-none overflow-hidden py-1.5 leading-normal", withWidth(className))}
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/\s*[\r\n]+\s*/g, joiner))}
+      onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+      {...rest}
+    />
+  );
+}
+
+/** Text field with a magnifier on the start side; `className` sizes the field itself. */
+export function SearchBox({
+  value,
+  onChange,
+  className,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange"> & { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="relative">
+      <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
+      <TextInput
+        {...rest}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={cx("ps-9", className)}
+      />
+    </div>
+  );
 }
 
 export function NumberInput({
@@ -371,6 +446,7 @@ export function Modal({
   size = "md",
   dismissable = true,
   bodyRef,
+  toolbar,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -379,11 +455,19 @@ export function Modal({
   footer?: ReactNode;
   size?: "sm" | "md" | "lg" | "xl";
   dismissable?: boolean;
+  /** A row under the title that stays put while the body scrolls (e.g. a search box). */
+  toolbar?: ReactNode;
   /** The scrolling body, for content that tracks its own scroll position. */
   bodyRef?: Ref<HTMLDivElement>;
 }) {
+  const dialog = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // A dialog opened over this one (portals mount last on top) takes Escape; this one stays open.
+      const open = document.querySelectorAll('[role="dialog"]');
+      if (open[open.length - 1] === dialog.current) onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -394,6 +478,7 @@ export function Modal({
       onMouseDown={(e) => dismissable && e.target === e.currentTarget && onClose()}
     >
       <div
+        ref={dialog}
         role="dialog"
         aria-modal
         className={cx(
@@ -406,10 +491,11 @@ export function Modal({
             <h2 className="text-base font-semibold">{title}</h2>
             {subtitle && <div className="mt-0.5 text-[13px] text-muted">{subtitle}</div>}
           </div>
-          <IconButton label="סגור" onClick={onClose} className="-me-2 -mt-1">
+          <IconButton label="סגירה" onClick={onClose} className="-me-2 -mt-1">
             <X size={18} />
           </IconButton>
         </div>
+        {toolbar && <div className="border-b border-line px-5 py-2">{toolbar}</div>}
         <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {children}
         </div>
@@ -421,17 +507,25 @@ export function Modal({
 }
 
 export type MenuItem =
-  { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean } | "separator";
+  | { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }
+  /** Opens a list of its own in the same menu (with a way back), so a long list doesn't crowd the main one. */
+  | { label: string; icon?: ReactNode; items: MenuItem[]; disabled?: boolean }
+  | "separator";
 
 /**
  * Dropdown menu rendered in a portal (so tables with overflow don't clip it).
  * `fill`: the trigger spans its container and the menu is at least as wide (a form field that picks from a list).
+ * An item with `items` swaps the menu's content for that list, with a "חזרה" row on top.
  */
 export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => ReactNode; items: MenuItem[]; fill?: boolean }) {
   const anchor = useRef<HTMLSpanElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const close = () => setPos(null);
+  const [sub, setSub] = useState<{ label: string; items: MenuItem[] } | null>(null);
+  const close = () => {
+    setPos(null);
+    setSub(null);
+  };
 
   const openMenu = () => {
     const r = anchor.current!.getBoundingClientRect();
@@ -446,21 +540,23 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
     if (top + m.height > window.innerHeight - 8) top = Math.max(8, a.top - m.height - 4);
     if (left + m.width > window.innerWidth - 8) left = Math.max(8, a.right - m.width);
     if (top !== pos.top || left !== pos.left) setPos({ top, left });
-  }, [pos]);
+  }, [pos, sub]);
 
   useEffect(() => {
     if (!pos) return;
     const onDown = (e: MouseEvent) => !menu.current?.contains(e.target as Node) && close();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    // The page scrolling moves the anchor away; scrolling a long menu itself must not close it.
+    const onScroll = (e: Event) => !menu.current?.contains(e.target as Node) && close();
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
     window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [pos]);
 
@@ -474,29 +570,49 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
           <div
             ref={menu}
             role="menu"
-            className="fixed z-50 max-h-72 min-w-48 overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl"
+            className="fixed z-50 max-h-[min(32rem,calc(100vh-16px))] min-w-48 overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl"
             style={{ top: pos.top, left: pos.left, ...(fill && { minWidth: anchor.current?.offsetWidth }) }}
           >
-            {items.map((it, i) =>
+            {sub && (
+              <>
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => setSub(null)}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-start text-[13px] text-muted hover:bg-hover"
+                >
+                  <span className="flex size-4 items-center justify-center opacity-80">
+                    <ChevronRight size={14} />
+                  </span>
+                  חזרה
+                </button>
+                <div className="px-2.5 pb-1 pt-0.5 text-xs font-semibold text-muted">{sub.label}</div>
+                <div className="my-1 h-px bg-line" />
+              </>
+            )}
+            {(sub ? sub.items : items).map((it, i) =>
               it === "separator" ? (
                 <div key={i} className="my-1 h-px bg-line" />
               ) : (
                 <button
-                  key={i}
+                  key={`${sub ? "s" : "m"}${i}`}
                   role="menuitem"
                   type="button"
                   disabled={it.disabled}
+                  aria-haspopup={"items" in it ? "menu" : undefined}
                   onClick={() => {
+                    if ("items" in it) return setSub({ label: it.label, items: it.items });
                     close();
                     it.onClick();
                   }}
                   className={cx(
                     "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-start text-[13px] disabled:opacity-40",
-                    it.danger ? "text-bad hover:bg-bad-soft" : "hover:bg-hover",
+                    "danger" in it && it.danger ? "text-bad hover:bg-bad-soft" : "hover:bg-hover",
                   )}
                 >
                   <span className="flex size-4 items-center justify-center opacity-80">{it.icon}</span>
-                  {it.label}
+                  <span className="flex-1">{it.label}</span>
+                  {"items" in it && <ChevronLeft size={14} className="opacity-60" />}
                 </button>
               ),
             )}
@@ -519,7 +635,7 @@ export function EmptyState({ icon, title, children }: { icon: ReactNode; title: 
 
 /**
  * Paths are LTR content inside the RTL layout. Each segment is isolated so a Hebrew
- * folder name with a date ("מסמכים 2026-09-01 03-00") keeps its own order.
+ * folder name with a date ("מסמכים 2026-09-01 03h00") keeps its own order.
  */
 export function PathText({ path, className, title = path }: { path: string; className?: string; title?: string }) {
   const parts = path.split(/(\\)/);

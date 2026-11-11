@@ -1,3 +1,4 @@
+mod acl;
 mod backup;
 mod cobian;
 mod cobianmigrate;
@@ -6,9 +7,11 @@ mod commands;
 mod core;
 mod drives;
 mod engine;
+mod filterlist;
 mod filters;
 mod manifest;
 mod model;
+mod filtercheck;
 mod regexcheck;
 mod schedule;
 mod store;
@@ -71,6 +74,15 @@ fn mirror_title_bar(window: &tauri::WebviewWindow) {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | RTL as isize);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0, FLAGS);
+    }
+}
+
+/// The app started again as admin to delete backup folders (`acl::delete_elevated`): does that and
+/// exits, before anything else (single instance, window) starts.
+pub fn elevated_delete_if_asked() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(acl::DELETE_SWITCH) {
+        std::process::exit(acl::elevated_main(&args[1..]));
     }
 }
 
@@ -147,6 +159,8 @@ pub fn run() {
             commands::reorder_tasks,
             commands::run_tasks,
             commands::resume_task,
+            commands::dismiss_paused,
+            commands::set_full_next,
             commands::cancel_task,
             commands::skip_totals_scan,
             commands::get_history,
@@ -155,23 +169,34 @@ pub fn run() {
             commands::list_backups,
             commands::delete_backup,
             commands::folder_size,
+            commands::disk_space,
+            commands::full_space,
             commands::open_path,
             commands::preview_schedule,
             commands::check_regex,
+            commands::check_filters,
             commands::save_settings,
             commands::set_autostart,
             commands::import_tasks,
             commands::export_tasks,
+            commands::export_filters,
+            commands::import_filters,
             commands::list_task_snapshots,
             commands::dismiss_notice,
             commands::answer_drive_prompts,
+            commands::retry_delete,
+            commands::dismiss_delete_problems,
             commands::test_sound,
             commands::check_updates,
             commands::install_update,
+            commands::dismiss_update_prompt,
+            commands::set_unsaved,
             commands::find_cobian_lists,
             commands::plan_cobian_takeover,
             commands::take_over_cobian,
             commands::decline_cobian_takeover,
+            commands::plan_cobian_restore,
+            commands::restore_cobian_names,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

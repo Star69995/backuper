@@ -4,7 +4,7 @@
 use crate::backup;
 use crate::drives::DriveWatch;
 use crate::engine::{robocopy::Robocopy, CopyEngine, EngineEvent};
-use crate::model::{BackupMode, DriveAction, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
+use crate::model::{BackupMode, DeleteProblem, DriveAction, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
 use crate::schedule;
 use crate::store::Store;
 use chrono::{Duration as ChronoDuration, Local};
@@ -57,6 +57,16 @@ fn refresh_slot(next: &mut Option<chrono::DateTime<Local>>, sched: Option<&Sched
             next.is_some()
         }
         _ => false,
+    }
+}
+
+/// The mode a job runs in: what it asked for, else a full one when the user asked for the next
+/// automatic run to be full, else the task's own mode.
+fn requested_mode(job: &Job, task: &Task, full_next: bool) -> BackupMode {
+    match job.mode {
+        Some(m) => m,
+        None if full_next && job.trigger != Trigger::Manual => BackupMode::Full,
+        None => task.mode,
     }
 }
 
@@ -156,6 +166,8 @@ pub struct Core {
     working: AtomicBool,
     /// Tasks waiting for the user to answer "the drive was connected - back up now?".
     drive_prompts: Mutex<Vec<String>>,
+    /// Backup folders that should have been deleted but weren't, until the user deals with them.
+    delete_problems: Mutex<Vec<DeleteProblem>>,
     engine: Box<dyn CopyEngine>,
     app: AppHandle,
 }
@@ -172,6 +184,7 @@ impl Core {
             skip_scan: AtomicBool::new(false),
             working: AtomicBool::new(false),
             drive_prompts: Mutex::new(Vec::new()),
+            delete_problems: Mutex::new(Vec::new()),
             engine: Box::new(Robocopy),
             app,
         })
@@ -254,6 +267,108 @@ impl Core {
         self.changed();
     }
 
+    pub fn delete_problems(&self) -> Vec<DeleteProblem> {
+        self.delete_problems.lock().unwrap().clone()
+    }
+
+    /// A backup folder of `task` couldn't be deleted. Told right away - a notification and the main
+    /// window with the question - since the folder keeps taking room the next backups need.
+    pub fn report_delete_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error) {
+        self.report_problem(task, path, e, false)
+    }
+
+    /// `blocking`: the running backup waits for the user's answer (`await_delete_problems`).
+    fn report_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error, blocking: bool) {
+        let problem = DeleteProblem {
+            blocking,
+            task_id: task.id.clone(),
+            task_name: task.name.clone(),
+            path: path.to_string_lossy().to_string(),
+            reason: DeleteProblem::reason_of(e).into(),
+            message: e.to_string(),
+            at: Local::now(),
+        };
+        {
+            let mut list = self.delete_problems.lock().unwrap();
+            list.retain(|p| p.path != problem.path);
+            list.push(problem);
+        }
+        let sound = self.store.lock().unwrap().settings.sound_failure.clone();
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        toast(&self.app, format!("גיבוי ישן לא נמחק: {}", task.name), format!("{name} - הוא ממשיך לתפוס מקום בכונן הגיבוי. פתחו את Backuper כדי לטפל בזה"), &sound);
+        self.changed();
+        crate::tray::show_main(&self.app);
+    }
+
+    /// Holds the running backup of `task_id` while a blocking report of it is open: the user deletes
+    /// it, or skips the delete (`dismiss_delete_problems`), or cancels the run.
+    fn await_delete_problems(&self, task_id: &str) {
+        loop {
+            let waiting = self.delete_problems.lock().unwrap().iter().any(|p| p.blocking && p.task_id == task_id);
+            if !waiting || self.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        // Nothing waits on them any more (a cancelled run, or the user's answer).
+        let mut list = self.delete_problems.lock().unwrap();
+        let mut changed = false;
+        for p in list.iter_mut().filter(|p| p.blocking && p.task_id == task_id) {
+            p.blocking = false;
+            changed = true;
+        }
+        drop(list);
+        if changed {
+            self.changed();
+        }
+    }
+
+    /// The user closed the question without deleting (a waiting backup goes on without the delete).
+    pub fn dismiss_delete_problems(&self, paths: &[String]) {
+        self.delete_problems.lock().unwrap().retain(|p| !paths.contains(&p.path));
+        self.changed();
+    }
+
+    /// Tries again to delete reported folders (only those: nothing else can be handed in), `elevated`
+    /// = as admin, after Windows's permission prompt. Returns the paths that are still there.
+    pub fn retry_delete(&self, paths: &[String], elevated: bool) -> Result<Vec<String>, String> {
+        let known: Vec<String> = self
+            .delete_problems
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| paths.contains(&p.path))
+            .map(|p| p.path.clone())
+            .collect();
+        let mut failures: Vec<(String, std::io::Error)> = Vec::new();
+        let result = if elevated {
+            crate::acl::delete_elevated(&known)
+        } else {
+            for p in &known {
+                if let Err(e) = crate::engine::native::remove_tree(std::path::Path::new(p)) {
+                    failures.push((p.clone(), e));
+                }
+            }
+            Ok(())
+        };
+        let left: Vec<String> = known.iter().filter(|p| std::path::Path::new(p).exists()).cloned().collect();
+        {
+            let mut list = self.delete_problems.lock().unwrap();
+            list.retain(|p| !known.contains(&p.path) || left.contains(&p.path));
+            for p in list.iter_mut() {
+                if let Some((_, e)) = failures.iter().find(|(f, _)| *f == p.path) {
+                    p.reason = DeleteProblem::reason_of(e).into();
+                    p.message = e.to_string();
+                } else if elevated && left.contains(&p.path) {
+                    // Even admin couldn't: most likely a program still has a file open.
+                    p.reason = "inUse".into();
+                }
+            }
+        }
+        self.changed();
+        result.map(|_| left)
+    }
+
     /// Cancels a queued or running task. A running one is paused (its folder is kept, the next run
     /// continues in it), or with `discard` stopped for good.
     pub fn cancel(&self, task_id: &str, discard: bool) {
@@ -262,6 +377,43 @@ impl Core {
             self.discard.store(discard, Ordering::SeqCst);
             self.cancel.store(true, Ordering::SeqCst);
         }
+        self.changed();
+    }
+
+    /// Gives up on a paused backup so it leaves the "paused" list: with `delete` its partial folders
+    /// are removed too (the ones that are unsafe to delete stay, and the task stays paused). Does
+    /// nothing while the task runs or waits in the queue.
+    pub fn dismiss_paused(&self, task_id: &str, delete: bool) -> Result<(), String> {
+        let busy = self.queue.lock().unwrap().iter().any(|j| j.task_id == task_id)
+            || self.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == task_id);
+        if busy {
+            return Err("המשימה רצה או ממתינה בתור".into());
+        }
+        let task = self.store.lock().unwrap().tasks.iter().find(|t| t.id == task_id).cloned();
+        let Some(task) = task else { return Ok(()) };
+        if delete && backup::discard_partials(&task, &|p, e| self.report_delete_problem(&task, p, e)) > 0 {
+            return Err("חלק מההעתקה החלקית לא נמחק: זה הגיבוי המלא היחיד שיש, או שהתיקייה בשימוש. אפשר להסיר את ההשהיה בלי למחוק".into());
+        }
+        let mut s = self.store.lock().unwrap();
+        if let Some(st) = s.states.get_mut(task_id) {
+            st.resumable = false;
+        }
+        s.save_states();
+        drop(s);
+        self.changed();
+        Ok(())
+    }
+
+    /// Makes the task's next automatic run (scheduled, catch-up, drive connected) a full backup,
+    /// once; `on = false` takes the request back.
+    pub fn set_full_next(&self, task_id: &str, on: bool) {
+        let mut s = self.store.lock().unwrap();
+        if !s.tasks.iter().any(|t| t.id == task_id) {
+            return;
+        }
+        s.states.entry(task_id.to_string()).or_default().full_next = on;
+        s.save_states();
+        drop(s);
         self.changed();
     }
 
@@ -346,7 +498,7 @@ impl Core {
     fn worker_loop(&self) {
         loop {
             let job = self.next_job();
-            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate) = {
+            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next, estimates) = {
                 let s = self.store.lock().unwrap();
                 (
                     s.task(&job.task_id).cloned(),
@@ -355,6 +507,13 @@ impl Core {
                     s.settings.exact_progress,
                     s.settings.background_totals,
                     backup::typical_rate(&s.history, &job.task_id),
+                    s.states.get(&job.task_id).is_some_and(|st| st.full_next),
+                    s.task(&job.task_id)
+                        .map(|t| {
+                            let full_next = s.states.get(&job.task_id).is_some_and(|st| st.full_next);
+                            backup::source_estimates(&s.history, t, requested_mode(&job, t, full_next))
+                        })
+                        .unwrap_or_default(),
                 )
             };
             let Some(task) = task else { continue };
@@ -363,8 +522,33 @@ impl Core {
             let renamed = rename_task_backups(&task);
             self.apply_renamed(&task, &renamed);
             let run_id = uuid::Uuid::new_v4().to_string();
-            let requested = job.mode.unwrap_or(task.mode);
+            let requested = requested_mode(&job, &task, full_next);
+            let later_bytes = |i: usize| estimates.iter().skip(i + 1).copied().sum::<Option<u64>>();
             let started_at = Local::now();
+            if task.cobian_takeover {
+                if let Err(message) = self.take_over_cobian(&task) {
+                    let record = RunRecord {
+                        id: run_id,
+                        task_id: task.id.clone(),
+                        task_name: task.name.clone(),
+                        trigger: job.trigger,
+                        mode: requested,
+                        started_at,
+                        finished_at: Local::now(),
+                        status: RunStatus::Failed,
+                        message,
+                        files_copied: 0,
+                        bytes_copied: 0,
+                        backup_bytes: 0,
+                        freed_bytes: 0,
+                        files_deleted: 0,
+                        files_failed: 0,
+                        sources: Vec::new(),
+                    };
+                    self.finish_run(&task, record);
+                    continue;
+                }
+            }
             let mut progress = Progress {
                 run_id: run_id.clone(),
                 task_id: task.id.clone(),
@@ -383,6 +567,8 @@ impl Core {
                 totals_scan: false,
                 copy_started_at: None,
                 expected_rate,
+                later_bytes: later_bytes(0),
+                earlier_bytes: 0,
                 current_file: String::new(),
             };
             self.cancel.store(false, Ordering::SeqCst);
@@ -404,9 +590,14 @@ impl Core {
                 cancel: &self.cancel,
                 discard: &self.discard,
                 skip_scan: &self.skip_scan,
-                fresh: job.fresh || matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
+                fresh: job.fresh,
+                scheduled: matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
+                delete_failed: &|p, e, blocking| self.report_problem(&task, p, e, blocking),
+                await_deletes: &|| self.await_delete_problems(&task.id),
             };
+            // The bytes of the files finished so far, and the size of the one in progress (counted when it ends).
+            let mut done_before = 0u64;
             let mut pending_size = 0u64;
             let mut last_emit = Instant::now();
             let sources = backup::run_task(
@@ -420,6 +611,9 @@ impl Core {
                         EngineEvent::SourceStarted => {
                             progress.source_index = i + 1;
                             progress.source_path = task.sources[i].path.clone();
+                            progress.later_bytes = later_bytes(i);
+                            // The last file of the previous source counts only now.
+                            progress.earlier_bytes += done_before + pending_size;
                             progress.phase = "scanning".into();
                             (
                                 progress.files_done,
@@ -432,6 +626,7 @@ impl Core {
                             progress.copy_started_at = None;
                             progress.current_file.clear();
                             pending_size = 0;
+                            done_before = 0;
                             force = true;
                         }
                         EngineEvent::Phase(p) => {
@@ -461,11 +656,13 @@ impl Core {
                             force = true;
                         }
                         EngineEvent::File { path, size } => {
-                            progress.bytes_done += pending_size;
+                            done_before += pending_size;
+                            progress.bytes_done = done_before;
                             pending_size = size;
                             progress.files_done += 1;
                             progress.current_file = path;
                         }
+                        EngineEvent::FileBytes(n) => progress.bytes_done = done_before + n.min(pending_size),
                     }
                     if force || last_emit.elapsed() >= Duration::from_millis(200) {
                         last_emit = Instant::now();
@@ -486,22 +683,57 @@ impl Core {
                 }
             }
             let record = summarize(run_id, &task, job.trigger, requested, started_at, sources);
-            let settings = {
-                let mut s = self.store.lock().unwrap();
-                let st = s.states.entry(task.id.clone()).or_default();
-                st.last_run_at = Some(record.finished_at);
-                st.last_status = Some(record.status);
-                st.last_message = Some(record.message.clone());
-                // A paused run left a folder to continue in; a full stop deleted it.
-                st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(&task);
-                s.save_states();
-                s.add_history(record.clone());
-                s.settings.clone()
-            };
-            *self.current.lock().unwrap() = None;
-            self.changed();
-            self.notify(&record, &settings);
+            self.finish_run(&task, record);
         }
+    }
+
+    /// Saves a finished run (state, history), clears the progress and notifies.
+    fn finish_run(&self, task: &Task, record: RunRecord) {
+        let settings = {
+            let mut s = self.store.lock().unwrap();
+            let st = s.states.entry(task.id.clone()).or_default();
+            st.last_run_at = Some(record.finished_at);
+            st.last_status = Some(record.status);
+            st.last_message = Some(record.message.clone());
+            // A paused run left a folder to continue in; a full stop deleted it.
+            st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(task);
+            if let Some(b) = crate::model::LastBackup::of(&record) {
+                // The full backup the user asked for is done.
+                if b.mode == BackupMode::Full {
+                    st.full_next = false;
+                }
+                st.last_backup = Some(b);
+            }
+            s.save_states();
+            s.add_history(record.clone());
+            s.settings.clone()
+        };
+        *self.current.lock().unwrap() = None;
+        self.changed();
+        self.notify(&record, &settings);
+    }
+
+    /// The user chose to continue from Cobian's backups: they get this app's names now, right
+    /// before the task's first run here. Every rename is recorded (to put the names back later).
+    /// On an error nothing is backed up (that would write a full backup beside Cobian's).
+    fn take_over_cobian(&self, task: &Task) -> Result<(), String> {
+        let all = self.store.lock().unwrap().tasks.clone();
+        let r = crate::cobianmigrate::apply(task, &all);
+        let mut s = self.store.lock().unwrap();
+        s.record_cobian_renames(task, &r.done);
+        if !r.errors.is_empty() {
+            let shown: Vec<&str> = r.errors.iter().take(3).map(String::as_str).collect();
+            return Err(format!(
+                "לא ניתן היה לשנות את השמות של {} מהגיבויים של Cobian ({}), ולכן הגיבוי לא התחיל. סגרו את Cobian ואת סייר הקבצים אם הם פתוחים על התיקיות האלה, והריצו את המשימה שוב",
+                r.errors.len(),
+                shown.join("; ")
+            ));
+        }
+        if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task.id) {
+            t.cobian_takeover = false;
+            s.save_tasks();
+        }
+        Ok(())
     }
 
     fn notify(&self, r: &RunRecord, settings: &Settings) {
@@ -684,6 +916,22 @@ mod tests {
         let mut next = Some(at(3, 0));
         assert_eq!(take_due(&mut next, &daily, at(9, 0), false), Slot::Skipped);
         assert!(next.unwrap() > at(9, 0));
+    }
+
+    #[test]
+    fn full_next_turns_automatic_runs_full() {
+        let task = Task { mode: BackupMode::Incremental, ..Default::default() };
+        let job = |trigger, mode| Job { task_id: String::new(), mode, trigger, fresh: false };
+        assert_eq!(requested_mode(&job(Trigger::Scheduled, None), &task, false), BackupMode::Incremental);
+        for t in [Trigger::Scheduled, Trigger::CatchUp, Trigger::DriveConnected] {
+            assert_eq!(requested_mode(&job(t, None), &task, true), BackupMode::Full);
+        }
+        // A manual run does what the user picked there.
+        assert_eq!(requested_mode(&job(Trigger::Manual, None), &task, true), BackupMode::Incremental);
+        assert_eq!(
+            requested_mode(&job(Trigger::Scheduled, Some(BackupMode::Incremental)), &task, true),
+            BackupMode::Incremental
+        );
     }
 
     #[test]

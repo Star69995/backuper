@@ -69,14 +69,6 @@ pub fn read(folder: &Path) -> Option<Vec<ListedFile>> {
     read_named(folder, &folder_name(folder))
 }
 
-/// After the folder was renamed from `old_name`: its index names the old folder, so write it again
-/// under the new name (otherwise the next incremental would walk the whole folder once).
-pub fn renamed(folder: &Path, old_name: &str) {
-    if let Some(files) = read_named(folder, old_name) {
-        write(folder, &files);
-    }
-}
-
 fn read_named(folder: &Path, name: &str) -> Option<Vec<ListedFile>> {
     let text = fs::read_to_string(folder.join(FILE_NAME)).ok()?;
     let text = text.strip_suffix(&format!("\r\n{END}\r\n"))?;
@@ -113,6 +105,26 @@ pub fn load_or_build(folder: &Path) -> Vec<ListedFile> {
         write(folder, &files);
     }
     files
+}
+
+/// The folder was renamed from `old_name`: its index (header holds the name) follows it.
+pub fn renamed(folder: &Path, old_name: &str) {
+    let path = folder.join(FILE_NAME);
+    let Ok(text) = fs::read_to_string(&path) else { return };
+    let Some((header, rest)) = text.split_once("\r\n") else {
+        return;
+    };
+    let mut parts = header.splitn(3, '\t');
+    let (Some(MAGIC), Some(count), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+        return;
+    };
+    if name != old_name {
+        return;
+    }
+    set_attributes(&path, NORMAL);
+    let new = format!("{MAGIC}\t{count}\t{}\r\n{rest}", folder_name(folder));
+    let _ = fs::write(&path, new);
+    set_attributes(&path, HIDDEN);
 }
 
 /// Before a folder is reused for a new full backup (its index would be stale).

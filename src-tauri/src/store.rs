@@ -1,6 +1,6 @@
 //! JSON persistence under %APPDATA%\org.tovtech.backuper. Writes are atomic (tmp + rename).
 
-use crate::model::{Notice, RunRecord, Settings, Task, TaskState};
+use crate::model::{CobianRename, LastBackup, Notice, RunRecord, Settings, Task, TaskState};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +20,8 @@ pub struct Store {
     pub states: HashMap<String, TaskState>,
     pub settings: Settings,
     pub history: Vec<RunRecord>,
+    /// Cobian backup folders renamed by takeovers, oldest first (to put their names back).
+    pub cobian_renames: Vec<CobianRename>,
     /// Shown in the UI until dismissed (not persisted).
     pub notice: Option<Notice>,
 }
@@ -52,11 +54,13 @@ impl Store {
             states: load(&dir.join("state.json")),
             settings: load(&dir.join("settings.json")),
             history: load(&dir.join("history.json")),
+            cobian_renames: load(&dir.join("cobian-renames.json")),
             notice: None,
             dir,
         };
         store.load_tasks();
         store.tasks.iter_mut().for_each(Task::migrate);
+        store.fill_last_backups();
         // The list as it was before this version kept snapshots.
         if !store.tasks.is_empty() {
             let _ = crate::tasklist::snapshot(&store.snapshots_dir(), &store.tasks);
@@ -163,11 +167,47 @@ impl Store {
         let _ = fs::remove_file(Path::new(dir).join(crate::tasklist::OLD_COPY_FILE_NAME));
         Ok(())
     }
+    /// State from before `last_backup` existed: take it from the history (newest first).
+    fn fill_last_backups(&mut self) {
+        let mut changed = false;
+        for t in &self.tasks {
+            let st = self.states.entry(t.id.clone()).or_default();
+            if st.last_backup.is_none() {
+                st.last_backup = self.history.iter().filter(|r| r.task_id == t.id).find_map(LastBackup::of);
+                changed |= st.last_backup.is_some();
+            }
+        }
+        if changed {
+            self.save_states();
+        }
+    }
+
     pub fn save_states(&self) {
         save(&self.dir.join("state.json"), &self.states);
     }
     pub fn save_settings(&self) {
         save(&self.dir.join("settings.json"), &self.settings);
+    }
+
+    pub fn save_cobian_renames(&self) {
+        save(&self.dir.join("cobian-renames.json"), &self.cobian_renames);
+    }
+
+    /// Records the folders a takeover renamed for `task`.
+    pub fn record_cobian_renames(&mut self, task: &Task, done: &[crate::cobianmigrate::AdoptFolder]) {
+        if done.is_empty() {
+            return;
+        }
+        let now = chrono::Local::now();
+        self.cobian_renames.extend(done.iter().map(|f| CobianRename {
+            task_id: task.id.clone(),
+            destination: task.destination.trim().to_string(),
+            from: f.from.clone(),
+            to: f.to.clone(),
+            kind: f.kind,
+            at: now,
+        }));
+        self.save_cobian_renames();
     }
 
     pub fn add_history(&mut self, rec: RunRecord) {

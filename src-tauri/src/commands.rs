@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupMode, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
+use crate::model::{BackupMode, FilterRule, FullSpace, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -25,8 +25,12 @@ pub struct Snapshot {
     autostart: bool,
     /// Tasks whose drive was connected, waiting for the user to say whether to back up.
     drive_prompts: Vec<String>,
+    /// Backup folders that should have been deleted but weren't.
+    delete_problems: Vec<crate::model::DeleteProblem>,
     notice: Option<Notice>,
     update: crate::model::UpdateStatus,
+    /// Per task: how many of its folders a Cobian takeover renamed (recorded, can be put back).
+    cobian_renamed: HashMap<String, usize>,
 }
 
 #[tauri::command]
@@ -39,8 +43,13 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
         queue: core.queued(),
         settings: s.settings.clone(),
         drive_prompts: core.drive_prompts(),
+        delete_problems: core.delete_problems(),
         notice: s.notice.clone(),
         update: updates.status(),
+        cobian_renamed: s.cobian_renames.iter().fold(HashMap::new(), |mut m, r| {
+            *m.entry(r.task_id.clone()).or_insert(0) += 1;
+            m
+        }),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -227,8 +236,9 @@ pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>, fr
         .count()
 }
 
-/// Continues a task whose last run was stopped: same mode as that run, and `backup_source` picks
-/// up in the folder it left. Returns false if the task is already queued or running.
+/// Continues a task whose last run was stopped or failed (e.g. destination full): same mode as that
+/// run, and `backup_source` picks up in the folder it left. Returns false if the task is already
+/// queued or running.
 #[tauri::command]
 pub fn resume_task(core: CoreState, id: String) -> bool {
     let mode = core
@@ -238,7 +248,7 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
         .history
         .iter()
         .find(|r| r.task_id == id)
-        .filter(|r| r.status == RunStatus::Cancelled)
+        .filter(|r| matches!(r.status, RunStatus::Cancelled | RunStatus::Failed))
         .map(|r| r.mode);
     core.enqueue(Job {
         task_id: id,
@@ -257,6 +267,18 @@ pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>)
 #[tauri::command]
 pub fn cancel_task(core: CoreState, id: String, discard: bool) {
     core.cancel(&id, discard);
+}
+
+/// Makes the task's next automatic run a full backup (once), or takes that back.
+#[tauri::command]
+pub fn set_full_next(core: CoreState, id: String, on: bool) {
+    core.set_full_next(&id, on);
+}
+
+/// Removes a paused backup from the paused list (`delete`: its partial folders go too).
+#[tauri::command]
+pub fn dismiss_paused(core: CoreState, id: String, delete: bool) -> Result<(), String> {
+    core.dismiss_paused(&id, delete)
 }
 
 #[tauri::command]
@@ -319,9 +341,26 @@ pub async fn delete_backup(core: CoreState<'_>, task_id: String, folder_name: St
     if core.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == task_id) {
         return Err("לא ניתן למחוק גיבוי בזמן שהמשימה רצה".into());
     }
-    tauri::async_runtime::spawn_blocking(move || backup::delete_backup(&task, &folder_name, &name))
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || backup::delete_backup(&task, &folder_name, &name, &|p, e| core.report_delete_problem(&task, p, e)))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Deletes again backup folders that couldn't be deleted (`elevated`: as admin, Windows asks the
+/// user first). Returns the ones still there.
+#[tauri::command]
+pub async fn retry_delete(core: CoreState<'_>, paths: Vec<String>, elevated: bool) -> Result<Vec<String>, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.retry_delete(&paths, elevated))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Closes the "a backup wasn't deleted" question without deleting.
+#[tauri::command]
+pub fn dismiss_delete_problems(core: CoreState, paths: Vec<String>) {
+    core.dismiss_delete_problems(&paths);
 }
 
 fn dir_size(path: &std::path::Path) -> u64 {
@@ -340,6 +379,63 @@ pub async fn folder_size(path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || dir_size(std::path::Path::new(&path)))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Free and total bytes of the drive a path is on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpace {
+    free: u64,
+    total: u64,
+}
+
+/// The drive of `path`, asked through the nearest folder that exists (a destination may not
+/// have been created yet). None = no such drive (disconnected) or it can't be read.
+fn disk_space_of(path: &str) -> Option<DiskSpace> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, avail: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+    std::path::Path::new(path).ancestors().find_map(|dir| {
+        if dir.as_os_str().is_empty() {
+            return None;
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let (mut free, mut total, mut total_free) = (0u64, 0u64, 0u64);
+        // `free` = what this user can use (quotas), which is what a backup can fill.
+        (unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) } != 0)
+            .then_some(DiskSpace { free, total })
+    })
+}
+
+/// Free space on the drives of `paths` (task destinations), in the same order.
+#[tauri::command]
+pub async fn disk_space(paths: Vec<String>) -> Result<Vec<Option<DiskSpace>>, String> {
+    tauri::async_runtime::spawn_blocking(move || paths.iter().map(|p| disk_space_of(p)).collect())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `backup::full_space` for each task id, in the same order (None = no full backup expected).
+#[tauri::command]
+pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Vec<Option<FullSpace>>, String> {
+    let tasks: Vec<Option<(Task, bool)>> = {
+        let store = core.store.lock().unwrap();
+        task_ids
+            .iter()
+            .map(|id| {
+                let full_next = store.states.get(id).is_some_and(|st| st.full_next);
+                store.task(id).cloned().map(|t| (t, full_next))
+            })
+            .collect()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = chrono::Local::now();
+        tasks.iter().map(|t| t.as_ref().and_then(|(t, f)| backup::full_space(t, now, *f))).collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -361,6 +457,17 @@ pub fn preview_schedule(schedule: Schedule) -> Result<Vec<String>, String> {
 #[tauri::command]
 pub fn check_regex(pattern: String, sample: Option<String>) -> crate::model::RegexCheck {
     crate::regexcheck::check(&pattern, sample.as_deref())
+}
+
+/// The filter check: what all the rules together (task + global) do with one path, and each rule's part.
+#[tauri::command]
+pub fn check_filters(
+    rules: Vec<FilterRule>,
+    global_rules: Vec<FilterRule>,
+    sources: Vec<String>,
+    probe: crate::model::FilterProbe,
+) -> crate::model::FilterCheck {
+    crate::filtercheck::check(&rules, &global_rules, &sources, &probe)
 }
 
 #[tauri::command]
@@ -542,6 +649,19 @@ pub fn export_tasks(core: CoreState, path: String, ids: Option<Vec<String>>) -> 
     Ok(tasks.len())
 }
 
+/// The rules of the filter editor (a task's or the global ones) as a file.
+#[tauri::command]
+pub fn export_filters(path: String, rules: Vec<crate::model::FilterRule>) -> Result<(), String> {
+    crate::filterlist::write_file(std::path::Path::new(&path), &rules).map_err(|e| format!("השמירה נכשלה: {e}"))
+}
+
+/// Reads a filter list file: the valid rules, and how many entries were left out.
+#[tauri::command]
+pub fn import_filters(path: String) -> Result<crate::filterlist::FilterImport, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("הקריאה נכשלה: {e}"))?;
+    crate::filterlist::parse(&bytes)
+}
+
 /// Snapshots of the task list, newest first: the automatic ones, or those in a folder the
 /// user picked (e.g. the copy folder on the backup drive, after reinstalling).
 #[tauri::command]
@@ -576,6 +696,18 @@ pub async fn check_updates(updates: UpdatesState<'_>) -> Result<bool, String> {
 #[tauri::command]
 pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
     updates.install_now().await
+}
+
+/// What the window has open with unsaved changes (an automatic install waits for them).
+#[tauri::command]
+pub fn set_unsaved(updates: UpdatesState, what: Vec<String>) {
+    updates.inner().set_unsaved(what);
+}
+
+/// The update dialog was closed (the notification's request is answered).
+#[tauri::command]
+pub fn dismiss_update_prompt(updates: UpdatesState) {
+    updates.dismiss_prompt();
 }
 
 #[derive(Serialize)]
@@ -617,14 +749,18 @@ pub async fn plan_cobian_takeover(core: CoreState<'_>, tasks: Vec<Task>) -> Resu
     .map_err(|e| e.to_string())
 }
 
-/// The user has decided about the tasks' Cobian backups (took them over or declined): they may run now.
-fn clear_cobian_pending(core: &Core, ids: &[String]) {
+/// Sets the tasks' Cobian decision: `take_over` = continue from Cobian's backups (renamed at the
+/// task's next run, see `Core::take_over_cobian`). Either way the task no longer waits for an answer.
+fn set_cobian_decision(core: &Core, ids: &[String], take_over: bool) {
     {
         let mut s = core.store.lock().unwrap();
         let mut changed = false;
-        for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id) && t.cobian_pending) {
-            t.cobian_pending = false;
-            changed = true;
+        for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id)) {
+            if t.cobian_pending || t.cobian_takeover != take_over {
+                t.cobian_pending = false;
+                t.cobian_takeover = take_over;
+                changed = true;
+            }
         }
         if changed {
             s.save_tasks();
@@ -633,41 +769,100 @@ fn clear_cobian_pending(core: &Core, ids: &[String]) {
     core.changed();
 }
 
-/// Renames the tasks' Cobian backup folders to this app's names, so their next run continues
-/// from Cobian's last backup. Only while no backup runs (the queue is held meanwhile).
-/// When everything was renamed, tasks waiting for this decision (`cobian_pending`) are released.
+/// "Continue from Cobian's backups": nothing is renamed now. The folders get this app's names right
+/// before each task's next run, so Cobian keeps seeing them until this app takes over.
 #[tauri::command]
-pub async fn take_over_cobian(core: CoreState<'_>, ids: Vec<String>) -> Result<crate::cobianmigrate::AdoptResult, String> {
+pub fn take_over_cobian(core: CoreState, ids: Vec<String>) {
+    set_cobian_decision(&core, &ids, true);
+}
+
+/// "Don't continue from Cobian's backups" (also cancels a takeover that hasn't run yet): the
+/// tasks' first run will be a full backup, so they may run.
+#[tauri::command]
+pub fn decline_cobian_takeover(core: CoreState, ids: Vec<String>) {
+    set_cobian_decision(&core, &ids, false);
+}
+
+fn cobian_restore_plan(
+    core: &Core,
+    id: &str,
+    naming: &crate::cobianmigrate::CobianNaming,
+) -> Result<crate::cobianmigrate::RestorePlan, String> {
+    let (task, journal, never_backed_up) = {
+        let s = core.store.lock().unwrap();
+        let task = s.task(id).cloned().ok_or("המשימה לא נמצאה")?;
+        let never = s.states.get(id).is_none_or(|st| st.last_backup.is_none());
+        (task, s.cobian_renames.clone(), never)
+    };
+    Ok(crate::cobianmigrate::restore_plan(&task, &journal, never_backed_up, naming))
+}
+
+/// Which of the tasks' folders would get Cobian's names back (nothing is changed).
+#[tauri::command]
+pub async fn plan_cobian_restore(
+    core: CoreState<'_>,
+    ids: Vec<String>,
+    naming: crate::cobianmigrate::CobianNaming,
+) -> Result<Vec<crate::cobianmigrate::RestorePlan>, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || ids.iter().map(|id| cobian_restore_plan(&core, id, &naming)).collect())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Gives the tasks' taken-over folders Cobian's names back, so Cobian sees them again. Only while no
+/// backup runs. A task that got names back is switched off (it would otherwise run next to Cobian),
+/// and none of them takes Cobian's folders over again by itself.
+#[tauri::command]
+pub async fn restore_cobian_names(
+    core: CoreState<'_>,
+    ids: Vec<String>,
+    naming: crate::cobianmigrate::CobianNaming,
+) -> Result<crate::cobianmigrate::AdoptResult, String> {
     let core = core.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let all = core.store.lock().unwrap().tasks.clone();
-        let tasks: Vec<&Task> = all.iter().filter(|t| ids.contains(&t.id)).collect();
-        let total = core
+        let results = core
             .when_idle(|| {
-                let mut total = crate::cobianmigrate::AdoptResult::default();
-                for t in &tasks {
-                    let r = crate::cobianmigrate::apply(t, &all);
-                    total.renamed += r.renamed;
-                    total.errors.extend(r.errors);
-                }
-                total
+                ids.iter()
+                    .map(|id| cobian_restore_plan(&core, id, &naming).map(|p| (id.clone(), crate::cobianmigrate::restore(&p))))
+                    .collect::<Result<Vec<_>, String>>()
             })
-            .ok_or_else(|| "גיבוי רץ עכשיו או ממתין בתור - נסו שוב כשהגיבויים יסתיימו".to_string())?;
-        if total.errors.is_empty() {
-            clear_cobian_pending(&core, &ids);
+            .ok_or_else(|| "גיבוי רץ עכשיו או ממתין בתור - נסו שוב כשהגיבויים יסתיימו".to_string())??;
+        let mut total = crate::cobianmigrate::AdoptResult::default();
+        {
+            let mut s = core.store.lock().unwrap();
+            let before = s.cobian_renames.len();
+            let mut tasks_changed = false;
+            for (id, r) in &results {
+                s.cobian_renames
+                    .retain(|e| !(e.task_id == *id && r.done.iter().any(|d| d.from == e.from && d.to == e.to)));
+                if let Some(t) = s.tasks.iter_mut().find(|t| t.id == *id) {
+                    if t.cobian_takeover || (r.renamed > 0 && t.enabled) {
+                        t.cobian_takeover = false;
+                        if r.renamed > 0 {
+                            t.enabled = false;
+                        }
+                        tasks_changed = true;
+                    }
+                }
+            }
+            if s.cobian_renames.len() != before {
+                s.save_cobian_renames();
+            }
+            if tasks_changed {
+                s.save_tasks();
+            }
         }
+        for (_, r) in results {
+            total.renamed += r.renamed;
+            total.errors.extend(r.errors);
+        }
+        core.changed();
         Ok(total)
     })
     .await
     .map_err(|e| e.to_string())?
 }
-
-/// "Don't continue from Cobian's backups": the tasks' first run will be a full backup, so they may run.
-#[tauri::command]
-pub fn decline_cobian_takeover(core: CoreState, ids: Vec<String>) {
-    clear_cobian_pending(&core, &ids);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

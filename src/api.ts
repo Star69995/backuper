@@ -6,10 +6,18 @@ import type {
   AdoptResult,
   BackupMode,
   CobianLists,
+  CobianNaming,
+  DiskSpace,
+  FullSpace,
   ImportPreview,
   ImportSplit,
   Progress,
   RegexCheck,
+  RestorePlan,
+  FilterCheck,
+  FilterImport,
+  FilterProbe,
+  FilterRule,
   RunRecord,
   Schedule,
   Settings,
@@ -29,9 +37,16 @@ export const api = {
   /** Continues a task whose last run was stopped (false = already queued or running). */
   resumeTask: (id: string) => invoke<boolean>("resume_task", { id }),
   /** Answers the drive-connected question: `run` get queued, all of `ids` stop waiting. */
+  /** Deletes again backup folders that couldn't be deleted; `elevated` = as admin (Windows asks first). Resolves to the ones still there. */
+  retryDelete: (paths: string[], elevated: boolean) => invoke<string[]>("retry_delete", { paths, elevated }),
+  dismissDeleteProblems: (paths: string[]) => invoke<void>("dismiss_delete_problems", { paths }),
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
+  /** Makes the task's next automatic run a full backup (once), or takes that back. */
+  setFullNext: (id: string, on: boolean) => invoke<void>("set_full_next", { id, on }),
+  /** Takes a paused backup off the paused list; `del` also deletes its partial folders. Rejects with a message if it can't. */
+  dismissPaused: (id: string, del: boolean) => invoke<void>("dismiss_paused", { id, delete: del }),
   /** Gives up on the scan that works out how much a running full backup has to copy. */
   skipTotalsScan: () => invoke<void>("skip_totals_scan"),
   history: () => invoke<RunRecord[]>("get_history"),
@@ -40,25 +55,41 @@ export const api = {
   listBackups: (taskId: string) => invoke<SourceBackups[]>("list_backups", { taskId }),
   deleteBackup: (taskId: string, folderName: string, name: string) => invoke<void>("delete_backup", { taskId, folderName, name }),
   folderSize: (path: string) => invoke<number>("folder_size", { path }),
+  /** Free space on the drive of each path (null = drive not connected), same order. */
+  diskSpace: (paths: string[]) => invoke<(DiskSpace | null)[]>("disk_space", { paths }),
+  fullSpace: (taskIds: string[]) => invoke<(FullSpace | null)[]>("full_space", { taskIds }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
   /** Validates a regex filter, explains it, and tries it on `sample` (a file or folder name). */
   checkRegex: (pattern: string, sample: string | null) => invoke<RegexCheck>("check_regex", { pattern, sample }),
+  /** What all the rules together (+ the global ones) do with one path, and each rule's part in it. */
+  checkFilters: (rules: FilterRule[], globalRules: FilterRule[], sources: string[], probe: FilterProbe) =>
+    invoke<FilterCheck>("check_filters", { rules, globalRules, sources, probe }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   importTasks: (path: string, split?: ImportSplit) => invoke<ImportPreview>("import_tasks", { path, split }),
   /** All tasks when `ids` is null. Returns how many were saved. */
   exportTasks: (path: string, ids: string[] | null = null) => invoke<number>("export_tasks", { path, ids }),
+  /** The rules of a filter editor as a file / the valid rules of such a file. */
+  exportFilters: (path: string, rules: FilterRule[]) => invoke<void>("export_filters", { path, rules }),
+  importFilters: (path: string) => invoke<FilterImport>("import_filters", { path }),
   /** The automatic snapshots, or those in `dir` (a folder the user picked). */
   listTaskSnapshots: (dir: string | null = null) => invoke<TaskSnapshot[]>("list_task_snapshots", { dir }),
   /** Cobian Backup / Reflector task lists on this computer, and the folder to open a file dialog in. */
   findCobianLists: () => invoke<CobianLists>("find_cobian_lists"),
   /** Which Cobian backup folders these tasks (saved or still in an import preview) would take over. */
   planCobianTakeover: (tasks: Task[]) => invoke<AdoptPlan[]>("plan_cobian_takeover", { tasks }),
-  /** Renames the saved tasks' Cobian backup folders, so they continue from Cobian's last backup. */
-  takeOverCobian: (ids: string[]) => invoke<AdoptResult>("take_over_cobian", { ids }),
-  /** "Don't continue from Cobian's backups" for tasks waiting for that decision: they may run now. */
+  /**
+   * "Continue from Cobian's backups" for saved tasks. Nothing is renamed now: the folders get this
+   * app's names right before each task's next run.
+   */
+  takeOverCobian: (ids: string[]) => invoke<void>("take_over_cobian", { ids }),
+  /** "Don't continue from Cobian's backups" (also cancels a takeover that hasn't run yet): they may run now. */
   declineCobianTakeover: (ids: string[]) => invoke<void>("decline_cobian_takeover", { ids }),
+  /** Which of the tasks' taken-over folders would get Cobian's names back (one plan per task). */
+  planCobianRestore: (ids: string[], naming: CobianNaming) => invoke<RestorePlan[]>("plan_cobian_restore", { ids, naming }),
+  /** Gives them Cobian's names back and switches off the tasks that got some back. */
+  restoreCobianNames: (ids: string[], naming: CobianNaming) => invoke<AdoptResult>("restore_cobian_names", { ids, naming }),
   dismissNotice: () => invoke<void>("dismiss_notice"),
   /** Shows a sample notification with this sound. */
   testSound: (sound: string) => invoke<void>("test_sound", { sound }),
@@ -66,6 +97,10 @@ export const api = {
   checkUpdates: () => invoke<boolean>("check_updates"),
   /** Downloads and installs it (the app restarts), right away or once the backups are done. */
   installUpdate: () => invoke<void>("install_update"),
+  /** What the window has open with unsaved changes (an update waits for them and asks). */
+  setUnsaved: (what: string[]) => invoke<void>("set_unsaved", { what }),
+  /** The update dialog was closed. */
+  dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;

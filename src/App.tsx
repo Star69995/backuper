@@ -1,13 +1,16 @@
-import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Settings as SettingsIcon } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import { api } from "./api";
+import DeleteProblemDialog from "./components/DeleteProblemDialog";
 import DrivePromptDialog from "./components/DrivePromptDialog";
 import HelpView from "./components/HelpView";
 import HistoryView from "./components/HistoryView";
 import NoticeDialog from "./components/NoticeDialog";
 import SettingsView from "./components/SettingsView";
 import TasksView from "./components/TasksView";
-import { cx, Spinner } from "./components/ui";
+import UpdateDialog from "./components/UpdateDialog";
+import { cx, RunIcon, Spinner } from "./components/ui";
+import { resetUnsaved } from "./lib/unsaved";
 import { useSnapshot, useTheme } from "./lib/useSnapshot";
 
 type View = "tasks" | "history" | "settings" | "help";
@@ -15,7 +18,11 @@ type View = "tasks" | "history" | "settings" | "help";
 export default function App() {
   const { snap, refresh } = useSnapshot();
   const [view, setView] = useState<View>("tasks");
+  // The update dialog, opened from the side menu (a click on the notification opens it via `update.prompt`).
+  const [updateOpen, setUpdateOpen] = useState(false);
   useTheme(snap?.settings.theme);
+  // A reloaded page has nothing unsaved (the backend keeps the last list it was told).
+  useEffect(resetUnsaved, []);
 
   if (!snap) {
     return (
@@ -70,14 +77,16 @@ export default function App() {
           {updateFound && (
             <button
               type="button"
-              onClick={() => setView("settings")}
+              onClick={() => setUpdateOpen(true)}
               title={`גרסה ${u.version} זמינה - לפרטים ולעדכון`}
               className="flex w-full items-center gap-2 rounded-lg border border-accent/40 bg-accent-soft px-2.5 py-2 text-start text-[13px] text-accent transition-colors hover:bg-hover"
             >
               <Download size={16} />
               <span className="hidden flex-col leading-tight md:flex">
                 <span className="font-medium">גרסה {u.version} זמינה</span>
-                <span className="text-xs">{u.installWaiting ? "תותקן בסיום הגיבוי" : "לחצו לעדכון"}</span>
+                <span className="text-xs">
+                  {u.installWaiting ? "תותקן בסיום הגיבוי" : snap.settings.updateMode === "auto" ? "תותקן מעצמה - לפרטים" : "לחצו לעדכון"}
+                </span>
               </span>
             </button>
           )}
@@ -90,7 +99,7 @@ export default function App() {
               paused ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-muted hover:bg-hover",
             )}
           >
-            {paused ? <Play size={16} /> : <Pause size={16} />}
+            {paused ? <RunIcon size={16} /> : <Pause size={16} />}
             <span className="hidden flex-col leading-tight md:flex">
               <span className="font-medium text-fg">{paused ? "התזמון מושהה" : "התזמון פעיל"}</span>
               <span className="text-xs">{paused ? "לחצו לחידוש" : "לחצו להשהיה"}</span>
@@ -106,6 +115,8 @@ export default function App() {
       </main>
       <DrivePromptDialog snap={snap} />
       <NoticeDialog snap={snap} refresh={refresh} />
+      <DeleteProblemDialog snap={snap} refresh={refresh} />
+      {(updateOpen || u.prompt) && u.version !== null && <UpdateDialog snap={snap} onClose={() => setUpdateOpen(false)} />}
     </div>
   );
 }

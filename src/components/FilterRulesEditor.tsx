@@ -1,12 +1,42 @@
-import { AlertTriangle, CalendarX, EyeOff, FileType, FileX, Filter, FolderX, Info, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
-import { useEffect, useId, useState, type ReactNode } from "react";
-import { api } from "../api";
-import type { FilterKind, FilterRule, RegexCheck } from "../types";
-import { Badge, Button, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
+import {
+  AlertTriangle,
+  CalendarX,
+  Check,
+  ArrowDownUp,
+  CircleHelp,
+  Copy,
+  Download,
+  EyeOff,
+  File,
+  FileType,
+  FileX,
+  Filter,
+  Folder,
+  FolderX,
+  Info,
+  Plus,
+  Regex,
+  Scale,
+  ShieldOff,
+  Sparkles,
+  TestTube,
+  Trash2,
+  Type,
+  Upload,
+  X,
+} from "lucide-react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { api, errorText } from "../api";
+import { addRules, relations, tidy, type Added, type Relation } from "../lib/filterRules";
+import { CACHE_FOLDERS } from "../lib/cacheFolders";
+import type { FilterCheck, FilterKind, FilterProbe, FilterRule, RegexCheck, RuleResult } from "../types";
+import { useFeedback } from "./feedback";
+import { AutoGrowInput, Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
   // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
   include: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
+  includeName: { label: "סוגי קבצים ושמות", icon: <Type size={15} /> },
   extension: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
   pattern: { label: "סוגי קבצים ושמות", icon: <Type size={15} /> },
   regex: {
@@ -17,12 +47,12 @@ const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string 
   folder: {
     label: "תיקייה",
     icon: <FolderX size={15} />,
-    hint: "התיקייה ומה שבתוכה לא יגובו. שם תיקייה בכל מקום בעץ (node_modules) או נתיב מלא.",
+    hint: "התיקייה ומה שבתוכה לא יגובו. שם תיקייה בכל מקום בעץ (node_modules), נתיב מלא או נתיב יחסי לתיקיית המקור (Projects\\cache). אפשר * (כל טקסט) ו-? (תו אחד), ונתיב שמתחיל ב-* חל בכל עומק: *\\Users\\User.",
   },
   file: {
     label: "קובץ מסוים",
     icon: <FileX size={15} />,
-    hint: "הקובץ הזה לא יגובה. נתיב מלא, למשל C:\\pagefile.sys. נוח לקובץ שנכשל בכל גיבוי כי הוא תמיד נעול.",
+    hint: "הקובץ הזה לא יגובה. נתיב מלא, למשל C:\\pagefile.sys, או נתיב יחסי לתיקיית המקור, למשל Docs\\a.txt (בלי * או ?; לשמות לפי תבנית יש את הכלל של סוגי קבצים ושמות). נוח לקובץ שנכשל בכל גיבוי כי הוא תמיד נעול.",
   },
   largerThan: { label: "קבצים גדולים", icon: <Scale size={15} />, hint: "קבצים גדולים מהגודל הזה לא יגובו." },
   olderThan: {
@@ -41,15 +71,43 @@ const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string 
 /** Rules offered in the add menu. */
 const MENU: FilterKind[] = ["extension", "regex", "folder", "file", "largerThan", "olderThan", "hidden", "system"];
 
-const isFiles = (r: FilterRule): r is Extract<FilterRule, { kind: "include" | "extension" | "pattern" }> =>
-  r.kind === "include" || r.kind === "extension" || r.kind === "pattern";
+type FilesKind = "include" | "includeName" | "extension" | "pattern";
+
+const isFiles = (r: FilterRule): r is Extract<FilterRule, { kind: FilesKind }> =>
+  r.kind === "include" || r.kind === "includeName" || r.kind === "extension" || r.kind === "pattern";
 
 /** "Only these" (back up only matches) vs "skip these". */
-const isOnly = (r: FilterRule) => r.kind === "include" || (r.kind === "regex" && r.include);
+const isOnly = (r: FilterRule) => r.kind === "include" || r.kind === "includeName" || (r.kind === "regex" && r.include);
+
+/** A file-name rule that matches whole names ("Thumbs.db", "~$*") rather than extensions ("tmp"). */
+const isByName = (r: FilterRule) => r.kind === "includeName" || r.kind === "pattern";
+
+const filesKind = (only: boolean, byName: boolean): FilesKind =>
+  only ? (byName ? "includeName" : "include") : byName ? "pattern" : "extension";
+
+const splitList = (v: string) =>
+  v
+    .split(/[,;]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+/** Extensions -> names when the rule is switched to "names": "tmp, .log" -> "*.tmp, *.log" (what they matched). */
+const extsToNames = (v: string) =>
+  splitList(v)
+    .map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`))
+    .join(", ");
+
+/** Names -> extensions when switched back: only the plain "*.ext" entries become bare extensions. */
+const namesToExts = (v: string) =>
+  splitList(v)
+    .map((x) => x.match(/^\*\.([^.*?]+)$/)?.[1] ?? x)
+    .join(", ");
 
 const FILES_HINT = {
-  skip: "קבצים עם הסיומות או השמות האלה לא יגובו. מפרידים בפסיק, למשל tmp, log, Thumbs.db. הסימן * מייצג כל טקסט: ~$*",
-  only: "רק קבצים עם הסיומות או השמות האלה יגובו, כל השאר לא. מפרידים בפסיק, למשל docx, xlsx. הסימן * מייצג כל טקסט.",
+  skipExt: "קבצים עם הסיומות האלה לא יגובו. מפרידים בפסיק, למשל tmp, log, bak.",
+  onlyExt: "רק קבצים עם הסיומות האלה יגובו, כל השאר לא. מפרידים בפסיק, למשל docx, xlsx.",
+  skipName: "קבצים עם השמות האלה לא יגובו. שם מלא כולל סיומת, מפרידים בפסיק, למשל Thumbs.db, desktop.ini. הסימן * מייצג כל טקסט: ~$*",
+  onlyName: "רק קבצים עם השמות האלה יגובו, כל השאר לא. שם מלא כולל סיומת, מפרידים בפסיק, למשל notes.txt, report*. הסימן * מייצג כל טקסט.",
 };
 
 const REGEX_FOLDERS_HINT =
@@ -57,8 +115,9 @@ const REGEX_FOLDERS_HINT =
 
 const PLACEHOLDERS: Partial<Record<FilterKind, string>> = {
   include: "docx, xlsx, jpg",
-  extension: "tmp, log, ~$*",
-  pattern: "~$*",
+  includeName: "notes.txt, report*",
+  extension: "tmp, log, bak",
+  pattern: "Thumbs.db, ~$*",
   regex: "^IMG_\\d+",
   folder: "node_modules",
   file: "C:\\pagefile.sys",
@@ -66,7 +125,7 @@ const PLACEHOLDERS: Partial<Record<FilterKind, string>> = {
 
 /** The explanation of a rule, shown on demand (and right away while the rule is still empty). */
 const hintOf = (r: FilterRule) => {
-  if (isFiles(r)) return FILES_HINT[isOnly(r) ? "only" : "skip"];
+  if (isFiles(r)) return FILES_HINT[`${isOnly(r) ? "only" : "skip"}${isByName(r) ? "Name" : "Ext"}`];
   if (r.kind === "regex" && r.folders) return REGEX_FOLDERS_HINT;
   return KINDS[r.kind].hint;
 };
@@ -76,6 +135,7 @@ const hasText = (r: FilterRule): r is Extract<FilterRule, { value: string }> => 
 const blank = (kind: FilterKind): FilterRule => {
   switch (kind) {
     case "include":
+    case "includeName":
     case "extension":
     case "pattern":
     case "folder":
@@ -109,6 +169,10 @@ const PRESETS: { label: string; rules: FilterRule[] }[] = [
     ],
   },
   {
+    label: "קבצי מטמון",
+    rules: CACHE_FOLDERS.map((value) => ({ kind: "folder", value })),
+  },
+  {
     label: "תיקיות פיתוח",
     rules: [
       { kind: "folder", value: "node_modules" },
@@ -122,6 +186,7 @@ export function describeFilter(r: FilterRule) {
   switch (r.kind) {
     // Values are isolated left-to-right, so "*.lrcat" doesn't render as "lrcat.*" inside Hebrew text.
     case "include":
+    case "includeName":
     case "extension":
     case "pattern":
       return `${isOnly(r) ? "לגבות רק" : "לדלג על"}: ⁦${r.value}⁩`;
@@ -141,8 +206,6 @@ export function describeFilter(r: FilterRule) {
       return KINDS[r.kind].label;
   }
 }
-
-const same = (a: FilterRule, b: FilterRule) => JSON.stringify(a) === JSON.stringify(b);
 
 /**
  * Under a regex rule: whether it is valid (and why not), what it says piece by piece, and a try-out
@@ -239,8 +302,355 @@ function RegexCheckPanel({
   );
 }
 
+const EFFECT: Record<
+  RuleResult["effect"],
+  { label: string; tone: "neutral" | "accent" | "ok" | "warn" | "bad"; icon: ReactNode }
+> = {
+  none: { label: "לא משפיע", tone: "neutral", icon: null },
+  skips: { label: "מדלג", tone: "warn", icon: <X size={12} /> },
+  keeps: { label: "תואם", tone: "ok", icon: <Check size={12} /> },
+  unknown: { label: "לא נבדק", tone: "neutral", icon: <CircleHelp size={12} /> },
+  invalid: { label: "לא שלם", tone: "bad", icon: <AlertTriangle size={12} /> },
+};
+
+/** The rule's part in the filter check, on its row. "No effect" stays quiet. */
+function EffectBadge({ result }: { result: RuleResult }) {
+  if (result.effect === "none") return null;
+  const e = EFFECT[result.effect];
+  return (
+    <span title={result.detail ?? undefined}>
+      <Badge tone={e.tone} icon={e.icon}>
+        {e.label}
+      </Badge>
+    </span>
+  );
+}
+
+const fmtSize = (b: number) =>
+  b >= 1024 ** 3
+    ? `${(b / 1024 ** 3).toFixed(1)} GB`
+    : b >= 1024 ** 2
+      ? `${(b / 1024 ** 2).toFixed(1)} MB`
+      : b >= 1024
+        ? `${Math.round(b / 1024)} KB`
+        : `${b} B`;
+
+/** Optional number field: empty = not given. */
+function OptionalNumber({
+  value,
+  onChange,
+  label,
+  unit,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  label: string;
+  unit: string;
+}) {
+  const id = useId();
+  return (
+    <span className="flex items-center gap-1.5">
+      <label htmlFor={id} className="text-muted">
+        {label}
+      </label>
+      <TextInput
+        id={id}
+        dir="ltr"
+        inputMode="decimal"
+        className="w-24 text-center"
+        value={value ?? ""}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          onChange(e.target.value.trim() === "" || !Number.isFinite(n) || n < 0 ? null : n);
+        }}
+      />
+      <span className="text-muted">{unit}</span>
+    </span>
+  );
+}
+
+/** Skip rules that would leave out the path of a check, from the most exact to the widest. */
+function skipRulesFor(check: FilterCheck): { label: string; rule: FilterRule }[] {
+  const full = check.fullPath?.replace(/\\+$/, "");
+  if (!full) return [];
+  const name = full.slice(full.lastIndexOf("\\") + 1);
+  const out: { label: string; rule: FilterRule }[] = [];
+  if (check.folder) {
+    out.push({ label: "התיקייה הזו", rule: { kind: "folder", value: full } });
+    out.push({ label: "כל תיקייה בשם הזה", rule: { kind: "folder", value: name } });
+    return out;
+  }
+  out.push({ label: "הקובץ הזה", rule: { kind: "file", value: full } });
+  // A name goes into a comma-separated list, so one with a comma can't be a name rule.
+  if (!/[,;]/.test(name)) out.push({ label: "כל קובץ בשם הזה", rule: { kind: "pattern", value: name } });
+  const ext = name.slice(name.lastIndexOf(".") + 1);
+  if (name.lastIndexOf(".") > 0 && /^[^\s,;.*?]+$/.test(ext))
+    out.push({ label: `כל קובץ ${ext.toLowerCase()}`, rule: { kind: "extension", value: ext } });
+  return out;
+}
+
+/** One reading of the checked path (as a file or as a folder): the verdict, which rules decide it, and skip buttons. */
+function CheckResult({
+  c,
+  title,
+  rules,
+  globalRules,
+  onAdd,
+  first,
+}: {
+  c: FilterCheck;
+  title?: string;
+  rules: FilterRule[];
+  globalRules: FilterRule[];
+  onAdd: (r: FilterRule[]) => void;
+  /** The first (or only) reading carries the divider and the "no rules at all" line. */
+  first?: boolean;
+}) {
+  const subject = c.folder ? "התיקייה" : "הקובץ";
+  const affecting = [
+    ...rules.map((r, i) => ({ rule: r, result: c.rules[i], global: false })),
+    ...globalRules.map((r, i) => ({ rule: r, result: c.globalRules[i], global: true })),
+  ].filter((x) => x.result && x.result.effect !== "none");
+  const quiet = rules.length + globalRules.length - affecting.length;
+  const skipOptions = c.kept ? skipRulesFor(c) : [];
+  return (
+    <div className={`flex flex-col gap-1.5 ${c.asFolder ? "" : "border-t border-line pt-2"}`}>
+      {title && <div className="text-[13px] font-medium">{title}</div>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={c.kept ? "ok" : "warn"} icon={c.kept ? <Check size={12} /> : <X size={12} />}>
+          {c.kept ? `${subject} יגובה` : `${subject} לא יגובה`}
+        </Badge>
+        {c.reason && <span>{c.reason}</span>}
+      </div>
+      {c.onDisk && (
+        <div className="text-muted">
+          נבדק מול {subject} שבדיסק
+          {!c.folder && (
+            <>
+              : <bdi dir="ltr">{fmtSize(c.onDisk.size)}</bdi>
+              {c.onDisk.modified && `, שונה ב-${new Date(c.onDisk.modified).toLocaleDateString("he-IL")}`}
+              {c.onDisk.hidden && ", מוסתר"}
+              {c.onDisk.system && ", קובץ מערכת"}
+            </>
+          )}
+        </div>
+      )}
+      {affecting.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {affecting.map(({ rule, result, global }, i) => (
+            <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <EffectBadge result={result!} />
+              <span>{describeFilter(rule)}</span>
+              {global && <span className="text-muted">(כלל כללי)</span>}
+              {result!.detail && <span className="text-muted">- {result!.detail}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {quiet > 0 && affecting.length > 0 && (
+        <div className="text-muted">
+          {quiet === 1 ? "כלל אחד נוסף לא משפיע" : `${quiet} כללים נוספים לא משפיעים`} על {subject} הזה.
+        </div>
+      )}
+      {first && rules.length + globalRules.length === 0 && <div className="text-muted">אין כללי סינון, אז כל הקבצים מגובים.</div>}
+      {skipOptions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+          <span className="text-muted">לא רוצים לגבות {c.folder ? "אותה" : "אותו"}? הוספת כלל לדילוג על:</span>
+          {skipOptions.map((o) => (
+            <Button key={o.label} size="sm" icon={KINDS[o.rule.kind].icon} onClick={() => onAdd([o.rule])} title={describeFilter(o.rule)}>
+              {o.label}
+            </Button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "What happens to this file?": one path run through all the rules together (the task's and the
+ * global ones), with the engine's own matching. Each rule's part shows on its row and in the list here.
+ */
+function FilterCheckPanel({
+  rules,
+  globalRules,
+  sources,
+  probe,
+  setProbe,
+  check,
+  onAdd,
+  onClose,
+}: {
+  rules: FilterRule[];
+  globalRules: FilterRule[];
+  sources: string[];
+  probe: FilterProbe;
+  setProbe: (p: FilterProbe) => void;
+  check: FilterCheck | null;
+  /** Adds skip rules to the task's rules. */
+  onAdd: (r: FilterRule[]) => void;
+  onClose: () => void;
+}) {
+  const id = useId();
+  const any = (k: FilterKind) => rules.some((r) => r.kind === k) || globalRules.some((r) => r.kind === k);
+  // Size, date and attributes are asked only for a file that isn't on disk, and only when a rule looks at them.
+  const askValues = check?.kept != null && !check.onDisk && !check.folder;
+  const pick = async (folder: boolean) => {
+    const p = folder
+      ? await api.pickFolder("בחירת תיקייה לבדיקה", sources[0])
+      : await api.pickFile("בחירת קובץ לבדיקה", "כל הקבצים", ["*"], sources[0]);
+    if (p) setProbe({ ...probe, path: folder ? `${p.replace(/\\+$/, "")}\\` : p });
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-accent/30 bg-panel px-3 py-2.5 text-xs">
+      <div className="flex items-center gap-2">
+        <TestTube size={15} className="text-accent" />
+        <span className="flex-1 text-[13px] font-medium">בדיקת כל הכללים יחד</span>
+        <IconButton label="סגירת הבדיקה" onClick={onClose}>
+          <X size={15} />
+        </IconButton>
+      </div>
+      <p className="text-muted">
+        הקלידו נתיב של קובץ או תיקייה {sources.length > 0 ? "(מלא, או בתוך תיקיית המקור)" : "(מלא, או רק שם קובץ)"} ותראו אם הוא יגובה
+        ואיזה כלל מחליט. כל הכללים נבדקים יחד{globalRules.length > 0 ? ", כולל הכלליים" : ""}, כמו בגיבוי עצמו. קובץ שקיים בדיסק
+        נבדק עם הגודל, התאריך והתכונות שלו. לבדיקת תיקייה מסיימים את הנתיב ב-<bdi dir="ltr">\</bdi>.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor={id} className="sr-only">
+          נתיב לבדיקה
+        </label>
+        <AutoGrowInput
+          id={id}
+          dir="ltr"
+          joiner=""
+          autoFocus
+          className="min-w-48 flex-1 text-left font-mono"
+          placeholder={sources[0] ? `${sources[0].replace(/\\+$/, "")}\\...` : "Documents\\~$report.docx"}
+          value={probe.path}
+          onChange={(path) => setProbe({ ...probe, path })}
+        />
+        <Button size="sm" icon={<File size={14} />} onClick={() => pick(false)}>
+          קובץ...
+        </Button>
+        <Button size="sm" icon={<Folder size={14} />} onClick={() => pick(true)}>
+          תיקייה...
+        </Button>
+      </div>
+      {askValues && (any("largerThan") || any("olderThan") || any("hidden") || any("system")) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-muted">הקובץ לא נמצא בדיסק. פרטים לבדיקה:</span>
+          {any("largerThan") && (
+            <OptionalNumber label="גודל" unit="MB" value={probe.sizeMb} onChange={(sizeMb) => setProbe({ ...probe, sizeMb })} />
+          )}
+          {any("olderThan") && (
+            <OptionalNumber
+              label="שונה לפני"
+              unit="ימים"
+              value={probe.ageDays}
+              onChange={(v) => setProbe({ ...probe, ageDays: v === null ? null : Math.round(v) })}
+            />
+          )}
+          {any("hidden") && (
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <Checkbox checked={probe.hidden} onChange={(hidden) => setProbe({ ...probe, hidden })} />
+              מוסתר
+            </label>
+          )}
+          {any("system") && (
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <Checkbox checked={probe.system} onChange={(system) => setProbe({ ...probe, system })} />
+              קובץ מערכת
+            </label>
+          )}
+        </div>
+      )}
+      {check && check.kept !== null && (
+        <>
+          {check.asFolder && check.asFolder.kept !== null && (
+            <div className="border-t border-line pt-2 text-muted">הנתיב לא נמצא בדיסק, אז זה נבדק גם כקובץ וגם כתיקייה.</div>
+          )}
+          <CheckResult
+            c={check}
+            title={check.asFolder ? "אם זה קובץ" : undefined}
+            rules={rules}
+            globalRules={globalRules}
+            onAdd={onAdd}
+            first
+          />
+          {check.asFolder && check.asFolder.kept !== null && (
+            <CheckResult c={check.asFolder} title="אם זו תיקייה" rules={rules} globalRules={globalRules} onAdd={onAdd} />
+          )}
+        </>
+      )}
+      {check?.notes.map((n, i) => (
+        <div key={i} className="flex items-start gap-1.5 text-muted">
+          <Info size={13} className="mt-0.5 shrink-0" />
+          <span>{n}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const RELATION_TEXT: Record<Relation["kind"], string> = {
+  same: "כפילות - כבר יש כלל שעושה אותו דבר:",
+  inside: "כבר כלול בכלל:",
+  contains: "כולל גם את הכלל (שהוא מיותר):",
+  partial: "חלק מהערכים כבר כלולים בכלל:",
+};
+
+/** Under a rule: which other rules repeat it, include it, are included in it or overlap it. */
+function RelationNotes({ related, onRemove }: { related: Relation[]; onRemove: () => void }) {
+  if (related.length === 0) return null;
+  const shown = related.slice(0, 3);
+  return (
+    <div className="flex flex-col gap-0.5 pb-1 pt-1.5 text-xs">
+      {shown.map((x, i) => (
+        <div key={i} className={`flex flex-wrap items-center gap-x-1.5 ${x.kind === "same" ? "text-warn" : "text-muted"}`}>
+          {x.kind === "same" ? <Copy size={13} className="shrink-0" /> : <Info size={13} className="shrink-0" />}
+          <span>
+            {RELATION_TEXT[x.kind]} {describeFilter(x.other)}
+            {x.global && " (כלל כללי)"}
+          </span>
+          {x.kind === "same" && !x.global && (
+            <button type="button" onClick={onRemove} className="rounded px-1.5 py-0.5 font-medium text-accent underline hover:bg-hover">
+              הסרת הכלל הזה
+            </button>
+          )}
+        </div>
+      ))}
+      {related.length > shown.length && <div className="text-muted">ועוד {related.length - shown.length}...</div>}
+    </div>
+  );
+}
+
+function addSummary(a: Added) {
+  const parts = [
+    a.added.length > 0 && (a.added.length === 1 ? "נוסף כלל אחד" : `נוספו ${a.added.length} כללים`),
+    a.same.length > 0 && `${a.same.length} כבר היו`,
+    a.inside.length > 0 && `${a.inside.length} כבר כלולים בכללים קיימים`,
+    a.partial.length > 0 && `${a.partial.length} חופפים חלקית לכלל קיים`,
+  ].filter(Boolean);
+  return parts.join(", ") || "לא נוספו כללים";
+}
+
 /** One rule on one line; its explanation sits behind the info button so a long list stays compact. */
-function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: (r: FilterRule) => void; onRemove: () => void }) {
+function RuleRow({
+  rule: r,
+  onChange,
+  onRemove,
+  tested,
+  related = [],
+}: {
+  rule: FilterRule;
+  onChange: (r: FilterRule) => void;
+  onRemove: () => void;
+  /** What this rule does to the path in the filter check (when the check is open). */
+  tested?: RuleResult;
+  /** Rules that repeat, include or overlap this one. */
+  related?: Relation[];
+}) {
   // For a regex rule the explanation + live check open while its field is being edited, close when focus
   // leaves the row, and the info button brings them back. The try-out name outlives the panel.
   const [showHint, setShowHint] = useState(false);
@@ -280,7 +690,7 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
               value={isOnly(r) ? "only" : "skip"}
               onChange={(v) => {
                 if (r.kind === "regex") onChange({ ...r, include: v === "only" });
-                else onChange({ kind: v === "only" ? "include" : r.kind === "include" ? "extension" : r.kind, value: r.value });
+                else if (isFiles(r)) onChange({ kind: filesKind(v === "only", isByName(r)), value: r.value });
               }}
               options={[
                 { value: "skip", label: "לדלג על" },
@@ -288,16 +698,43 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
               ]}
             />
           )}
-          {hasText(r) && (
-            <TextInput
-              dir="ltr"
-              className="min-w-40 flex-1 text-left font-mono"
-              autoFocus={!r.value}
-              value={r.value}
-              placeholder={folders ? "^(build|cache)\\d*$" : PLACEHOLDERS[r.kind]}
-              onChange={(e) => onChange({ ...r, value: e.target.value })}
+          {isFiles(r) && (
+            <Segmented
+              compact
+              value={isByName(r) ? "name" : "ext"}
+              onChange={(v) => {
+                const byName = v === "name";
+                if (byName === isByName(r)) return;
+                onChange({ kind: filesKind(isOnly(r), byName), value: byName ? extsToNames(r.value) : namesToExts(r.value) });
+              }}
+              options={[
+                { value: "ext", label: "סיומות", icon: <FileType size={14} /> },
+                { value: "name", label: "שמות", icon: <Type size={14} /> },
+              ]}
             />
           )}
+          {hasText(r) &&
+            (r.kind !== "regex" ? (
+              // A list of extensions / names, or a path, wraps onto more lines instead of scrolling out of view.
+              <AutoGrowInput
+                dir="ltr"
+                joiner={isFiles(r) ? ", " : ""}
+                className="min-w-40 flex-1 text-left font-mono"
+                autoFocus={!r.value}
+                value={r.value}
+                placeholder={PLACEHOLDERS[r.kind]}
+                onChange={(value) => onChange({ ...r, value })}
+              />
+            ) : (
+              <TextInput
+                dir="ltr"
+                className="min-w-40 flex-1 text-left font-mono"
+                autoFocus={!r.value}
+                value={r.value}
+                placeholder={folders ? "^(build|cache)\\d*$" : PLACEHOLDERS[r.kind]}
+                onChange={(e) => onChange({ ...r, value: e.target.value })}
+              />
+            ))}
           {r.kind === "largerThan" && (
             <div className="flex items-center gap-2">
               <NumberInput className="w-28" min={1} value={r.mb} onChange={(mb) => onChange({ ...r, mb })} />
@@ -312,8 +749,13 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
           )}
           {inline && hint && <span className="text-xs text-muted">{hint}</span>}
         </div>
+        {tested && <EffectBadge result={tested} />}
         {!inline && hint && (
-          <IconButton label={showHint ? "הסתרת ההסבר" : "הסבר על הכלל"} onClick={() => setShowHint(!showHint)} aria-expanded={showHint}>
+          <IconButton
+            label={showHint ? "הסתרת ההסבר" : "הסבר על הכלל"}
+            onClick={() => setShowHint(!showHint)}
+            aria-expanded={showHint}
+          >
             <Info size={15} />
           </IconButton>
         )}
@@ -321,6 +763,7 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
           <Trash2 size={15} />
         </IconButton>
       </div>
+      <RelationNotes related={related} onRemove={onRemove} />
       {r.kind === "regex" && showHint && <RegexCheckPanel rule={r} sample={sample} setSample={setSample} />}
       {/* A rule that was just added shows its explanation until it has a value. */}
       {!inline && hint && (showHint || (hasText(r) && !r.value)) && <p className="pb-1 pt-1.5 text-xs text-muted">{hint}</p>}
@@ -328,22 +771,154 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
   );
 }
 
+const NO_PROBE: FilterProbe = { path: "", sizeMb: null, ageDays: null, hidden: false, system: false };
+
 export default function FilterRulesEditor({
   rules,
   onChange,
   emptyText = "אין כללי סינון - כל הקבצים מגובים.",
+  sources = [],
+  globalRules = [],
 }: {
   rules: FilterRule[];
   onChange: (r: FilterRule[]) => void;
   emptyText?: string;
+  /** The task's source folders: paths in the filter check are read under them. */
+  sources?: string[];
+  /** Rules that apply together with these (the global ones, in a task). */
+  globalRules?: FilterRule[];
 }) {
+  const [testing, setTesting] = useState(false);
+  const [probe, setProbe] = useState<FilterProbe>(NO_PROBE);
+  const [check, setCheck] = useState<FilterCheck | null>(null);
+  const key = JSON.stringify([rules, globalRules, sources, probe]);
+  useEffect(() => {
+    if (!testing || !probe.path.trim()) {
+      setCheck(null);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      api
+        .checkFilters(rules, globalRules, sources, probe)
+        .then((c) => live && setCheck(c))
+        .catch(() => live && setCheck(null));
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+    // `key` covers rules, globalRules, sources and probe (new arrays on every render).
+  }, [testing, key]);
+  // A rule removed or added shifts the results until the next check comes back.
+  const tested = (i: number) =>
+    check && check.kept !== null && check.rules.length === rules.length ? check.rules[i] : undefined;
+
   const update = (i: number, r: FilterRule) => onChange(rules.map((x, j) => (j === i ? r : x)));
   const remove = (i: number) => onChange(rules.filter((_, j) => j !== i));
-  const add = (r: FilterRule[]) => onChange([...rules, ...r.filter((n) => !rules.some((x) => same(x, n)))]);
   const singleton = (k: FilterKind) => (k === "hidden" || k === "system") && rules.some((r) => r.kind === k);
+
+  const { toast, choose } = useFeedback();
+  const related = useMemo(() => relations(rules, globalRules), [rules, globalRules]);
+  const repeats = related.filter((r) => r.some((x) => x.kind === "same")).length;
+  const covered = related.filter((r) => r.some((x) => x.kind === "inside")).length;
+
+  /** Adds rules, leaving out those that already exist or that an existing rule includes, and says what happened. */
+  const add = (incoming: FilterRule[], then?: (a: Added) => void) => {
+    const a = addRules(rules, incoming);
+    if (a.added.length) onChange(a.rules);
+    if (incoming.length === 1 && !a.added.length) {
+      const by = a.inside[0]?.by;
+      const waiting = !by && hasText(a.same[0]) && !a.same[0].value;
+      toast({
+        tone: "info",
+        title: by ? "הכלל כבר כלול בכלל אחר" : waiting ? "כבר יש כלל כזה שממתין להזנה" : "הכלל כבר קיים",
+        message: by ? describeFilter(by) : waiting ? undefined : describeFilter(a.same[0]),
+      });
+    } else if (incoming.length > 1 || a.partial.length) {
+      toast({ tone: a.added.length ? "ok" : "info", title: addSummary(a) });
+    }
+    then?.(a);
+  };
+
+  const tidyUp = () => {
+    const t = tidy(rules);
+    const left = relations(t.rules, globalRules).filter((r) => r.some((x) => x.kind === "inside")).length;
+    const still = left > 0 ? ` ${left === 1 ? "כלל אחד עדיין כלול" : `${left} כללים עדיין כלולים`} בכלל אחר - הם מסומנים ברשימה.` : "";
+    if (!t.changed) {
+      toast({ tone: "info", title: "הכללים כבר מסודרים, בלי כפילויות.", message: still.trim() || undefined });
+      return;
+    }
+    onChange(t.rules);
+    const did = [
+      t.merged > 0 && `מוזגו ${t.merged} כללים של סוגי קבצים ושמות`,
+      t.repeated > 0 && `הוסרו ${t.repeated} כפילויות`,
+    ].filter(Boolean);
+    toast({ tone: "ok", title: "הכללים סודרו", message: `${did.length ? `${did.join(", ")}. ` : ""}${still}`.trim() || undefined });
+  };
+
+  const exportRules = async () => {
+    try {
+      const path = await api.saveFile("ייצוא כללי סינון", "Backuper - כללי סינון.json", "כללי סינון", ["json"]);
+      if (!path) return;
+      await api.exportFilters(path, rules);
+      toast({ tone: "ok", title: `נשמרו ${rules.length} כללים לקובץ` });
+    } catch (e) {
+      toast({ tone: "bad", title: "הייצוא נכשל", message: errorText(e) });
+    }
+  };
+
+  const importRules = async () => {
+    try {
+      const path = await api.pickFile("ייבוא כללי סינון", "כללי סינון", ["json"]);
+      if (!path) return;
+      const got = await api.importFilters(path);
+      const left = got.skipped > 0 ? ` ${got.skipped} רשומות לא תקינות לא יובאו.` : "";
+      if (!got.rules.length) {
+        toast({ tone: "warn", title: "לא נמצאו כללים תקינים בקובץ", message: left.trim() || undefined });
+        return;
+      }
+      const mode =
+        rules.length === 0
+          ? "add"
+          : await choose({
+              title: "ייבוא כללי סינון",
+              message: `בקובץ ${got.rules.length} כללים, ובעורך כבר ${rules.length}. כללים שכבר קיימים או שכלולים בכלל קיים לא יתווספו.`,
+              options: [
+                { value: "add", label: "הוספה לכללים הקיימים" },
+                { value: "replace", label: "החלפת הכללים הקיימים", danger: true },
+              ],
+            });
+      if (!mode) return;
+      const a = addRules(mode === "replace" ? [] : rules, got.rules);
+      onChange(a.rules);
+      toast({ tone: a.added.length ? "ok" : "info", title: addSummary(a), message: left.trim() || undefined });
+    } catch (e) {
+      toast({ tone: "bad", title: "הייבוא נכשל", message: errorText(e) });
+    }
+  };
 
   return (
     <div className="flex flex-col gap-2">
+      {(repeats > 0 || covered > 0) && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-warn-soft px-3 py-1.5 text-xs">
+          <AlertTriangle size={14} className="shrink-0 text-warn" />
+          <span className="flex-1">
+            {[
+              repeats > 0 && (repeats === 1 ? "כלל כפול אחד" : `${repeats} כללים כפולים`),
+              covered > 0 && (covered === 1 ? "כלל אחד שכלול בכלל אחר" : `${covered} כללים שכלולים בכלל אחר`),
+            ]
+              .filter(Boolean)
+              .join(", ")}
+            . ההסברים מופיעים מתחת לכל כלל.
+          </span>
+          {repeats > 0 && (
+            <Button size="sm" onClick={tidyUp}>
+              הסרת כפילויות
+            </Button>
+          )}
+        </div>
+      )}
       {rules.length === 0 ? (
         <div className="flex items-center gap-2 rounded-lg border border-dashed border-line px-3 py-3 text-[13px] text-muted">
           <Filter size={15} />
@@ -352,7 +927,14 @@ export default function FilterRulesEditor({
       ) : (
         <ul className="flex flex-col gap-2">
           {rules.map((r, i) => (
-            <RuleRow key={i} rule={r} onChange={(n) => update(i, n)} onRemove={() => remove(i)} />
+            <RuleRow
+              key={i}
+              rule={r}
+              onChange={(n) => update(i, n)}
+              onRemove={() => remove(i)}
+              tested={tested(i)}
+              related={related[i]}
+            />
           ))}
         </ul>
       )}
@@ -383,7 +965,42 @@ export default function FilterRulesEditor({
             {p.label}
           </button>
         ))}
+        <div className="ms-auto flex flex-wrap items-center gap-2">
+          {rules.length > 1 && (
+            <Button size="sm" variant="ghost" icon={<ArrowDownUp size={15} />} onClick={tidyUp} title="מיון לפי סוג, מיזוג כללים של סוגי קבצים ושמות והסרת כפילויות">
+              סידור הכללים
+            </Button>
+          )}
+          <Menu
+            trigger={(open) => (
+              <Button size="sm" variant="ghost" icon={<Download size={15} />} onClick={open}>
+                ייבוא וייצוא
+              </Button>
+            )}
+            items={[
+              { label: "ייצוא הכללים לקובץ...", icon: <Download size={15} />, disabled: rules.length === 0, onClick: exportRules },
+              { label: "ייבוא כללים מקובץ...", icon: <Upload size={15} />, onClick: importRules },
+            ]}
+          />
+          {!testing && (
+            <Button size="sm" variant="ghost" icon={<TestTube size={15} />} onClick={() => setTesting(true)}>
+              בדיקת הכללים על קובץ
+            </Button>
+          )}
+        </div>
       </div>
+      {testing && (
+        <FilterCheckPanel
+          rules={rules}
+          globalRules={globalRules}
+          sources={sources}
+          probe={probe}
+          setProbe={setProbe}
+          check={check}
+          onAdd={add}
+          onClose={() => setTesting(false)}
+        />
+      )}
     </div>
   );
 }

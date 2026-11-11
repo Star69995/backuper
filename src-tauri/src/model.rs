@@ -42,15 +42,21 @@ pub enum Schedule {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilterRule {
-    /// Back up only these: extensions ("lrcat, docx") or wildcards/names ("*.lrcat", "notes.txt").
+    /// Back up only these: extensions ("lrcat, docx"; older rules may also hold wildcards/names
+    /// like "*.lrcat", "notes.txt").
     Include {
+        value: String,
+    },
+    /// Back up only files with these names, exactly as typed (a bare word is a whole name, not an
+    /// extension): "notes.txt, report*"
+    IncludeName {
         value: String,
     },
     /// One or more extensions: "tmp", "tmp, log, .bak"
     Extension {
         value: String,
     },
-    /// Wildcard on the file name: "~$*", "Thumbs.db", "*.part"
+    /// Names or wildcards on the file name, comma-separated, exactly as typed: "~$*, Thumbs.db, *.part"
     Pattern {
         value: String,
     },
@@ -115,7 +121,7 @@ pub enum KeepMode {
 #[serde(rename_all = "camelCase", default)]
 pub struct Source {
     pub path: String,
-    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03-00 מלא").
+    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03h00 מלא").
     pub folder_name: String,
     /// Earlier folder names whose dated folders in the destination haven't been renamed to
     /// `folder_name` yet (the drive wasn't connected, or a folder was in use). Cleared name by name
@@ -144,6 +150,10 @@ pub struct Task {
     /// Imported from Cobian whose existing backups in the destination haven't been taken over or
     /// declined yet. Nothing runs (scheduled, drive-connect or manual) until the user decides.
     pub cobian_pending: bool,
+    /// The user chose to continue from Cobian's backups in the destination. They are renamed right
+    /// before the task's first run here (not when the choice is made), so until then Cobian still
+    /// sees them. Cleared once every folder was renamed.
+    pub cobian_takeover: bool,
     pub keep_mode: KeepMode,
     /// KeepMode::Count: how many full backups (each with its incrementals) to keep per source (>= 1).
     pub keep_count: u32,
@@ -183,6 +193,7 @@ impl Default for Task {
             full_schedule: None,
             enabled: true,
             cobian_pending: false,
+            cobian_takeover: false,
             keep_mode: KeepMode::Count,
             keep_count: 1,
             keep_days: 30,
@@ -213,6 +224,21 @@ impl Task {
     }
 }
 
+/// One Cobian backup folder that a takeover renamed (`cobian-renames.json`), so its name can be put back.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CobianRename {
+    pub task_id: String,
+    /// The folder that holds it.
+    pub destination: String,
+    /// Cobian's name.
+    pub from: String,
+    /// The name it got here.
+    pub to: String,
+    pub kind: BackupMode,
+    pub at: DateTime<Local>,
+}
+
 /// Runtime state per task, kept apart from the task config so edits/undo don't touch it.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -225,6 +251,37 @@ pub struct TaskState {
     pub last_message: Option<String>,
     /// The last run was paused and its folder is still there: the next run continues in it.
     pub resumable: bool,
+    /// The newest backup that was written (a failed or stopped run doesn't replace it).
+    pub last_backup: Option<LastBackup>,
+    /// The user asked for the next automatic run (scheduled, catch-up, drive connected) to be a
+    /// full backup instead of the task's own mode. Cleared once a full backup completes.
+    pub full_next: bool,
+}
+
+/// Size of a task's newest backup, shown in the task list.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastBackup {
+    pub at: DateTime<Local>,
+    /// Size of the backup folders it wrote (all sources).
+    pub bytes: u64,
+    /// Full if any source made a full backup.
+    pub mode: BackupMode,
+}
+
+impl LastBackup {
+    /// The backup a run left behind, if it wrote one.
+    pub fn of(r: &RunRecord) -> Option<Self> {
+        if r.backup_bytes == 0 || !matches!(r.status, RunStatus::Success | RunStatus::Warning) {
+            return None;
+        }
+        let full = r.mode == BackupMode::Full || r.sources.iter().any(|s| s.mode == Some(BackupMode::Full));
+        Some(Self {
+            at: r.finished_at,
+            bytes: r.backup_bytes,
+            mode: if full { BackupMode::Full } else { BackupMode::Incremental },
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -255,6 +312,10 @@ pub struct FileError {
     pub path: String,
     pub code: Option<u32>,
     pub message: String,
+    /// What the file looked like when it failed (attributes, reparse tag, size, destination...), for
+    /// debugging: shown only in the copied error text. Empty = nothing recorded.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub debug: String,
 }
 
 impl FileError {
@@ -268,6 +329,7 @@ impl FileError {
             path: path.to_string(),
             code,
             message: message.to_string(),
+            debug: String::new(),
         }
     }
 }
@@ -310,6 +372,9 @@ pub struct SourceRun {
     pub errors: Vec<FileError>,
     pub exit_code: Option<i32>,
     pub log_file: Option<String>,
+    /// How the source was copied (engine command line, exit code, volumes, files that were saved
+    /// by a second try...), for debugging: shown only in the copied error text.
+    pub debug: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -357,14 +422,45 @@ pub struct Settings {
     pub global_filters: Vec<FilterRule>,
     /// Folder that always holds a copy of the task list (e.g. on the backup drive). Empty = off.
     pub task_list_copy_dir: String,
-    /// "auto" (download, install when idle and in the tray) | "notify" | "off".
+    /// "auto" (download, install when the app isn't in use) | "notify" | "off".
     pub update_mode: String,
+    /// "auto" also installs while the window is open once nobody has touched the computer for
+    /// this many minutes. 0 = only while the window is closed to the tray or minimized.
+    pub update_idle_minutes: u32,
     /// Before a full copy, walk the whole tree once just to get exact progress totals. Off: the
     /// copy starts at once and a scan of the source beside it finds the totals (see `backup::full_totals`).
     pub exact_progress: bool,
     /// While a full copy runs, scan the source beside it to find how much there is to copy (the
     /// percentage and the finish time). Off: counters only, plus the estimate from the last backup.
     pub background_totals: bool,
+}
+
+/// A backup folder that should have been deleted (retention, a stopped copy, the user) but wasn't.
+/// Shown right away: until it goes, it takes room on the destination and later backups may fill it.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProblem {
+    pub task_id: String,
+    pub task_name: String,
+    pub path: String,
+    /// "access" (Windows refuses even after we grant ourselves access: needs admin), "inUse" (a
+    /// program has a file in it open) or "other".
+    pub reason: String,
+    /// Windows's own message, for the details.
+    pub message: String,
+    pub at: DateTime<Local>,
+    /// The running backup waits for the user's answer before it copies (a delete-before failed).
+    pub blocking: bool,
+}
+
+impl DeleteProblem {
+    pub fn reason_of(e: &std::io::Error) -> &'static str {
+        match e.raw_os_error() {
+            Some(5) => "access",
+            Some(32 | 33) => "inUse",
+            _ => "other",
+        }
+    }
 }
 
 /// A message for the user that waits in the UI until dismissed (e.g. the task list was recovered).
@@ -391,6 +487,7 @@ impl Default for Settings {
             global_filters: Vec::new(),
             task_list_copy_dir: String::new(),
             update_mode: "auto".into(),
+            update_idle_minutes: 2,
             exact_progress: false,
             background_totals: true,
         }
@@ -414,6 +511,9 @@ pub struct UpdateStatus {
     pub error: Option<String>,
     /// The user asked to install; it waits for the running/queued backups to finish.
     pub install_waiting: bool,
+    /// The window should show the update dialog: the "new version" notification was clicked,
+    /// or the window was opened after it was shown. Cleared by `dismiss_update_prompt`.
+    pub prompt: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -423,7 +523,7 @@ pub struct Progress {
     pub task_id: String,
     pub task_name: String,
     pub mode: BackupMode,
-    /// "scanning" | "deleting" | "copying"
+    /// "scanning" | "deleting" | "pruning" | "copying"
     pub phase: String,
     pub started_at: DateTime<Local>,
     /// 1-based index of the source being backed up, out of source_count.
@@ -443,6 +543,11 @@ pub struct Progress {
     pub copy_started_at: Option<DateTime<Local>>,
     /// Bytes per second of this task's last real copy, for an estimate before this run has a speed.
     pub expected_rate: Option<u64>,
+    /// Bytes the sources after the current one are expected to copy, from their last runs
+    /// (None = one of them has no earlier run to go by; 0 = this is the last source).
+    pub later_bytes: Option<u64>,
+    /// Bytes the sources before the current one copied in this run.
+    pub earlier_bytes: u64,
     pub current_file: String,
 }
 
@@ -454,6 +559,8 @@ pub struct BackupFolder {
     pub created_at: DateTime<Local>,
     pub kind: BackupMode,
     pub partial: bool,
+    /// Size of the folder's files, filled by `list_task_backups` (None: not known, e.g. a partial folder).
+    pub bytes: Option<u64>,
 }
 
 /// The dated backups of one source.
@@ -463,6 +570,16 @@ pub struct SourceBackups {
     pub source: String,
     pub folder_name: String,
     pub backups: Vec<BackupFolder>,
+}
+
+/// What a task's next full backup needs on the destination drive (see `backup::full_space`).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FullSpace {
+    /// About the size of the previous full backup(s), all sources.
+    pub needed: u64,
+    /// What delete-before removes first (0 without it), which counts as free space.
+    pub freed: u64,
 }
 
 #[cfg(test)]
@@ -512,4 +629,73 @@ pub struct RegexCheck {
 pub struct RegexPart {
     pub token: String,
     pub meaning: String,
+}
+
+/// A path to run through all the filter rules (the filter check in the rule editor).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FilterProbe {
+    /// Full path, or a path relative to the task's source. Ending with `\` = a folder.
+    pub path: String,
+    /// Used when the path isn't on disk (on disk, the real values are used).
+    pub size_mb: Option<f64>,
+    pub age_days: Option<u32>,
+    pub hidden: bool,
+    pub system: bool,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleEffect {
+    /// Doesn't change what happens to this path.
+    #[default]
+    None,
+    /// Leaves the path out of the backup.
+    Skips,
+    /// A "back up only" rule the path matches.
+    Keeps,
+    /// Can't tell: the rule needs the size or date of a file that isn't on disk.
+    Unknown,
+    /// The rule isn't complete or valid, so it wasn't checked.
+    Invalid,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleResult {
+    pub effect: RuleEffect,
+    /// Hebrew: how (e.g. the skipped folder on the way), or why it wasn't checked.
+    pub detail: Option<String>,
+}
+
+/// The real file or folder the check used.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OnDisk {
+    pub size: u64,
+    /// RFC 3339.
+    pub modified: Option<String>,
+    pub hidden: bool,
+    pub system: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterCheck {
+    /// None = nothing to check (no path, or not a usable one: see `notes`).
+    pub kept: Option<bool>,
+    pub folder: bool,
+    /// The checked path as a full path (a relative one is read under the task's first source); what a
+    /// "skip this" rule added from the check should hold. None when there is no source to read it under.
+    pub full_path: Option<String>,
+    /// The same path read as a folder, when it isn't on disk and wasn't typed with a trailing `\`
+    /// (so it could be a file or a folder). Its own `as_folder` is always None.
+    pub as_folder: Option<Box<FilterCheck>>,
+    /// Hebrew: why it is left out (None when kept).
+    pub reason: Option<String>,
+    pub on_disk: Option<OnDisk>,
+    pub notes: Vec<String>,
+    /// One per rule, in the order given.
+    pub rules: Vec<RuleResult>,
+    pub global_rules: Vec<RuleResult>,
 }

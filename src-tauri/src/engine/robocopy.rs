@@ -1,20 +1,27 @@
 //! robocopy-backed engine. Progress is read by tailing robocopy's UTF-16 log (/UNILOG),
 //! which keeps non-ASCII (e.g. Hebrew) file names intact, unlike its OEM-codepage stdout.
 
-use super::{CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS};
+use super::native;
+use super::{
+    is_disk_full, CopyEngine, CopyJob, CopyResult, CopyStats, EngineEvent, Filters, Outcome, TotalsSource, ALWAYS_EXCLUDED_DIRS,
+    DISK_FULL_MESSAGE,
+};
 use crate::model::FileError;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_ERRORS: usize = 50;
+/// A file this big (64 MB) gets live byte progress while it is copied; reported in steps of 1/64 of it (1 MB).
+const BIG_FILE: u64 = 64 << 20;
 /// Errors that mean the destination or the source drive itself is in trouble (full, gone), not one
 /// file: a copy with one of these is not a usable backup.
 const DRIVE_ERRORS: [u32; 10] = [39, 112, 21, 53, 55, 59, 64, 67, 1167, 1231];
@@ -55,6 +62,8 @@ fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
     for f in [
         "/COPY:DAT",
         "/DCOPY:DAT",
+        // The copies never keep the read-only attribute: a backup must stay deletable.
+        "/A-:R",
         "/R:2",
         "/W:3",
         "/XJ",
@@ -153,20 +162,65 @@ impl LogTail {
     }
 }
 
-/// Runs robocopy to completion. Ok(None) = cancelled. `on_tick` runs every poll (~150 ms), also
-/// while robocopy writes nothing (e.g. in the middle of one huge file).
+enum Exit {
+    Code(i32),
+    Cancelled,
+    /// `abort` said stop (the destination is full): robocopy was killed.
+    Aborted,
+}
+
+/// Where robocopy's own console output goes. With /UNILOG the log holds everything it does, but a command line
+/// it rejects (exit 16, "ERROR : Invalid Parameter #57") never gets that far, so this is the only place that says why.
+fn stdout_path(log: &Path) -> PathBuf {
+    log.with_extension("stdout")
+}
+
+/// The "ERROR ..." lines of robocopy's console output (it is in the OEM code page, hence the lossy decoding;
+/// the parameter and the reason are plain ASCII, only a Hebrew name inside it may come out garbled).
+fn read_stdout_errors(log: &Path) -> Vec<String> {
+    let text = std::fs::read(stdout_path(log)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let _ = std::fs::remove_file(stdout_path(log));
+    text.lines().map(str::trim).filter(|l| l.starts_with("ERROR")).map(str::to_string).collect()
+}
+
+/// Bytes the process has written so far (its I/O counters), 0 if they can't be read. A file being
+/// copied is allocated up front, so its size on disk says nothing about how far the copy is.
+fn bytes_written(child: &Child) -> u64 {
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        other: [u64; 3],
+        read_bytes: u64,
+        write_bytes: u64,
+        other_bytes: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetProcessIoCounters(process: *mut std::ffi::c_void, counters: *mut IoCounters) -> i32;
+    }
+    let mut c = IoCounters::default();
+    // SAFETY: the handle belongs to the live `child`, and `c` is the struct the API fills in.
+    let ok = unsafe { GetProcessIoCounters(child.as_raw_handle(), &mut c) };
+    if ok != 0 { c.write_bytes } else { 0 }
+}
+
+/// Runs robocopy to completion. `on_tick` runs every poll (~150 ms), also while robocopy writes
+/// nothing (e.g. in the middle of one huge file), with the bytes the process has written so far.
+/// `abort` is checked after each poll.
 fn run_process(
     args: &[OsString],
     log: &Path,
     cancel: &AtomicBool,
+    abort: &dyn Fn() -> bool,
     on_line: &mut dyn FnMut(&str),
-    on_tick: &mut dyn FnMut(),
-) -> Result<Option<i32>, String> {
+    on_tick: &mut dyn FnMut(u64),
+) -> Result<Exit, String> {
     let _ = std::fs::remove_file(log);
+    let stdout = File::create(stdout_path(log)).map_or_else(|_| Stdio::null(), Stdio::from);
     let mut child = Command::new("robocopy")
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
@@ -174,18 +228,24 @@ fn run_process(
     let mut tail = LogTail::new(log);
     loop {
         tail.poll(on_line);
-        on_tick();
+        on_tick(bytes_written(&child));
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
             tail.finish(on_line);
-            return Ok(None);
+            return Ok(Exit::Cancelled);
+        }
+        if abort() {
+            let _ = child.kill();
+            let _ = child.wait();
+            tail.finish(on_line);
+            return Ok(Exit::Aborted);
         }
         match child.try_wait() {
             Ok(Some(status)) => {
                 tail.finish(on_line);
-                on_tick();
-                return Ok(status.code());
+                on_tick(0);
+                return Ok(Exit::Code(status.code().unwrap_or(-1)));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(150)),
             Err(e) => return Err(e.to_string()),
@@ -269,7 +329,19 @@ fn parse_error(line: &str, reason: &str) -> FileError {
         path: path.to_string(),
         code,
         message: reason.trim().to_string(),
+        debug: String::new(),
     }
+}
+
+/// The arguments as a command line, for the debug text (quotes the ones with spaces).
+fn command_line(args: &[OsString]) -> String {
+    args.iter()
+        .map(|a| {
+            let s = a.to_string_lossy();
+            if s.contains(' ') { format!("\"{s}\"") } else { s.into_owned() }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn mirror_args(job: &CopyJob, list_only: bool) -> Args<'_> {
@@ -301,10 +373,11 @@ impl CopyEngine for Robocopy {
                     &build_args(&mirror_args(job, true), &scan_log),
                     &scan_log,
                     cancel,
+                    &|| false,
                     &mut |l| scan.feed(l),
-                    &mut || {},
+                    &mut |_| {},
                 ) {
-                    Ok(None) => {
+                    Ok(Exit::Cancelled) => {
                         let _ = std::fs::remove_file(&scan_log);
                         return CopyResult {
                             outcome: Outcome::Cancelled,
@@ -313,9 +386,10 @@ impl CopyEngine for Robocopy {
                         };
                     }
                     Err(e) => return fail(e),
-                    Ok(Some(_)) => {}
+                    Ok(_) => {}
                 }
                 let _ = std::fs::remove_file(&scan_log);
+                let _ = std::fs::remove_file(stdout_path(&scan_log));
                 if let (Some(f), Some(b)) = (scan.files(), scan.bytes()) {
                     (on_event.borrow_mut())(EngineEvent::Totals {
                         files: f[1],
@@ -340,18 +414,29 @@ impl CopyEngine for Robocopy {
 
         // Pass 2: the real copy.
         let mut stats = CopyStats::default();
+        let args = build_args(&mirror_args(job, false), &job.log_file);
+        stats.debug.push(format!("robocopy {}", command_line(&args)));
         let mut summary = Summary::default();
         let mut last_error: Option<String> = None;
         // robocopy logs a file's line again on every retry (/R), so a file that keeps failing (a
         // locked pagefile.sys on a system drive) would be counted up to three times.
         let mut last_file = String::new();
+        // A full destination fails every further file too (after robocopy's retries, for each one),
+        // so the first such error ends the run.
+        let disk_full = Cell::new(false);
+        // The process's written bytes now / when the current file started, that file's size and how much of it was reported.
+        let (written, file_start, file_size, file_reported) = (Cell::new(0u64), Cell::new(0u64), Cell::new(0u64), Cell::new(0u64));
         let code = run_process(
-            &build_args(&mirror_args(job, false), &job.log_file),
+            &args,
             &job.log_file,
             cancel,
+            &|| disk_full.get(),
             &mut |l| {
                 summary.feed(l);
                 if is_error_line(l) {
+                    if is_disk_full(parse_error(l, "").code) {
+                        disk_full.set(true);
+                    }
                     last_error = Some(l.to_string());
                     return;
                 }
@@ -366,6 +451,9 @@ impl CopyEngine for Robocopy {
                     Line::Copy { size, path } => {
                         if path != last_file {
                             last_file.clone_from(&path);
+                            file_start.set(written.get());
+                            file_size.set(size);
+                            file_reported.set(0);
                             (on_event.borrow_mut())(EngineEvent::File { path, size });
                         }
                     }
@@ -373,7 +461,16 @@ impl CopyEngine for Robocopy {
                 }
             },
             // A background scan's result is passed on as soon as it arrives.
-            &mut || {
+            &mut |written_now| {
+                if written_now > 0 {
+                    written.set(written_now);
+                    // Only a file big enough to take a while is worth tracking (a small one is done before the next tick).
+                    let copied = written_now.saturating_sub(file_start.get()).min(file_size.get());
+                    if file_size.get() >= BIG_FILE && copied >= file_reported.get() + BIG_FILE / 64 {
+                        file_reported.set(copied);
+                        (on_event.borrow_mut())(EngineEvent::FileBytes(copied));
+                    }
+                }
                 if let Some(rx) = &job.late_totals {
                     while let Ok(late) = rx.try_recv() {
                         (on_event.borrow_mut())(match late {
@@ -385,16 +482,32 @@ impl CopyEngine for Robocopy {
             },
         );
 
+        // The reason line may not have been written before robocopy was killed.
+        if let Some(err) = last_error.take() {
+            let entry = parse_error(&err, "");
+            if stats.errors.len() < MAX_ERRORS && !stats.errors.contains(&entry) {
+                stats.errors.push(entry);
+            }
+        }
+        let console_errors = read_stdout_errors(&job.log_file);
         let code = match code {
             Err(e) => return fail(e),
-            Ok(None) => {
+            Ok(Exit::Cancelled) => {
                 return CopyResult {
                     outcome: Outcome::Cancelled,
                     message: "הגיבוי בוטל על ידי המשתמש".into(),
                     stats,
                 }
             }
-            Ok(Some(c)) => c,
+            Ok(Exit::Aborted) => {
+                stats.files_failed = stats.errors.len() as u64;
+                return CopyResult {
+                    outcome: Outcome::Failed,
+                    message: DISK_FULL_MESSAGE.into(),
+                    stats,
+                };
+            }
+            Ok(Exit::Code(c)) => c,
         };
         stats.exit_code = Some(code);
         let mut files_total = 0;
@@ -407,10 +520,24 @@ impl CopyEngine for Robocopy {
         if let Some(b) = summary.bytes() {
             stats.bytes_copied = b[1];
         }
+        stats.debug.push(format!(
+            "exit code {code}; summary files total/copied/skipped/mismatch/failed/extras: {:?}; errors logged: {}",
+            summary.files(),
+            stats.errors.len()
+        ));
+
+        // Entries in the error list whose file did get copied on robocopy's retry, or can be saved by a
+        // plain read and write: they are not failures. Failures robocopy counted itself remain.
+        let streamed = native::settle_errors(&job.source, &job.target, &mut stats, cancel, &mut |e| (on_event.borrow_mut())(e));
+        // Everything robocopy called a failure is accounted for: its "some failed" bit (8) no longer applies.
+        let code = if streamed > 0 && stats.files_failed == 0 && code < 16 { code & !8 } else { code };
 
         // robocopy exit codes are bit flags: 1 copied, 2 extras, 4 mismatch, 8 failures, 16 fatal.
+        stats.debug.extend(console_errors.iter().map(|l| format!("robocopy console: {l}")));
         let (outcome, message) = if code >= 16 {
-            (Outcome::Failed, "שגיאה חמורה - המקור או היעד לא נגישים. ודאו ששני הכוננים מחוברים ושיש הרשאה אליהם, והריצו שוב. פרטים ביומן המפורט.".to_string())
+            (Outcome::Failed, fatal_message(&console_errors))
+        } else if code >= 8 && stats.errors.iter().any(|e| is_disk_full(e.code)) {
+            (Outcome::Failed, DISK_FULL_MESSAGE.to_string())
         } else if code >= 8 && !mostly_copied(&stats, files_total) {
             (Outcome::Failed, format!("{} קבצים לא הועתקו", stats.files_failed.max(1)))
         } else if code >= 8 {
@@ -435,6 +562,24 @@ impl CopyEngine for Robocopy {
     }
 }
 
+/// What a fatal robocopy exit (16) says to the user. A rejected parameter is a problem in the rules, not in the
+/// drives; anything else robocopy printed is quoted; with nothing at all, the usual suspects.
+fn fatal_message(console_errors: &[String]) -> String {
+    if let Some(l) = console_errors.iter().find(|l| l.contains("Invalid Parameter")) {
+        let value = l.split_once(" : ").map_or("", |(_, r)| r.trim());
+        return format!(
+            "robocopy דחה את אחד מכללי הסינון ולכן לא התחיל להעתיק: {value}. בדקו את הכללים של המשימה ואת הכללים הכלליים (כלל עם * או ? ונתיב), תקנו או הסירו אותו והריצו שוב."
+        );
+    }
+    let mut m = String::from("robocopy נכשל לגמרי (קוד 16) ולא העתיק דבר. ");
+    if console_errors.is_empty() {
+        m.push_str("בדקו שהמקור והיעד מחוברים ושיש הרשאה אליהם, ושכללי הסינון תקינים, והריצו שוב. פרטים ביומן המפורט.");
+    } else {
+        m.push_str(&format!("robocopy דיווח: {}. פרטים ב\"העתקת השגיאות\".", console_errors.join("; ")));
+    }
+    m
+}
+
 /// Some files failed, but nothing points at the drives and almost everything else was copied (or
 /// was already there): at most 5% of the files failed.
 fn mostly_copied(stats: &CopyStats, files_total: u64) -> bool {
@@ -445,6 +590,27 @@ fn mostly_copied(stats: &CopyStats, files_total: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rule robocopy rejects is reported as a rule problem, with the rule, not as "drives not reachable".
+    #[test]
+    fn rejected_rule_is_named_in_the_failure() {
+        let dir = std::env::temp_dir().join(format!("backuper-reject-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let job = CopyJob {
+            source: dir.join("src"),
+            target: dir.join("dst"),
+            copy_empty_dirs: false,
+            filters: crate::engine::Filters { exclude_dirs: vec![r"*\bad\rule".into()], ..Default::default() },
+            log_file: dir.join("run.log"),
+            totals: crate::engine::TotalsSource::Unknown,
+            late_totals: None,
+        };
+        let r = Robocopy.mirror(&job, &AtomicBool::new(false), &mut |_| {});
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r.outcome, Outcome::Failed);
+        assert!(r.message.contains(r"*\bad\rule") && r.message.contains("כללי הסינון"), "{}", r.message);
+        assert!(r.stats.debug.iter().any(|l| l.contains("Invalid Parameter")));
+    }
 
     #[test]
     fn parses_error_lines() {
@@ -498,7 +664,7 @@ mod tests {
     fn a_few_failed_files_still_complete_the_backup() {
         let stats = |failed: u64, code: u32| CopyStats {
             files_failed: failed,
-            errors: vec![FileError { path: "C:\\x".into(), code: Some(code), message: String::new() }],
+            errors: vec![FileError { path: "C:\\x".into(), code: Some(code), message: String::new(), debug: String::new() }],
             ..Default::default()
         };
         assert!(mostly_copied(&stats(26, 32), 21_101));
