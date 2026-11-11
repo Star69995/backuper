@@ -659,53 +659,68 @@ fn cobian_restore_plan(
     Ok(crate::cobianmigrate::restore_plan(&task, &journal, never_backed_up, naming))
 }
 
-/// Which of the task's folders would get Cobian's names back (nothing is changed).
+/// Which of the tasks' folders would get Cobian's names back (nothing is changed).
 #[tauri::command]
 pub async fn plan_cobian_restore(
     core: CoreState<'_>,
-    id: String,
+    ids: Vec<String>,
     naming: crate::cobianmigrate::CobianNaming,
-) -> Result<crate::cobianmigrate::RestorePlan, String> {
+) -> Result<Vec<crate::cobianmigrate::RestorePlan>, String> {
     let core = core.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || cobian_restore_plan(&core, &id, &naming))
+    tauri::async_runtime::spawn_blocking(move || ids.iter().map(|id| cobian_restore_plan(&core, id, &naming)).collect())
         .await
         .map_err(|e| e.to_string())?
 }
 
-/// Gives the task's taken-over folders Cobian's names back, so Cobian sees them again. Only while no
-/// backup runs. The task is switched off (it would otherwise run next to Cobian) and won't take
-/// them over again by itself.
+/// Gives the tasks' taken-over folders Cobian's names back, so Cobian sees them again. Only while no
+/// backup runs. A task that got names back is switched off (it would otherwise run next to Cobian),
+/// and none of them takes Cobian's folders over again by itself.
 #[tauri::command]
 pub async fn restore_cobian_names(
     core: CoreState<'_>,
-    id: String,
+    ids: Vec<String>,
     naming: crate::cobianmigrate::CobianNaming,
 ) -> Result<crate::cobianmigrate::AdoptResult, String> {
     let core = core.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let r = core
-            .when_idle(|| cobian_restore_plan(&core, &id, &naming).map(|p| crate::cobianmigrate::restore(&p)))
+        let results = core
+            .when_idle(|| {
+                ids.iter()
+                    .map(|id| cobian_restore_plan(&core, id, &naming).map(|p| (id.clone(), crate::cobianmigrate::restore(&p))))
+                    .collect::<Result<Vec<_>, String>>()
+            })
             .ok_or_else(|| "גיבוי רץ עכשיו או ממתין בתור - נסו שוב כשהגיבויים יסתיימו".to_string())??;
+        let mut total = crate::cobianmigrate::AdoptResult::default();
         {
             let mut s = core.store.lock().unwrap();
             let before = s.cobian_renames.len();
-            s.cobian_renames
-                .retain(|e| !(e.task_id == id && r.done.iter().any(|d| d.from == e.from && d.to == e.to)));
+            let mut tasks_changed = false;
+            for (id, r) in &results {
+                s.cobian_renames
+                    .retain(|e| !(e.task_id == *id && r.done.iter().any(|d| d.from == e.from && d.to == e.to)));
+                if let Some(t) = s.tasks.iter_mut().find(|t| t.id == *id) {
+                    if t.cobian_takeover || (r.renamed > 0 && t.enabled) {
+                        t.cobian_takeover = false;
+                        if r.renamed > 0 {
+                            t.enabled = false;
+                        }
+                        tasks_changed = true;
+                    }
+                }
+            }
             if s.cobian_renames.len() != before {
                 s.save_cobian_renames();
             }
-            if let Some(t) = s.tasks.iter_mut().find(|t| t.id == id) {
-                if t.cobian_takeover || (r.renamed > 0 && t.enabled) {
-                    t.cobian_takeover = false;
-                    if r.renamed > 0 {
-                        t.enabled = false;
-                    }
-                    s.save_tasks();
-                }
+            if tasks_changed {
+                s.save_tasks();
             }
         }
+        for (_, r) in results {
+            total.renamed += r.renamed;
+            total.errors.extend(r.errors);
+        }
         core.changed();
-        Ok(r)
+        Ok(total)
     })
     .await
     .map_err(|e| e.to_string())?

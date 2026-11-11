@@ -73,10 +73,10 @@ export const api = {
   takeOverCobian: (ids: string[]) => invoke<void>("take_over_cobian", { ids }),
   /** "Don't continue from Cobian's backups" (also cancels a takeover that hasn't run yet): they may run now. */
   declineCobianTakeover: (ids: string[]) => invoke<void>("decline_cobian_takeover", { ids }),
-  /** Which of the task's taken-over folders would get Cobian's names back. */
-  planCobianRestore: (id: string, naming: CobianNaming) => invoke<RestorePlan>("plan_cobian_restore", { id, naming }),
-  /** Gives them Cobian's names back and switches the task off. */
-  restoreCobianNames: (id: string, naming: CobianNaming) => invoke<AdoptResult>("restore_cobian_names", { id, naming }),
+  /** Which of the tasks' taken-over folders would get Cobian's names back (one plan per task). */
+  planCobianRestore: (ids: string[], naming: CobianNaming) => invoke<RestorePlan[]>("plan_cobian_restore", { ids, naming }),
+  /** Gives them Cobian's names back and switches off the tasks that got some back. */
+  restoreCobianNames: (ids: string[], naming: CobianNaming) => invoke<AdoptResult>("restore_cobian_names", { ids, naming }),
   dismissNotice: () => invoke<void>("dismiss_notice"),
   /** Shows a sample notification with this sound. */
   testSound: (sound: string) => invoke<void>("test_sound", { sound }),
