@@ -25,6 +25,8 @@ pub struct Snapshot {
     autostart: bool,
     /// Tasks whose drive was connected, waiting for the user to say whether to back up.
     drive_prompts: Vec<String>,
+    /// Backup folders that should have been deleted but weren't.
+    delete_problems: Vec<crate::model::DeleteProblem>,
     notice: Option<Notice>,
     update: crate::model::UpdateStatus,
     /// Per task: how many of its folders a Cobian takeover renamed (recorded, can be put back).
@@ -41,6 +43,7 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
         queue: core.queued(),
         settings: s.settings.clone(),
         drive_prompts: core.drive_prompts(),
+        delete_problems: core.delete_problems(),
         notice: s.notice.clone(),
         update: updates.status(),
         cobian_renamed: s.cobian_renames.iter().fold(HashMap::new(), |mut m, r| {
@@ -278,9 +281,26 @@ pub async fn delete_backup(core: CoreState<'_>, task_id: String, folder_name: St
     if core.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == task_id) {
         return Err("לא ניתן למחוק גיבוי בזמן שהמשימה רצה".into());
     }
-    tauri::async_runtime::spawn_blocking(move || backup::delete_backup(&task, &folder_name, &name))
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || backup::delete_backup(&task, &folder_name, &name, &|p, e| core.report_delete_problem(&task, p, e)))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Deletes again backup folders that couldn't be deleted (`elevated`: as admin, Windows asks the
+/// user first). Returns the ones still there.
+#[tauri::command]
+pub async fn retry_delete(core: CoreState<'_>, paths: Vec<String>, elevated: bool) -> Result<Vec<String>, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.retry_delete(&paths, elevated))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Closes the "a backup wasn't deleted" question without deleting.
+#[tauri::command]
+pub fn dismiss_delete_problems(core: CoreState, paths: Vec<String>) {
+    core.dismiss_delete_problems(&paths);
 }
 
 fn dir_size(path: &std::path::Path) -> u64 {

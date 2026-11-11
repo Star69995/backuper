@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_ERRORS: usize = 50;
 
+const ATTR_READONLY: u32 = 0x1;
 const ATTR_HIDDEN: u32 = 0x2;
 const ATTR_SYSTEM: u32 = 0x4;
 const ATTR_DIRECTORY: u32 = 0x10;
@@ -617,7 +618,7 @@ pub fn prune_filtered(source: &Path, target: &Path, filters: &Filters, cancel: &
             if e.attributes & ATTR_DIRECTORY != 0 {
                 if rules.skip_dir(&e, &child) || rules.regex_skips_dir(&e).is_some() {
                     let (files, bytes) = tree_size(&path);
-                    match fs::remove_dir_all(&path) {
+                    match remove_tree(&path) {
                         Ok(()) => {
                             out.files += files;
                             out.bytes += bytes;
@@ -701,8 +702,10 @@ pub fn copy_stream(from: &Path, to: &Path) -> io::Result<u64> {
     match copied {
         Ok(n) => {
             use std::os::windows::fs::MetadataExt;
-            // Hidden, system, read-only, archive: the ones that matter for a copy.
-            crate::tasklist::set_attributes(to, meta.file_attributes() & 0x27);
+            // Hidden, system, archive: the ones that matter for a copy. Not read-only: a backup copy
+            // must stay deletable (retention, the user).
+            let attrs = meta.file_attributes() & 0x26;
+            crate::tasklist::set_attributes(to, if attrs == 0 { crate::tasklist::NORMAL } else { attrs });
             Ok(n)
         }
         Err(e) => {
@@ -713,7 +716,14 @@ pub fn copy_stream(from: &Path, to: &Path) -> io::Result<u64> {
 }
 
 /// `fs::copy`, and when Windows refuses with an error `stream_retry` knows, the copy by streaming.
+/// The copy never keeps the read-only attribute (CopyFileEx hands it over), like robocopy's /A-:R.
 fn copy_file(from: &Path, to: &Path, debug: &mut Vec<String>) -> io::Result<u64> {
+    let n = copy_file_as_is(from, to, debug)?;
+    drop_readonly(to);
+    Ok(n)
+}
+
+fn copy_file_as_is(from: &Path, to: &Path, debug: &mut Vec<String>) -> io::Result<u64> {
     match fs::copy(from, to) {
         Err(e) if stream_retry(e.raw_os_error().map(|c| c as u32)) => {
             let n = copy_stream(from, to)?;
@@ -722,6 +732,78 @@ fn copy_file(from: &Path, to: &Path, debug: &mut Vec<String>) -> io::Result<u64>
         }
         other => other,
     }
+}
+
+/// Clears the read-only attribute of one file or folder, keeping its other attributes.
+fn drop_readonly(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    let Ok(m) = fs::symlink_metadata(path) else { return false };
+    let attrs = m.file_attributes();
+    if attrs & ATTR_READONLY == 0 {
+        return false;
+    }
+    // Only the attributes SetFileAttributesW takes.
+    let rest = attrs & 0x3126 & !ATTR_READONLY;
+    crate::tasklist::set_attributes(path, if rest == 0 { crate::tasklist::NORMAL } else { rest })
+}
+
+/// Clears the read-only attribute on `dir` and everything under it (links are not followed).
+/// Attributes come from the folder listing, so only read-only items are touched. Returns how many
+/// items were changed.
+pub fn clear_readonly(dir: &Path) -> u64 {
+    let mut changed = drop_readonly(dir) as u64;
+    let Ok(root) = verbatim(dir) else { return changed };
+    let mut pending = vec![root];
+    while let Some(d) = pending.pop() {
+        let Ok(entries) = read_dir(&d, false) else { continue };
+        for e in entries {
+            let mut w = d.clone();
+            w.push(b'\\' as u16);
+            w.extend_from_slice(&e.name);
+            if e.attributes & ATTR_READONLY != 0 {
+                use std::os::windows::ffi::OsStringExt;
+                let rest = e.attributes & 0x3126 & !ATTR_READONLY;
+                let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&w));
+                if crate::tasklist::set_attributes(&path, if rest == 0 { crate::tasklist::NORMAL } else { rest }) {
+                    changed += 1;
+                }
+            }
+            if e.attributes & ATTR_DIRECTORY != 0 && !e.is_link() {
+                pending.push(w);
+            }
+        }
+    }
+    changed
+}
+
+/// Deletes a folder tree the app wrote (a backup folder or part of one). When Windows refuses
+/// ("access denied"), two more tries: with the read-only attribute cleared throughout (items copied
+/// from a read-only source used to keep it; FAT32 / exFAT then always refuse), then with full
+/// control granted to us on the tree (`acl::grant_own_tree`: works on items we own, the usual case;
+/// the destination's own permissions may be what blocks). What still fails is the caller's to
+/// report (`core::Core::report_delete_problem`): it may need admin, or a program has a file open.
+pub fn remove_tree(path: &Path) -> io::Result<()> {
+    let denied = |e: &io::Error| e.raw_os_error() == Some(5);
+    let first = match fs::remove_dir_all(path) {
+        Ok(()) => return Ok(()),
+        Err(e) if !denied(&e) => return Err(e),
+        Err(e) => e,
+    };
+    let second = if clear_readonly(path) > 0 {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if !denied(&e) => return Err(e),
+            Err(e) => e,
+        }
+    } else {
+        first
+    };
+    if crate::acl::grant_own_tree(path).is_err() {
+        return Err(second);
+    }
+    // The reset dropped every item's own entries, read-only ones may have been unreachable before.
+    clear_readonly(path);
+    fs::remove_dir_all(path)
 }
 
 const ATTRIBUTE_NAMES: [(u32, &str); 15] = [
@@ -1156,5 +1238,36 @@ mod tests {
         assert_eq!(stats.errors.len(), 1);
         assert!(stats.errors[0].path.ends_with("locked.txt"));
         assert!(stats.errors[0].debug.contains("attributes"), "{}", stats.errors[0].debug);
+    }
+
+    #[test]
+    fn read_only_items_are_not_copied_as_such_and_still_get_deleted() {
+        let tree = Tree(std::env::temp_dir().join(format!("backuper-readonly-{}", uuid::Uuid::new_v4())));
+        let readonly = |p: &Path| {
+            let mut perms = fs::metadata(p).unwrap().permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(p, perms).unwrap();
+        };
+        let src = tree.0.join("src");
+        file(&src.join("a.txt"), 5);
+        readonly(&src.join("a.txt"));
+        let dst = tree.0.join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        copy_file(&src.join("a.txt"), &dst.join("a.txt"), &mut Vec::new()).unwrap();
+        assert!(!fs::metadata(dst.join("a.txt")).unwrap().permissions().readonly());
+        copy_stream(&src.join("a.txt"), &dst.join("b.txt")).unwrap();
+        assert!(!fs::metadata(dst.join("b.txt")).unwrap().permissions().readonly());
+
+        // A folder written by an older version: read-only files and a read-only subfolder.
+        let old = tree.0.join("old");
+        file(&old.join("sub").join("c.txt"), 5);
+        file(&old.join("d.txt"), 5);
+        readonly(&old.join("sub").join("c.txt"));
+        readonly(&old.join("d.txt"));
+        readonly(&old.join("sub"));
+        remove_tree(&old).unwrap();
+        assert!(!old.exists());
+        // Clear src's attribute so the temp tree can go.
+        clear_readonly(&tree.0);
     }
 }

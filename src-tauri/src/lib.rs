@@ -1,3 +1,4 @@
+mod acl;
 mod backup;
 mod cobian;
 mod cobianmigrate;
@@ -73,6 +74,15 @@ fn mirror_title_bar(window: &tauri::WebviewWindow) {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | RTL as isize);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0, FLAGS);
+    }
+}
+
+/// The app started again as admin to delete backup folders (`acl::delete_elevated`): does that and
+/// exits, before anything else (single instance, window) starts.
+pub fn elevated_delete_if_asked() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(acl::DELETE_SWITCH) {
+        std::process::exit(acl::elevated_main(&args[1..]));
     }
 }
 
@@ -174,6 +184,8 @@ pub fn run() {
             commands::list_task_snapshots,
             commands::dismiss_notice,
             commands::answer_drive_prompts,
+            commands::retry_delete,
+            commands::dismiss_delete_problems,
             commands::test_sound,
             commands::check_updates,
             commands::install_update,

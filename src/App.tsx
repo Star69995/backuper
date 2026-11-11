@@ -1,6 +1,7 @@
 import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Settings as SettingsIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api } from "./api";
+import DeleteProblemDialog from "./components/DeleteProblemDialog";
 import DrivePromptDialog from "./components/DrivePromptDialog";
 import HelpView from "./components/HelpView";
 import HistoryView from "./components/HistoryView";
@@ -114,6 +115,7 @@ export default function App() {
       </main>
       <DrivePromptDialog snap={snap} />
       <NoticeDialog snap={snap} refresh={refresh} />
+      <DeleteProblemDialog snap={snap} refresh={refresh} />
       {(updateOpen || u.prompt) && u.version !== null && <UpdateDialog snap={snap} onClose={() => setUpdateOpen(false)} />}
     </div>
   );

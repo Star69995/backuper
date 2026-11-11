@@ -429,6 +429,34 @@ pub struct Settings {
     pub background_totals: bool,
 }
 
+/// A backup folder that should have been deleted (retention, a stopped copy, the user) but wasn't.
+/// Shown right away: until it goes, it takes room on the destination and later backups may fill it.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProblem {
+    pub task_id: String,
+    pub task_name: String,
+    pub path: String,
+    /// "access" (Windows refuses even after we grant ourselves access: needs admin), "inUse" (a
+    /// program has a file in it open) or "other".
+    pub reason: String,
+    /// Windows's own message, for the details.
+    pub message: String,
+    pub at: DateTime<Local>,
+    /// The running backup waits for the user's answer before it copies (a delete-before failed).
+    pub blocking: bool,
+}
+
+impl DeleteProblem {
+    pub fn reason_of(e: &std::io::Error) -> &'static str {
+        match e.raw_os_error() {
+            Some(5) => "access",
+            Some(32 | 33) => "inUse",
+            _ => "other",
+        }
+    }
+}
+
 /// A message for the user that waits in the UI until dismissed (e.g. the task list was recovered).
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
