@@ -701,6 +701,28 @@ pub fn typical_rate(history: &[RunRecord], task_id: &str) -> Option<u64> {
         })
 }
 
+/// Bytes each source of a task is expected to copy in a run of this mode: what its last good run
+/// of the same mode copied (None = no such run, nothing to go by). Lets the time estimate cover
+/// the sources still to come, not only the current one.
+pub fn source_estimates(history: &[RunRecord], task: &Task, mode: BackupMode) -> Vec<Option<u64>> {
+    let key = |p: &str| p.trim_end_matches('\\').to_lowercase();
+    task.sources
+        .iter()
+        .map(|src| {
+            history
+                .iter()
+                .filter(|r| r.task_id == task.id)
+                .flat_map(|r| r.sources.iter())
+                .find(|s| {
+                    key(&s.source) == key(&src.path)
+                        && s.mode == Some(mode)
+                        && matches!(s.status, Some(RunStatus::Success | RunStatus::Warning))
+                })
+                .map(|s| s.bytes_copied)
+        })
+        .collect()
+}
+
 /// Backs up one source of a task into its own chain of dated folders.
 pub fn backup_source(
     ctx: &RunContext,
@@ -1618,6 +1640,50 @@ mod tests {
         ];
         assert_eq!(typical_rate(&history, "1"), Some(10 * mb as u64));
         assert_eq!(typical_rate(&history, "3"), None);
+    }
+
+    #[test]
+    fn source_estimates_come_from_the_last_good_run_of_the_mode() {
+        let src = |path: &str, mode, status, bytes| SourceRun {
+            source: path.into(),
+            mode: Some(mode),
+            status: Some(status),
+            bytes_copied: bytes,
+            ..Default::default()
+        };
+        let run = |sources| RunRecord {
+            id: String::new(),
+            task_id: "1".into(),
+            task_name: String::new(),
+            trigger: crate::model::Trigger::Manual,
+            mode: BackupMode::Full,
+            started_at: Local::now(),
+            finished_at: Local::now(),
+            status: RunStatus::Success,
+            message: String::new(),
+            files_copied: 0,
+            bytes_copied: 0,
+            backup_bytes: 0,
+            freed_bytes: 0,
+            files_deleted: 0,
+            files_failed: 0,
+            sources,
+        };
+        // Newest first.
+        let history = [
+            run(vec![src("C:\\A", BackupMode::Incremental, RunStatus::Success, 5)]),
+            run(vec![src("C:\\A", BackupMode::Full, RunStatus::Failed, 7)]),
+            run(vec![
+                src("c:\\a\\", BackupMode::Full, RunStatus::Success, 100),
+                src("C:\\B", BackupMode::Full, RunStatus::Warning, 200),
+            ]),
+        ];
+        let t = Task {
+            id: "1".into(),
+            ..task(&["C:\\A", "C:\\B", "C:\\C"], "E:\\Backup")
+        };
+        assert_eq!(source_estimates(&history, &t, BackupMode::Full), [Some(100), Some(200), None]);
+        assert_eq!(source_estimates(&history, &t, BackupMode::Incremental), [Some(5), None, None]);
     }
 
     #[test]

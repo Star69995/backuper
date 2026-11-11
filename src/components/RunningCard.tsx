@@ -39,7 +39,14 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
   // Without exact totals (a scan still running, or an estimate from the last backup) the time is approximate.
   const approx = p.totals === "estimate";
   const etaRaw = useEta(p);
-  const eta = unknownTotal ? null : etaRaw;
+  const eta = unknownTotal ? null : etaRaw.source;
+  // Several sources: the time left is for the whole task when the later ones have earlier runs to go
+  // by, else only for this folder, and then it says how many folders still follow.
+  const multi = p.sourceCount > 1;
+  const total = eta === null ? null : etaRaw.total;
+  const after = p.sourceCount - p.sourceIndex;
+  const afterText = after === 1 ? "ועוד תיקייה אחת אחריה" : `ועוד ${after} תיקיות אחריה`;
+  const folderText = `תיקייה ${p.sourceIndex} מתוך ${p.sourceCount}`;
   const queuedNames = queue.map((j) => tasks.find((t) => t.id === j.taskId)?.name).filter(Boolean);
 
   return (
@@ -104,15 +111,36 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {p.totalsScan && p.totals === "unknown" && <span>סורק את המקור בצד כדי לחשב כמה נשאר</span>}
             <span>
-              {eta !== null && (
+              {!multi ? (
+                eta !== null && (
+                  <>
+                    {approx ? "נותרו בערך " : "נותרו כ-"}
+                    {fmtRemaining(eta)} (<bdi dir="ltr">{fmtFinishAt(eta)}</bdi>)
+                  </>
+                )
+              ) : total !== null ? (
+                <>
+                  {/* The later folders come from their last runs: always an estimate. */}
+                  {after === 0 && !approx ? "נותרו כ-" : "נותרו בערך "}
+                  {fmtRemaining(total)} לכל המשימה (<bdi dir="ltr">{fmtFinishAt(total)}</bdi>)
+                </>
+              ) : eta !== null ? (
                 <>
                   {approx ? "נותרו בערך " : "נותרו כ-"}
-                  {fmtRemaining(eta)} (<bdi dir="ltr">{fmtFinishAt(eta)}</bdi>)
+                  {fmtRemaining(eta)} לתיקייה הזו, {afterText}
+                </>
+              ) : null}
+              {multi && (
+                <>
+                  {eta !== null && " - "}
+                  {folderText}
+                  {eta === null && after > 0 && `, ${afterText}`}
+                  {pct !== null && ": "}
                 </>
               )}
               {pct !== null && (
                 <>
-                  {eta !== null && " - "}
+                  {eta !== null && !multi && " - "}
                   <bdi dir="ltr">
                     {approx && "~"}
                     {Math.floor(pct)}%
