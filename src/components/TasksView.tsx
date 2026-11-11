@@ -29,6 +29,7 @@ import {
   Plus,
   Power,
   PowerOff,
+  RotateCcw,
   Search,
   Pause,
   Square,
@@ -51,6 +52,7 @@ import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
 import { useStopTask } from "./stopTask";
 import { useTaskListTransfer } from "./ImportTasksDialog";
+import PausedCard from "./PausedCard";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
 import {
@@ -90,7 +92,9 @@ export const statusBadge = (s: RunStatus, resumable = false) =>
       </Badge>
     ),
     cancelled: resumable ? (
-      <Badge icon={<Pause size={12} />}>מושהה</Badge>
+      <Badge tone="warn" icon={<Pause size={12} />}>
+        מושהה
+      </Badge>
     ) : (
       <Badge icon={<CircleSlash size={12} />}>הופסק</Badge>
     ),
@@ -153,7 +157,8 @@ function useCompactView() {
   return [compact, setCompact] as const;
 }
 /** The actions column also takes any leftover width, so a dragged border follows the mouse exactly. */
-const MIN_ACTIONS_COL = 96;
+/** Room for "המשך" (a paused backup) + the menu. */
+const MIN_ACTIONS_COL = 112;
 
 /** "Run full now" / "Run incremental now" menu entries. */
 const runModeItems = (run: (mode: BackupMode) => void): MenuItem[] => [
@@ -309,6 +314,17 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const resume = async (id: string) => {
     const queued = await api.resumeTask(id);
     toast({ tone: "info", title: queued ? "הגיבוי ימשיך מאותה נקודה" : "המשימה כבר רצה או ממתינה בתור" });
+  };
+
+  /** Gives up on continuing a paused backup: a new one from the start, in a new folder. */
+  const restart = async (task: Task, mode: BackupMode | null) => {
+    const ok = await confirm({
+      title: `להתחיל את "${task.name}" מחדש?`,
+      message:
+        "הגיבוי יתחיל מההתחלה בתיקייה חדשה, במקום להמשיך את המושהה. הגיבוי החלקי הישן יימחק בהמשך, אחרי שגיבוי חדש יסתיים.",
+      confirmLabel: "התחל מחדש",
+    });
+    if (ok) await runNow([task.id], mode, true);
   };
 
   // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
@@ -496,6 +512,9 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
 
   const queuedIds = new Set(snap.queue.map((j) => j.taskId));
   const runningId = snap.current?.taskId;
+  const pausedTasks = snap.tasks.filter(
+    (t) => snap.states[t.id]?.lastStatus === "cancelled" && snap.states[t.id]?.resumable && t.id !== runningId && !queuedIds.has(t.id),
+  );
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4 p-4 md:p-6">
@@ -642,6 +661,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       )}
 
       {snap.current && <RunningCard progress={snap.current} queue={snap.queue} tasks={snap.tasks} />}
+
+      <PausedCard
+        tasks={pausedTasks}
+        states={snap.states}
+        onResume={resume}
+        onRestart={restart}
+        onDetails={showLastRun}
+      />
 
       {sel.length > 0 && (
         <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2 shadow-sm">
@@ -974,9 +1001,16 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   <X size={15} />
                                 </IconButton>
                               ) : st?.lastStatus === "cancelled" && st.resumable ? (
-                                <IconButton label="המשך מאותה נקודה" onClick={() => resume(t.id)}>
-                                  <Play size={16} />
-                                </IconButton>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  className="gap-1 border-warn/40 px-2 text-warn hover:bg-warn-soft"
+                                  icon={<Play size={14} />}
+                                  title="המשך את הגיבוי המושהה מאותה נקודה"
+                                  onClick={() => resume(t.id)}
+                                >
+                                  המשך
+                                </Button>
                               ) : taskKind(t) === "combined" ? (
                                 <Menu
                                   trigger={(open) => (
@@ -998,7 +1032,20 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   </IconButton>
                                 )}
                                 items={[
-                                  ...runModeItems((mode) => run([t.id], mode)),
+                                  ...(st?.lastStatus === "cancelled" && st.resumable && !running && !queued
+                                    ? ([
+                                        {
+                                          label: "המשך מאותה נקודה",
+                                          icon: <Play size={14} />,
+                                          onClick: () => resume(t.id),
+                                        },
+                                        {
+                                          label: "התחל מחדש",
+                                          icon: <RotateCcw size={14} />,
+                                          onClick: () => restart(t, null),
+                                        },
+                                      ] satisfies MenuItem[])
+                                    : runModeItems((mode) => run([t.id], mode))),
                                   "separator",
                                   { label: "עריכה", icon: <Pencil size={14} />, onClick: () => setEditing(t) },
                                   { label: "שכפול", icon: <Copy size={14} />, onClick: () => duplicate(t) },

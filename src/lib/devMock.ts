@@ -95,6 +95,15 @@ export function installDevMock() {
       enabled: false,
       schedule: { kind: "monthly", day: 1, time: "12:00" },
     },
+    {
+      ...newTask(),
+      id: "5",
+      name: "סרטים",
+      sources: [src("D:\\Videos", "Videos")],
+      destination: "E:\\Backups",
+      mode: "full",
+      schedule: { kind: "manual" },
+    },
   ];
   const states: Record<string, TaskState> = {
     "1": {
@@ -113,6 +122,15 @@ export function installDevMock() {
     },
     "3": { nextRun: iso(47), nextFullRun: null, lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין" },
     "4": { nextRun: null, nextFullRun: null, lastRunAt: null, lastStatus: null, lastMessage: null },
+    // Paused half way: the "paused backups" card and the row's "continue" button.
+    "5": {
+      nextRun: null,
+      nextFullRun: null,
+      lastRunAt: iso(-25),
+      lastStatus: "cancelled",
+      lastMessage: "הגיבוי הושהה. אפשר להמשיך מאותה נקודה",
+      resumable: true,
+    },
   };
   let settings: Settings = {
     theme: "system",
@@ -226,6 +244,43 @@ export function installDevMock() {
       sources,
     };
   });
+  // Task 5 was paused twice: the card adds both parts up.
+  history.unshift(
+    ...[-25, -60].map((at, i): RunRecord => {
+      const files = i === 0 ? 312 : 540;
+      const bytes = i === 0 ? 9_800_000_000 : 17_400_000_000;
+      const t = tasks[4];
+      return {
+        id: `p${i}`,
+        taskId: t.id,
+        taskName: t.name,
+        trigger: "manual",
+        mode: "full",
+        startedAt: iso(at - 30),
+        finishedAt: iso(at),
+        status: "cancelled",
+        message: "הגיבוי הושהה. אפשר להמשיך מאותה נקודה",
+        filesCopied: files,
+        bytesCopied: bytes,
+        backupBytes: 0,
+        freedBytes: 0,
+        filesDeleted: 0,
+        filesFailed: 0,
+        sources: [
+          {
+            ...sourceRun("Videos", "D:\\Videos", 0),
+            status: "cancelled",
+            message: "הגיבוי הושהה",
+            targetFolder: "E:\\Backups\\Videos 2026-11-11 09-00 מלא.partial",
+            filesCopied: files,
+            bytesCopied: bytes,
+            backupBytes: 0,
+            freedBytes: 0,
+          },
+        ],
+      };
+    }),
+  );
   // The task's last 3 runs as dated folders, oldest one full (all full for a full-only task).
   const stamp = (at: string) => {
     const d = new Date(at);
@@ -421,7 +476,9 @@ export function installDevMock() {
         // Like the real queue: a task waiting for the Cobian decision doesn't run.
         return (a.ids as string[]).filter((id) => !tasks.find((t) => t.id === id)?.cobianPending).length;
       case "resume_task":
-        return !tasks.find((t) => t.id === a.id)?.cobianPending;
+        if (tasks.find((t) => t.id === a.id)?.cobianPending) return false;
+        states[a.id as string] = { ...states[a.id as string], resumable: false };
+        return true;
       case "plugin:app|version":
         return "0.2.0 (dev)";
       case "plugin:event|listen":
