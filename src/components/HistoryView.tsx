@@ -1,4 +1,4 @@
-import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, Play, RotateCcw, Search, Trash2 } from "lucide-react";
+import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
@@ -7,7 +7,7 @@ import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, 
 import { useFeedback } from "./feedback";
 import { useResumeTask } from "./resumeTask";
 import { statusBadge } from "./TasksView";
-import { Badge, Button, cx, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
+import { Badge, Button, cx, EmptyState, Modal, PathText, RunIcon, Select, Spinner, TextInput } from "./ui";
 
 export default function HistoryView({ snap }: { snap: Snapshot }) {
   const { toast, confirm } = useFeedback();
@@ -462,7 +462,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
           <>
             <Button
               variant="primary"
-              icon={<Play size={15} />}
+              icon={<RunIcon size={15} />}
               onClick={() => resume(r.taskId).then((ok) => ok && onClose())}
             >
               המשך מאותה נקודה
@@ -480,7 +480,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
         ) : (
           <>
             {canResume && (
-              <Button variant="primary" icon={<Play size={15} />} onClick={resumeFailed}>
+              <Button variant="primary" icon={<RunIcon size={15} />} onClick={resumeFailed}>
                 המשך גיבוי מאותה נקודה
               </Button>
             )}

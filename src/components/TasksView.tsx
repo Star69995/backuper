@@ -28,7 +28,6 @@ import {
   Minimize2,
   MoreVertical,
   Pencil,
-  Play,
   Plus,
   Power,
   PowerOff,
@@ -82,6 +81,7 @@ import {
   type MenuItem,
   PathLink,
   PathText,
+  RunIcon,
   Select,
   Spinner,
   TextInput,
@@ -179,8 +179,8 @@ const MIN_ACTIONS_COL = 112;
 
 /** "Run full now" / "Run incremental now" menu entries. */
 const runModeItems = (run: (mode: BackupMode) => void): MenuItem[] => [
-  { label: "הרץ גיבוי מלא עכשיו", icon: <Play size={14} />, onClick: () => run("full") },
-  { label: "הרץ גיבוי אינקרמנטלי עכשיו", icon: <Play size={14} />, onClick: () => run("incremental") },
+  { label: "הרץ גיבוי מלא עכשיו", icon: <RunIcon size={14} />, onClick: () => run("full") },
+  { label: "הרץ גיבוי אינקרמנטלי עכשיו", icon: <RunIcon size={14} />, onClick: () => run("incremental") },
 ];
 
 const GROUP_KEY = "backuper.taskGroup";
@@ -700,7 +700,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
               items={[
                 {
                   label: "הרצת כל המשימות הפעילות בקבוצה",
-                  icon: <Play size={14} />,
+                  icon: <RunIcon size={14} />,
                   disabled: !groupTasksList.some((t) => t.enabled),
                   onClick: () => run(groupTasksList.filter((t) => t.enabled).map((t) => t.id)),
                 },
@@ -740,17 +740,17 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           {selTasks.some((t) => taskKind(t) === "combined") ? (
             <Menu
               trigger={(open) => (
-                <Button size="sm" variant="ghost" icon={<Play size={15} />} onClick={open}>
+                <Button size="sm" variant="ghost" icon={<RunIcon size={15} />} onClick={open}>
                   הרץ
                 </Button>
               )}
               items={[
-                { label: "לפי סוג כל משימה", icon: <Play size={14} />, onClick: () => run(sel) },
+                { label: "לפי סוג כל משימה", icon: <RunIcon size={14} />, onClick: () => run(sel) },
                 ...runModeItems((mode) => run(sel, mode)),
               ]}
             />
           ) : (
-            <Button size="sm" variant="ghost" icon={<Play size={15} />} onClick={() => run(sel)}>
+            <Button size="sm" variant="ghost" icon={<RunIcon size={15} />} onClick={() => run(sel)}>
               הרץ
             </Button>
           )}
@@ -1107,7 +1107,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   size="sm"
                                   variant="secondary"
                                   className="gap-1 border-warn/40 px-2 text-warn hover:bg-warn-soft"
-                                  icon={<Play size={14} />}
+                                  icon={<RunIcon size={14} />}
                                   title="המשך את הגיבוי המושהה מאותה נקודה"
                                   onClick={() => resume(t.id)}
                                 >
@@ -1117,14 +1117,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                 <Menu
                                   trigger={(open) => (
                                     <IconButton label="הרץ עכשיו" onClick={open}>
-                                      <Play size={16} />
+                                      <RunIcon size={16} />
                                     </IconButton>
                                   )}
                                   items={runModeItems((mode) => run([t.id], mode))}
                                 />
                               ) : (
                                 <IconButton label="הרץ עכשיו" onClick={() => run([t.id])}>
-                                  <Play size={16} />
+                                  <RunIcon size={16} />
                                 </IconButton>
                               )}
                               <Menu
@@ -1138,7 +1138,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                     ? ([
                                         {
                                           label: "המשך מאותה נקודה",
-                                          icon: <Play size={14} />,
+                                          icon: <RunIcon size={14} />,
                                           onClick: () => resume(t.id),
                                         },
                                         {

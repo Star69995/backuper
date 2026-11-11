@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { type LucideProps, Play, SkipForward, X } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -14,6 +14,15 @@ import {
 import { createPortal } from "react-dom";
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
+
+/**
+ * Run icons, mirrored for RTL: lucide draws "forward" pointing right, in Hebrew forward is to the left.
+ * Always use these instead of lucide's Play / SkipForward (a direction-neutral icon like Pause needs nothing).
+ */
+export const RunIcon = ({ className, ...p }: LucideProps) => <Play {...p} className={cx("-scale-x-100", className)} />;
+export const SkipIcon = ({ className, ...p }: LucideProps) => (
+  <SkipForward {...p} className={cx("-scale-x-100", className)} />
+);
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
 

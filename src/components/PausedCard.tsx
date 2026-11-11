@@ -1,9 +1,9 @@
-import { FileText, Pause, Play, RotateCcw } from "lucide-react";
+import { FileText, Pause, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { fmtBytes, fmtNumber, fmtSmart, MODE_LABEL } from "../lib/format";
 import type { BackupMode, RunRecord, Task, TaskState } from "../types";
-import { Button } from "./ui";
+import { Button, RunIcon } from "./ui";
 
 /** How far a paused backup got: what its run(s) since the last finished one copied, so a backup paused twice counts both parts. */
 interface Done {
@@ -97,7 +97,7 @@ export default function PausedCard({
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" variant="primary" icon={<Play size={14} />} onClick={() => onResume(t.id)}>
+                <Button size="sm" variant="primary" icon={<RunIcon size={14} />} onClick={() => onResume(t.id)}>
                   המשך מאותה נקודה
                 </Button>
                 <Button
