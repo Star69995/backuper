@@ -1190,11 +1190,23 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                     icon: <FolderOpen size={14} />,
                                     onClick: () => openPath(t.destination),
                                   },
-                                  ...t.sources.map((s) => ({
-                                    label: t.sources.length === 1 ? "פתיחת תיקיית המקור" : `פתיחת מקור: ${s.folderName}`,
-                                    icon: <FolderOpen size={14} />,
-                                    onClick: () => openPath(s.path),
-                                  })),
+                                  ...(t.sources.length > 2
+                                    ? [
+                                        {
+                                          label: "פתיחת תיקיית מקור...",
+                                          icon: <FolderOpen size={14} />,
+                                          items: t.sources.map((s) => ({
+                                            label: s.folderName,
+                                            icon: <FolderOpen size={14} />,
+                                            onClick: () => openPath(s.path),
+                                          })),
+                                        },
+                                      ]
+                                    : t.sources.map((s) => ({
+                                        label: t.sources.length === 1 ? "פתיחת תיקיית המקור" : `פתיחת מקור: ${s.folderName}`,
+                                        icon: <FolderOpen size={14} />,
+                                        onClick: () => openPath(s.path),
+                                      }))),
                                   "separator",
                                   { label: "מחיקה", icon: <Trash2 size={14} />, danger: true, onClick: () => remove([t]) },
                                 ]}
