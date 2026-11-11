@@ -536,7 +536,10 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
     if (!pos || !menu.current) return;
     const m = menu.current.getBoundingClientRect();
     const a = anchor.current!.getBoundingClientRect();
-    let { top, left } = pos;
+    // Start from the anchor each time, not from `pos` (which may be flipped above it for the previous,
+    // taller content): a shorter submenu then goes back under its trigger.
+    let top = a.bottom + 4;
+    let left = a.left;
     if (top + m.height > window.innerHeight - 8) top = Math.max(8, a.top - m.height - 4);
     if (left + m.width > window.innerWidth - 8) left = Math.max(8, a.right - m.width);
     if (top !== pos.top || left !== pos.left) setPos({ top, left });
