@@ -1,6 +1,6 @@
 //! JSON persistence under %APPDATA%\org.tovtech.backuper. Writes are atomic (tmp + rename).
 
-use crate::model::{LastBackup, Notice, RunRecord, Settings, Task, TaskState};
+use crate::model::{CobianRename, LastBackup, Notice, RunRecord, Settings, Task, TaskState};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +20,8 @@ pub struct Store {
     pub states: HashMap<String, TaskState>,
     pub settings: Settings,
     pub history: Vec<RunRecord>,
+    /// Cobian backup folders renamed by takeovers, oldest first (to put their names back).
+    pub cobian_renames: Vec<CobianRename>,
     /// Shown in the UI until dismissed (not persisted).
     pub notice: Option<Notice>,
 }
@@ -52,6 +54,7 @@ impl Store {
             states: load(&dir.join("state.json")),
             settings: load(&dir.join("settings.json")),
             history: load(&dir.join("history.json")),
+            cobian_renames: load(&dir.join("cobian-renames.json")),
             notice: None,
             dir,
         };
@@ -184,6 +187,27 @@ impl Store {
     }
     pub fn save_settings(&self) {
         save(&self.dir.join("settings.json"), &self.settings);
+    }
+
+    pub fn save_cobian_renames(&self) {
+        save(&self.dir.join("cobian-renames.json"), &self.cobian_renames);
+    }
+
+    /// Records the folders a takeover renamed for `task`.
+    pub fn record_cobian_renames(&mut self, task: &Task, done: &[crate::cobianmigrate::AdoptFolder]) {
+        if done.is_empty() {
+            return;
+        }
+        let now = chrono::Local::now();
+        self.cobian_renames.extend(done.iter().map(|f| CobianRename {
+            task_id: task.id.clone(),
+            destination: task.destination.trim().to_string(),
+            from: f.from.clone(),
+            to: f.to.clone(),
+            kind: f.kind,
+            at: now,
+        }));
+        self.save_cobian_renames();
     }
 
     pub fn add_history(&mut self, rec: RunRecord) {

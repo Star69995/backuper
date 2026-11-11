@@ -36,6 +36,7 @@ import {
   Pause,
   Square,
   Trash2,
+  Undo2,
   X,
   XCircle,
 } from "lucide-react";
@@ -59,7 +60,7 @@ import type { BackupMode, DiskSpace, LastBackup, RunRecord, RunStatus, Snapshot,
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
-import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
+import { CobianPendingDialog, CobianRestoreDialog, CobianTakeoverDialog } from "./CobianDialogs";
 import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
@@ -215,6 +216,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     { kind: "new"; moving: Task[] | null } | { kind: "rename"; from: string } | null
   >(null);
   const [takeoverOf, setTakeoverOf] = useState<Task | null>(null);
+  const [restoreOf, setRestoreOf] = useState<Task | null>(null);
   const [manualRun, setManualRun] = useState<{ ids: string[]; mode: BackupMode | null } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -1177,6 +1179,17 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   "separator",
                                   { label: "ניהול גיבויים", icon: <FolderTree size={14} />, onClick: () => setBackupsOf(t) },
                                   { label: "המשך מגיבויי Cobian", icon: <History size={14} />, onClick: () => setTakeoverOf(t) },
+                                  // Recorded renames, or a task that never backed up here (an older version
+                                  // may have renamed Cobian's folders without recording it).
+                                  ...((snap.cobianRenamed?.[t.id] ?? 0) > 0 || !st?.lastBackup
+                                    ? ([
+                                        {
+                                          label: "החזרת השמות של Cobian",
+                                          icon: <Undo2 size={14} />,
+                                          onClick: () => setRestoreOf(t),
+                                        },
+                                      ] satisfies MenuItem[])
+                                    : []),
                                   {
                                     label: "פתיחת תיקיית היעד",
                                     icon: <FolderOpen size={14} />,
@@ -1233,6 +1246,16 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           onClose={() => setTakeoverOf(null)}
           onDone={() => {
             setTakeoverOf(null);
+            refresh();
+          }}
+        />
+      )}
+      {restoreOf && (
+        <CobianRestoreDialog
+          task={restoreOf}
+          onClose={() => setRestoreOf(null)}
+          onDone={() => {
+            setRestoreOf(null);
             refresh();
           }}
         />

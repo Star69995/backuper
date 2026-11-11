@@ -27,6 +27,8 @@ pub struct Snapshot {
     drive_prompts: Vec<String>,
     notice: Option<Notice>,
     update: crate::model::UpdateStatus,
+    /// Per task: how many of its folders a Cobian takeover renamed (recorded, can be put back).
+    cobian_renamed: HashMap<String, usize>,
 }
 
 #[tauri::command]
@@ -41,6 +43,10 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
         drive_prompts: core.drive_prompts(),
         notice: s.notice.clone(),
         update: updates.status(),
+        cobian_renamed: s.cobian_renames.iter().fold(HashMap::new(), |mut m, r| {
+            *m.entry(r.task_id.clone()).or_insert(0) += 1;
+            m
+        }),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -605,14 +611,18 @@ pub async fn plan_cobian_takeover(core: CoreState<'_>, tasks: Vec<Task>) -> Resu
     .map_err(|e| e.to_string())
 }
 
-/// The user has decided about the tasks' Cobian backups (took them over or declined): they may run now.
-fn clear_cobian_pending(core: &Core, ids: &[String]) {
+/// Sets the tasks' Cobian decision: `take_over` = continue from Cobian's backups (renamed at the
+/// task's next run, see `Core::take_over_cobian`). Either way the task no longer waits for an answer.
+fn set_cobian_decision(core: &Core, ids: &[String], take_over: bool) {
     {
         let mut s = core.store.lock().unwrap();
         let mut changed = false;
-        for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id) && t.cobian_pending) {
-            t.cobian_pending = false;
-            changed = true;
+        for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id)) {
+            if t.cobian_pending || t.cobian_takeover != take_over {
+                t.cobian_pending = false;
+                t.cobian_takeover = take_over;
+                changed = true;
+            }
         }
         if changed {
             s.save_tasks();
@@ -621,37 +631,82 @@ fn clear_cobian_pending(core: &Core, ids: &[String]) {
     core.changed();
 }
 
-/// Renames the tasks' Cobian backup folders to this app's names, so their next run continues
-/// from Cobian's last backup. Only while no backup runs (the queue is held meanwhile).
-/// When everything was renamed, tasks waiting for this decision (`cobian_pending`) are released.
+/// "Continue from Cobian's backups": nothing is renamed now. The folders get this app's names right
+/// before each task's next run, so Cobian keeps seeing them until this app takes over.
 #[tauri::command]
-pub async fn take_over_cobian(core: CoreState<'_>, ids: Vec<String>) -> Result<crate::cobianmigrate::AdoptResult, String> {
+pub fn take_over_cobian(core: CoreState, ids: Vec<String>) {
+    set_cobian_decision(&core, &ids, true);
+}
+
+/// "Don't continue from Cobian's backups" (also cancels a takeover that hasn't run yet): the
+/// tasks' first run will be a full backup, so they may run.
+#[tauri::command]
+pub fn decline_cobian_takeover(core: CoreState, ids: Vec<String>) {
+    set_cobian_decision(&core, &ids, false);
+}
+
+fn cobian_restore_plan(
+    core: &Core,
+    id: &str,
+    naming: &crate::cobianmigrate::CobianNaming,
+) -> Result<crate::cobianmigrate::RestorePlan, String> {
+    let (task, journal, never_backed_up) = {
+        let s = core.store.lock().unwrap();
+        let task = s.task(id).cloned().ok_or("המשימה לא נמצאה")?;
+        let never = s.states.get(id).is_none_or(|st| st.last_backup.is_none());
+        (task, s.cobian_renames.clone(), never)
+    };
+    Ok(crate::cobianmigrate::restore_plan(&task, &journal, never_backed_up, naming))
+}
+
+/// Which of the task's folders would get Cobian's names back (nothing is changed).
+#[tauri::command]
+pub async fn plan_cobian_restore(
+    core: CoreState<'_>,
+    id: String,
+    naming: crate::cobianmigrate::CobianNaming,
+) -> Result<crate::cobianmigrate::RestorePlan, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || cobian_restore_plan(&core, &id, &naming))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Gives the task's taken-over folders Cobian's names back, so Cobian sees them again. Only while no
+/// backup runs. The task is switched off (it would otherwise run next to Cobian) and won't take
+/// them over again by itself.
+#[tauri::command]
+pub async fn restore_cobian_names(
+    core: CoreState<'_>,
+    id: String,
+    naming: crate::cobianmigrate::CobianNaming,
+) -> Result<crate::cobianmigrate::AdoptResult, String> {
     let core = core.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let all = core.store.lock().unwrap().tasks.clone();
-        let tasks: Vec<&Task> = all.iter().filter(|t| ids.contains(&t.id)).collect();
-        let total = core
-            .when_idle(|| {
-                let mut total = crate::cobianmigrate::AdoptResult::default();
-                for t in &tasks {
-                    let r = crate::cobianmigrate::apply(t, &all);
-                    total.renamed += r.renamed;
-                    total.errors.extend(r.errors);
+        let r = core
+            .when_idle(|| cobian_restore_plan(&core, &id, &naming).map(|p| crate::cobianmigrate::restore(&p)))
+            .ok_or_else(|| "גיבוי רץ עכשיו או ממתין בתור - נסו שוב כשהגיבויים יסתיימו".to_string())??;
+        {
+            let mut s = core.store.lock().unwrap();
+            let before = s.cobian_renames.len();
+            s.cobian_renames
+                .retain(|e| !(e.task_id == id && r.done.iter().any(|d| d.from == e.from && d.to == e.to)));
+            if s.cobian_renames.len() != before {
+                s.save_cobian_renames();
+            }
+            if let Some(t) = s.tasks.iter_mut().find(|t| t.id == id) {
+                if t.cobian_takeover || (r.renamed > 0 && t.enabled) {
+                    t.cobian_takeover = false;
+                    if r.renamed > 0 {
+                        t.enabled = false;
+                    }
+                    s.save_tasks();
                 }
-                total
-            })
-            .ok_or_else(|| "גיבוי רץ עכשיו או ממתין בתור - נסו שוב כשהגיבויים יסתיימו".to_string())?;
-        if total.errors.is_empty() {
-            clear_cobian_pending(&core, &ids);
+            }
         }
-        Ok(total)
+        core.changed();
+        Ok(r)
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// "Don't continue from Cobian's backups": the tasks' first run will be a full backup, so they may run.
-#[tauri::command]
-pub fn decline_cobian_takeover(core: CoreState, ids: Vec<String>) {
-    clear_cobian_pending(&core, &ids);
 }

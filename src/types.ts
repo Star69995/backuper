@@ -88,6 +88,8 @@ export interface Task {
   group: string;
   /** Imported from Cobian; waiting for the user to take over (or decline) Cobian's backups. Nothing runs meanwhile. */
   cobianPending: boolean;
+  /** Continue from Cobian's backups: they are renamed right before the task's next run (not before). */
+  cobianTakeover: boolean;
   sources: Source[];
   destination: string;
   /** Backup type of the main schedule. */
@@ -216,6 +218,8 @@ export interface Snapshot {
   /** Shown until dismissed (e.g. the task list was recovered from a backup). */
   notice: Notice | null;
   update: UpdateStatus;
+  /** Per task id: how many of its folders a Cobian takeover renamed (their names can be put back). */
+  cobianRenamed: Record<string, number>;
 }
 
 export interface Notice {
@@ -367,6 +371,33 @@ export interface AdoptResult {
   errors: string[];
 }
 
+/**
+ * How Cobian named its backups - only for folders taken over by an older version, whose original
+ * names weren't recorded. `date`: "ymd-hms" (Cobian's default) | "ymd-hm" | "yy-hms" | "yy-hm";
+ * `kind`: "" (no type) | "word" (" Full") | "paren" (" (Full)").
+ */
+export interface CobianNaming {
+  date: string;
+  kind: string;
+}
+
+/** One taken-over folder and the Cobian name it gets back. */
+export interface RestoreFolder {
+  from: string;
+  to: string;
+  kind: BackupMode;
+  /** Why it can't be renamed back; null = it can. */
+  problem: string | null;
+}
+
+export interface RestorePlan {
+  taskId: string;
+  destination: string;
+  folders: RestoreFolder[];
+  /** No record of the renames: names rebuilt from `CobianNaming`. */
+  legacy: boolean;
+}
+
 /** An automatic copy of the task list, taken whenever it changed. */
 export interface TaskSnapshot {
   path: string;
@@ -379,6 +410,7 @@ export const newTask = (): Task => ({
   name: "",
   group: "",
   cobianPending: false,
+  cobianTakeover: false,
   sources: [],
   destination: "",
   mode: "incremental",
