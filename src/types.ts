@@ -180,6 +180,10 @@ export interface Progress {
   copyStartedAt: string | null;
   /** Bytes per second of the task's last real copy. */
   expectedRate: number | null;
+  /** Bytes the sources after the current one are expected to copy, from their last runs (null = unknown, 0 = last source). */
+  laterBytes: number | null;
+  /** Bytes the sources before the current one copied in this run. */
+  earlierBytes: number;
   currentFile: string;
 }
 

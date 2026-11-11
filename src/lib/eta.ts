@@ -35,8 +35,15 @@ export function copyRate(samples: Sample[], now: number, p: Progress): number | 
   return w * measured + (1 - w) * expected;
 }
 
-/** Seconds until the copy is done, or null when it can't be told yet (no totals, no speed). */
-export function useEta(p: Progress, now = Date.now()): number | null {
+export interface Eta {
+  /** Seconds until the current source is copied, or null when it can't be told yet (no totals, no speed). */
+  source: number | null;
+  /** Seconds until the whole task is done: the current source plus the ones after it at the same speed.
+   * null when the sources still to come have no earlier run to go by (or `source` is null). */
+  total: number | null;
+}
+
+export function useEta(p: Progress, now = Date.now()): Eta {
   const ref = useRef<{ key: string; samples: Sample[] }>({ key: "", samples: [] });
   const key = `${p.runId}/${p.sourceIndex}`;
   if (ref.current.key !== key) ref.current = { key, samples: [] };
@@ -44,8 +51,10 @@ export function useEta(p: Progress, now = Date.now()): number | null {
   samples.push({ t: now, bytes: p.bytesDone });
   while (samples.length > 1 && now - samples[1].t >= WINDOW_MS) samples.shift();
 
-  if (p.phase !== "copying" || p.bytesTotal <= 0 || p.totals === "unknown") return null;
+  if (p.phase !== "copying" || p.bytesTotal <= 0 || p.totals === "unknown") return { source: null, total: null };
   const rate = copyRate(samples, now, p);
-  if (!rate || rate <= 0) return null;
-  return Math.max(0, (p.bytesTotal - p.bytesDone) / rate);
+  if (!rate || rate <= 0) return { source: null, total: null };
+  const source = Math.max(0, (p.bytesTotal - p.bytesDone) / rate);
+  const later = p.sourceIndex >= p.sourceCount ? 0 : (p.laterBytes ?? null);
+  return { source, total: later === null ? null : source + later / rate };
 }

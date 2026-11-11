@@ -499,6 +499,11 @@ pub struct Progress {
     pub copy_started_at: Option<DateTime<Local>>,
     /// Bytes per second of this task's last real copy, for an estimate before this run has a speed.
     pub expected_rate: Option<u64>,
+    /// Bytes the sources after the current one are expected to copy, from their last runs
+    /// (None = one of them has no earlier run to go by; 0 = this is the last source).
+    pub later_bytes: Option<u64>,
+    /// Bytes the sources before the current one copied in this run.
+    pub earlier_bytes: u64,
     pub current_file: String,
 }
 
