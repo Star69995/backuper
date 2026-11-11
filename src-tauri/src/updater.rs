@@ -8,7 +8,7 @@ use chrono::Local;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// Lets the app finish starting (and a catch-up backup get queued) before the first check.
@@ -29,6 +29,11 @@ pub struct Updates {
     busy: AtomicBool,
     /// The last version a "new version" notification was shown for.
     notified: Mutex<Option<String>>,
+    /// That notification was shown and the window hasn't been opened since. A click on it
+    /// once it moved to the notification center doesn't reach our handler: Windows starts the
+    /// app again (a second instance, which only brings this one up), so the next opening of the
+    /// window is taken as the click.
+    notified_unseen: AtomicBool,
     core: Arc<Core>,
     app: AppHandle,
 }
@@ -45,6 +50,7 @@ impl Updates {
             pending: Mutex::new(None),
             busy: AtomicBool::new(false),
             notified: Mutex::new(None),
+            notified_unseen: AtomicBool::new(false),
             core,
             app,
         })
@@ -130,6 +136,7 @@ impl Updates {
                     s.state = "upToDate".into();
                     s.version = None;
                     s.notes = None;
+                    s.prompt = false;
                     s.checked_at = Some(Local::now());
                 });
                 Ok(false)
@@ -234,6 +241,26 @@ impl Updates {
         }
     }
 
+    /// Asks the window to show the update dialog (it reads `UpdateStatus.prompt` from the
+    /// snapshot, so this works however long the window takes to come up).
+    pub fn request_prompt(&self) {
+        self.notified_unseen.store(false, Ordering::SeqCst);
+        if self.pending.lock().unwrap().is_some() {
+            self.set(|s| s.prompt = true);
+        }
+    }
+
+    /// The main window was brought up (tray, second instance, notification).
+    pub fn window_shown(&self) {
+        if self.notified_unseen.load(Ordering::SeqCst) {
+            self.request_prompt();
+        }
+    }
+
+    pub fn dismiss_prompt(&self) {
+        self.set(|s| s.prompt = false);
+    }
+
     fn notify_available(&self) {
         let Some(version) = self.status().version else { return };
         let mut notified = self.notified.lock().unwrap();
@@ -241,6 +268,7 @@ impl Updates {
             return;
         }
         *notified = Some(version.clone());
+        self.notified_unseen.store(true, Ordering::SeqCst);
         let sound = self.core.store.lock().unwrap().settings.sound_success.clone();
         let title = format!("גרסה חדשה של Backuper זמינה: {version}");
         let body = "לחצו כאן כדי לפתוח את Backuper ולעדכן.";
@@ -264,11 +292,13 @@ impl Updates {
     }
 }
 
-/// A click on the "new version" notification: brings the window up on the update page.
+/// A click on the "new version" notification: brings the window up with the update dialog.
 #[cfg(windows)]
 fn open_update_page(app: &AppHandle) {
+    if let Some(updates) = app.try_state::<Arc<Updates>>() {
+        updates.request_prompt();
+    }
     crate::tray::show_main(app);
-    let _ = app.emit("show-update", ());
 }
 
 /// Called at startup: if this launch follows an update, removes the marker, says so, and

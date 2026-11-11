@@ -470,6 +470,9 @@ pub struct UpdateStatus {
     pub error: Option<String>,
     /// The user asked to install; it waits for the running/queued backups to finish.
     pub install_waiting: bool,
+    /// The window should show the update dialog: the "new version" notification was clicked,
+    /// or the window was opened after it was shown. Cleared by `dismiss_update_prompt`.
+    pub prompt: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]

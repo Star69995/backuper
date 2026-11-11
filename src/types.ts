@@ -223,6 +223,8 @@ export interface UpdateStatus {
   error: string | null;
   /** The user asked to install; it waits for the running/queued backups to finish. */
   installWaiting: boolean;
+  /** Show the update dialog: the "new version" notification was clicked (or the window opened after it). */
+  prompt: boolean;
 }
 
 export interface Snapshot {

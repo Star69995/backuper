@@ -606,6 +606,12 @@ pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
     updates.install_now().await
 }
 
+/// The update dialog was closed (the notification's request is answered).
+#[tauri::command]
+pub fn dismiss_update_prompt(updates: UpdatesState) {
+    updates.dismiss_prompt();
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CobianLists {
