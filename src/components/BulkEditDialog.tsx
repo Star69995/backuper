@@ -9,6 +9,7 @@ import {
   type TaskKind,
   taskKind,
 } from "../lib/format";
+import { useUnsaved } from "../lib/unsaved";
 import type { DriveAction, FilterRule, Schedule, Task } from "../types";
 import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
@@ -107,6 +108,7 @@ export default function BulkEditDialog({
   const [filterMode, setFilterMode] = useState<"add" | "replace">("add");
   const [active, setActive] = useState<Set<Key>>(new Set());
   const [step, setStep] = useState<"edit" | "preview">("edit");
+  useUnsaved(active.size > 0 ? `עריכה של ${tasks.length} משימות` : null);
 
   const set = <K extends Key>(k: K, v: Values[K]) => {
     setValues((x) => ({ ...x, [k]: v }));

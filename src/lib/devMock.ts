@@ -269,6 +269,7 @@ export function installDevMock() {
     taskListCopyDir: "",
     globalFilters: [{ kind: "pattern", value: "~$*" }],
     updateMode: "auto",
+    updateIdleMinutes: 2,
     exactProgress: false,
     backgroundTotals: true,
   };
@@ -284,6 +285,8 @@ export function installDevMock() {
         checkedAt: iso(-3),
         error: null,
         installWaiting: false,
+        // ?update=prompt: as after a click on the "new version" notification.
+        prompt: new URLSearchParams(location.search).get("update") === "prompt",
       }
     : {
         currentVersion: "0.3.4",
@@ -295,6 +298,7 @@ export function installDevMock() {
         checkedAt: iso(-90),
         error: null,
         installWaiting: false,
+        prompt: false,
       };
   const sourceRun = (folderName: string, source: string, i: number): SourceRun => ({
     source,
@@ -646,6 +650,11 @@ export function installDevMock() {
         return update.version !== null;
       case "install_update":
         update.installWaiting = true;
+        return null;
+      case "set_unsaved":
+        return null;
+      case "dismiss_update_prompt":
+        update.prompt = false;
         return null;
       case "find_cobian_lists":
         return {

@@ -94,6 +94,10 @@ export const api = {
   checkUpdates: () => invoke<boolean>("check_updates"),
   /** Downloads and installs it (the app restarts), right away or once the backups are done. */
   installUpdate: () => invoke<void>("install_update"),
+  /** What the window has open with unsaved changes (an update waits for them and asks). */
+  setUnsaved: (what: string[]) => invoke<void>("set_unsaved", { what }),
+  /** The update dialog was closed. */
+  dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;
@@ -116,7 +120,6 @@ export const api = {
     const r = await open({ directory: true, multiple: true, title });
     return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
   },
-  onShowUpdate: (cb: () => void) => listen("show-update", cb),
   onSnapshotChanged: (cb: () => void) => listen("snapshot-changed", cb),
   onProgress: (cb: (p: Progress) => void) => listen<Progress>("progress", (e) => cb(e.payload)),
 };

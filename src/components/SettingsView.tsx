@@ -1,5 +1,5 @@
 import { Bell, Download, Filter, FolderSearch, Gauge, History, Import, Monitor, Moon, Power, RefreshCw, RotateCcw, Sun, Volume2 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtRelative, fmtSmart } from "../lib/format";
 import type { Settings, Snapshot, TaskSnapshot } from "../types";
@@ -7,6 +7,8 @@ import { useFeedback } from "./feedback";
 import FilterRulesEditor from "./FilterRulesEditor";
 import { useTaskListTransfer } from "./ImportTasksDialog";
 import { PathPicker } from "./TaskEditor";
+import { autoInstallWhen } from "./UpdateDialog";
+import { useUnsaved } from "../lib/unsaved";
 import { Button, IconButton, Modal, PathText, Segmented, Select, Toggle } from "./ui";
 
 function Card({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
@@ -21,43 +23,8 @@ function Card({ title, icon, children }: { title: string; icon: ReactNode; child
   );
 }
 
-export default function SettingsView({
-  snap,
-  refresh,
-  jumpToUpdates = false,
-  onJumped,
-}: {
-  snap: Snapshot;
-  refresh: () => void;
-  /** Scroll to the updates card (once; `onJumped` is called afterwards). */
-  jumpToUpdates?: boolean;
-  onJumped?: () => void;
-}) {
+export default function SettingsView({ snap, refresh }: { snap: Snapshot; refresh: () => void }) {
   const { toast } = useFeedback();
-  const pageRef = useRef<HTMLDivElement>(null);
-  const updatesRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!jumpToUpdates) return;
-    const go = () => updatesRef.current?.scrollIntoView({ block: "start" });
-    go();
-    // Cards above (the task list backups) fill in after the page opens and push the updates card down,
-    // so keep it in place until the content settles or the user scrolls.
-    const observer = new ResizeObserver(go);
-    if (pageRef.current) observer.observe(pageRef.current);
-    const events = ["wheel", "touchstart", "keydown", "mousedown"] as const;
-    const stop = () => {
-      observer.disconnect();
-      events.forEach((e) => window.removeEventListener(e, stop));
-      onJumped?.();
-    };
-    events.forEach((e) => window.addEventListener(e, stop, { passive: true }));
-    const timer = window.setTimeout(stop, 2000);
-    return () => {
-      window.clearTimeout(timer);
-      stop();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jumpToUpdates]);
   const s = snap.settings;
   const update = (patch: Partial<Settings>) =>
     api
@@ -71,9 +38,10 @@ export default function SettingsView({
   // Filter rules are edited as a draft and saved explicitly (a new rule starts empty).
   const [filters, setFilters] = useState(s.globalFilters);
   const filtersDirty = JSON.stringify(filters) !== JSON.stringify(s.globalFilters);
+  useUnsaved(filtersDirty ? "כללי הסינון הכלליים בהגדרות" : null);
 
   return (
-    <div ref={pageRef} className="mx-auto flex max-w-3xl flex-col gap-4 p-4 md:p-6">
+    <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4 md:p-6">
       <header>
         <h1 className="text-xl font-semibold">הגדרות</h1>
       </header>
@@ -180,9 +148,7 @@ export default function SettingsView({
         </p>
       </Card>
 
-      <div ref={updatesRef} className="scroll-mt-4">
-        <UpdatesCard snap={snap} update={update} />
-      </div>
+      <UpdatesCard snap={snap} update={update} />
 
       <p className="text-center text-xs text-muted">Backuper {snap.update.currentVersion} - מנוע העתקה: robocopy</p>
     </div>
@@ -225,7 +191,7 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
   else if (u.state === "ready")
     status =
       mode === "auto"
-        ? `גרסה ${u.version} הורדה ותותקן מעצמה כשהחלון סגור (באזור ההודעות) ואין גיבוי פעיל. אפשר גם לעדכן עכשיו.`
+        ? `גרסה ${u.version} הורדה. ${autoInstallWhen(snap.settings.updateIdleMinutes)} אפשר גם לעדכן עכשיו.`
         : `גרסה ${u.version} הורדה ומוכנה להתקנה.`;
   else if (u.state === "available") status = `גרסה ${u.version} זמינה.`;
   else if (u.state === "upToDate") status = `זו הגרסה האחרונה. נבדק ${fmtRelative(u.checkedAt)}.`;
@@ -234,12 +200,12 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
 
   return (
     <Card title="עדכוני תוכנה" icon={<RefreshCw size={18} />}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-48 flex-1 flex-col gap-0.5">
           <span className="text-sm font-medium">עדכון אוטומטי</span>
           <span className="text-xs text-muted">
             {mode === "auto"
-              ? "גרסה חדשה מורדת ומותקנת מעצמה, רק כשהחלון סגור ואין גיבוי פעיל. התוכנה עולה מחדש מיד אחרי ההתקנה."
+              ? "גרסה חדשה מורדת ומותקנת מעצמה, בלי לשאול, כשהתוכנה לא בשימוש. אף פעם לא באמצע גיבוי או עם שינויים שלא נשמרו. התוכנה עולה מחדש מיד אחרי ההתקנה."
               : mode === "notify"
                 ? "כשיש גרסה חדשה תופיע התראה, וההתקנה רק בלחיצה על \"עדכון עכשיו\"."
                 : "לא נבדק אם יש גרסה חדשה. אפשר לבדוק ידנית."}
@@ -256,6 +222,28 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
           ]}
         />
       </div>
+      {mode === "auto" && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-48 flex-1 flex-col gap-0.5">
+            <span className="text-sm font-medium">כשהחלון פתוח, לעדכן אחרי</span>
+            <span className="text-xs text-muted">
+              כשהחלון סגור או ממוזער העדכון מותקן מיד. כשהחלון פתוח - רק אחרי שלא נגעו בעכבר ובמקלדת כל הזמן הזה.
+            </span>
+          </div>
+          <Select
+            className="w-36"
+            value={String(snap.settings.updateIdleMinutes)}
+            onChange={(e) => update({ updateIdleMinutes: Number(e.target.value) })}
+            aria-label="כשהחלון פתוח, לעדכן אחרי"
+          >
+            {IDLE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+      )}
       <div className="flex flex-col gap-2 rounded-lg border border-line bg-panel2 px-3 py-2.5 text-[13px]">
         <span>
           הגרסה המותקנת: <bdi dir="ltr">{u.currentVersion}</bdi>
@@ -283,6 +271,16 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
     </Card>
   );
 }
+
+/** After how many idle minutes "auto" installs with the window open (0 = never). */
+const IDLE_OPTIONS = [
+  { value: "1", label: "דקה" },
+  { value: "2", label: "2 דקות" },
+  { value: "5", label: "5 דקות" },
+  { value: "10", label: "10 דקות" },
+  { value: "30", label: "30 דקות" },
+  { value: "0", label: "לא לעדכן" },
+];
 
 /** Windows toast sounds (the names its notification XML accepts). */
 const SOUNDS = [
