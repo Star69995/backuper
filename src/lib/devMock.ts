@@ -3,6 +3,7 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   AdoptPlan,
+  BackupFolder,
   ImportedTask,
   ImportPreview,
   ImportSplit,
@@ -236,11 +237,26 @@ export function installDevMock() {
     t.sources.map((s) => ({
       source: s.path,
       folderName: s.folderName,
-      backups: occurrences(t.schedule, 3, true).map((createdAt, i) => {
-        const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
-        const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
-        return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
-      }),
+      backups: occurrences(t.schedule, 3, true)
+        .map((createdAt, i): BackupFolder => {
+          const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
+          const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
+          return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
+        })
+        // A failed last run leaves its half-done folder behind (the run details offer to continue in it).
+        .concat(
+          states[t.id]?.lastStatus === "failed"
+            ? [
+                {
+                  name: `${s.folderName} ${stamp(states[t.id].lastRunAt!)} מלא.partial`,
+                  path: `${t.destination}\\${s.folderName} ${stamp(states[t.id].lastRunAt!)} מלא.partial`,
+                  createdAt: states[t.id].lastRunAt!,
+                  kind: "full" as const,
+                  partial: true,
+                },
+              ]
+            : [],
+        ),
     }));
   // Open with the drive-connected question showing (?prompt in the URL).
   let drivePrompts = new URLSearchParams(location.search).has("prompt") ? ["1", "2"] : [];

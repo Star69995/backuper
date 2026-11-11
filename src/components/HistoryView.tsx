@@ -1,4 +1,4 @@
-import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, Search, Trash2 } from "lucide-react";
+import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, Play, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
@@ -374,6 +374,34 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
     }
   };
   const skipper: Skipper | null = task && { isSkipped: (p) => isSkipped(task, p), skip };
+
+  // A stopped or failed run can be continued while it is the task's latest run and its half-done folder is still there
+  // (the continue happens in that folder; after a newer run it no longer belongs to this record).
+  const [canResume, setCanResume] = useState(false);
+  useEffect(() => {
+    if (r.status !== "failed" && r.status !== "cancelled") return;
+    let alive = true;
+    Promise.all([api.history(), api.listBackups(r.taskId)])
+      .then(([history, sources]) => {
+        const latest = history.find((h) => h.taskId === r.taskId);
+        const partial = sources.some((s) => s.backups.some((b) => b.partial));
+        if (alive) setCanResume(latest?.id === r.id && partial);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [r.id, r.taskId, r.status]);
+
+  const resume = async () => {
+    try {
+      const queued = await api.resumeTask(r.taskId);
+      toast({ tone: "info", title: queued ? "הגיבוי ימשיך מאותה נקודה" : "המשימה כבר רצה או ממתינה בתור" });
+      if (queued) onClose();
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן להמשיך את הגיבוי", message: errorText(e) });
+    }
+  };
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
   const [logFilter, setLogFilter] = useState("");
 
@@ -410,9 +438,16 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
       subtitle={`${fmtDateTime(r.startedAt)} - ${MODE_LABEL[r.mode]}, ${TRIGGER_LABEL[r.trigger]}`}
       onClose={onClose}
       footer={
-        <Button variant="primary" onClick={onClose}>
-          סגור
-        </Button>
+        <>
+          {canResume && (
+            <Button variant="primary" icon={<Play size={15} />} onClick={resume}>
+              המשך גיבוי מאותה נקודה
+            </Button>
+          )}
+          <Button variant={canResume ? "secondary" : "primary"} onClick={onClose}>
+            סגור
+          </Button>
+        </>
       }
     >
       <div className="flex flex-col gap-4">

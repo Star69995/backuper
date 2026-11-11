@@ -167,8 +167,9 @@ pub fn run_tasks(core: CoreState, ids: Vec<String>, mode: Option<BackupMode>, fr
         .count()
 }
 
-/// Continues a task whose last run was stopped: same mode as that run, and `backup_source` picks
-/// up in the folder it left. Returns false if the task is already queued or running.
+/// Continues a task whose last run was stopped or failed (e.g. destination full): same mode as that
+/// run, and `backup_source` picks up in the folder it left. Returns false if the task is already
+/// queued or running.
 #[tauri::command]
 pub fn resume_task(core: CoreState, id: String) -> bool {
     let mode = core
@@ -178,7 +179,7 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
         .history
         .iter()
         .find(|r| r.task_id == id)
-        .filter(|r| r.status == RunStatus::Cancelled)
+        .filter(|r| matches!(r.status, RunStatus::Cancelled | RunStatus::Failed))
         .map(|r| r.mode);
     core.enqueue(Job {
         task_id: id,
