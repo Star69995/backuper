@@ -54,9 +54,9 @@ import {
   type TaskKind,
 } from "../lib/format";
 import { fitColumns, useColumnWidths } from "../lib/useColumnWidths";
-import { useDiskSpace } from "../lib/useDiskSpace";
+import { useDiskSpace, useFullSpace } from "../lib/useDiskSpace";
 import { groupTasks, moveInOrder, SORT_LABEL, type SortKey, sortTasks, useCustomOrder, useTaskSort } from "../lib/sortTasks";
-import type { BackupMode, DiskSpace, LastBackup, RunRecord, RunStatus, Snapshot, Task } from "../types";
+import type { BackupMode, DiskSpace, FullSpace, LastBackup, RunRecord, RunStatus, Snapshot, Task } from "../types";
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
@@ -180,8 +180,8 @@ const MIN_ACTIONS_COL = 112;
 
 /** "Run full now" / "Run incremental now" menu entries. */
 const runModeItems = (run: (mode: BackupMode) => void): MenuItem[] => [
-  { label: "הרץ גיבוי מלא עכשיו", icon: <RunIcon size={14} />, onClick: () => run("full") },
-  { label: "הרץ גיבוי אינקרמנטלי עכשיו", icon: <RunIcon size={14} />, onClick: () => run("incremental") },
+  { label: "הרצת גיבוי מלא עכשיו", icon: <RunIcon size={14} />, onClick: () => run("full") },
+  { label: "הרצת גיבוי אינקרמנטלי עכשיו", icon: <RunIcon size={14} />, onClick: () => run("incremental") },
 ];
 
 const GROUP_KEY = "backuper.taskGroup";
@@ -291,6 +291,13 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const space = useDiskSpace(
     snap.tasks.map((t) => t.destination).filter(Boolean),
     `${snap.current?.runId ?? ""}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
+  );
+  // What each task's next full backup needs; also re-read when a setting that decides it changes.
+  const fullSpace = useFullSpace(
+    snap.tasks.filter((t) => t.destination).map((t) => t.id),
+    `${snap.current?.runId ?? ""}|${snap.tasks
+      .map((t) => [t.id, t.destination, t.mode, !!t.fullSchedule, t.keepMode, t.keepCount, t.keepDays, t.deleteBefore, t.reusePrevious, t.deleteEmptyIncrementals, t.sources.length].join(":"))
+      .join()}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
   );
 
   const usedGroups = groupNames(snap.tasks);
@@ -417,7 +424,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           "אפשר להמשיך אותו מאותה נקודה, או להתחיל גיבוי חדש מההתחלה. הגיבוי החלקי הישן יימחק בהמשך, אחרי שגיבוי חדש יסתיים.",
         options: [
           { value: "continue", label: "המשך מאותה נקודה" },
-          { value: "fresh", label: "התחל מחדש" },
+          { value: "fresh", label: "התחלה מחדש" },
         ],
       });
       if (answer === "continue") go.push(id);
@@ -498,7 +505,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     const ok = await confirm({
       title: list.length === 1 ? `למחוק את המשימה "${list[0].name}"?` : `למחוק ${list.length} משימות?`,
       message: "המשימות יוסרו מהתוכנה. קבצי הגיבוי שכבר נוצרו ביעד לא יימחקו.",
-      confirmLabel: "מחק",
+      confirmLabel: "מחיקה",
       danger: true,
     });
     if (!ok) return;
@@ -745,7 +752,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             <Menu
               trigger={(open) => (
                 <Button size="sm" variant="ghost" icon={<RunIcon size={15} />} onClick={open}>
-                  הרץ
+                  הרצה
                 </Button>
               )}
               items={[
@@ -755,7 +762,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             />
           ) : (
             <Button size="sm" variant="ghost" icon={<RunIcon size={15} />} onClick={() => run(sel)}>
-              הרץ
+              הרצה
             </Button>
           )}
           <Button size="sm" variant="ghost" icon={<ListChecks size={15} />} onClick={() => setBulk(selTasks)}>
@@ -764,7 +771,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           <Menu
             trigger={(open) => (
               <Button size="sm" variant="ghost" icon={<FolderInput size={15} />} onClick={open}>
-                העבר לקבוצה
+                העברה לקבוצה
               </Button>
             )}
             items={moveItems(selTasks)}
@@ -778,13 +785,13 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             </Button>
           )}
           <Button size="sm" variant="ghost" icon={<Power size={15} />} onClick={() => setEnabled(selTasks, true)}>
-            הפעל
+            הפעלה
           </Button>
           <Button size="sm" variant="ghost" icon={<PowerOff size={15} />} onClick={() => setEnabled(selTasks, false)}>
-            השבת
+            השבתה
           </Button>
           <Button size="sm" variant="ghost" className="text-bad" icon={<Trash2 size={15} />} onClick={() => remove(selTasks)}>
-            מחק
+            מחיקה
           </Button>
           <IconButton label="ניקוי בחירה" className="ms-auto" onClick={() => setSelected(new Set())}>
             <X size={16} />
@@ -807,7 +814,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           </EmptyState>
         ) : groupTasksList.length === 0 ? (
           <EmptyState icon={<FolderPlus size={26} />} title={`אין עדיין משימות בקבוצה "${group}"`}>
-            <p>צרו משימה חדשה בקבוצה, או סמנו משימות ברשימה של כל המשימות והעבירו אותן לכאן עם &quot;העבר לקבוצה&quot;.</p>
+            <p>צרו משימה חדשה בקבוצה, או סמנו משימות ברשימה של כל המשימות והעבירו אותן לכאן עם &quot;העברה לקבוצה&quot;.</p>
             <div className="mt-4 flex flex-wrap justify-center gap-2">
               <Button
                 variant="primary"
@@ -835,7 +842,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                 <tr className="border-b border-line bg-panel2 text-xs text-muted">
                   <th className="px-3 py-2.5">
                     <Checkbox
-                      label="בחר הכול"
+                      label="בחירת הכול"
                       checked={allChecked}
                       indeterminate={someChecked && !allChecked}
                       onChange={(on) =>
@@ -940,7 +947,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   <GripVertical size={15} />
                                 </button>
                               )}
-                              <Checkbox label={`בחר ${t.name}`} checked={checked} onChange={(on) => toggle(t.id, on)} />
+                              <Checkbox label={`בחירת ${t.name}`} checked={checked} onChange={(on) => toggle(t.id, on)} />
                             </div>
                           </td>
                           <td className="px-2 py-3">
@@ -1092,23 +1099,23 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               <span className="text-muted">טרם רץ</span>
                             )}
                             <div className="mt-1 flex flex-col text-xs text-muted">
-                              {st?.lastBackup && <BackupSize last={st.lastBackup} />}
-                              <FreeSpace space={space[t.destination]} last={st?.lastBackup} />
+                              {st?.lastBackup && <BackupSize last={st.lastBackup} onOpen={() => setBackupsOf(t)} />}
+                              <FreeSpace space={space[t.destination]} need={fullSpace[t.id]} deleteBefore={t.deleteBefore} />
                             </div>
                           </td>
                           <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-0.5">
                               {running ? (
                                 <>
-                                  <IconButton label="השהה (אפשר להמשיך אחר כך)" onClick={() => api.cancelTask(t.id)}>
+                                  <IconButton label="השהיה (אפשר להמשיך אחר כך)" onClick={() => api.cancelTask(t.id)}>
                                     <Pause size={15} />
                                   </IconButton>
-                                  <IconButton label="עצור" tone="danger" onClick={() => stopTask(t.id, t.name)}>
+                                  <IconButton label="עצירה" tone="danger" onClick={() => stopTask(t.id, t.name)}>
                                     <Square size={15} />
                                   </IconButton>
                                 </>
                               ) : queued ? (
-                                <IconButton label="הסר מהתור" onClick={() => api.cancelTask(t.id)}>
+                                <IconButton label="הסרה מהתור" onClick={() => api.cancelTask(t.id)}>
                                   <X size={15} />
                                 </IconButton>
                               ) : st?.lastStatus === "cancelled" && st.resumable ? (
@@ -1117,7 +1124,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   variant="secondary"
                                   className="gap-1 border-warn/40 px-2 text-warn hover:bg-warn-soft"
                                   icon={<RunIcon size={14} />}
-                                  title="המשך את הגיבוי המושהה מאותה נקודה"
+                                  title="המשך הגיבוי המושהה מאותה נקודה"
                                   onClick={() => resume(t.id)}
                                 >
                                   המשך
@@ -1125,14 +1132,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                               ) : taskKind(t) === "combined" ? (
                                 <Menu
                                   trigger={(open) => (
-                                    <IconButton label="הרץ עכשיו" onClick={open}>
+                                    <IconButton label="הרצה עכשיו" onClick={open}>
                                       <RunIcon size={16} />
                                     </IconButton>
                                   )}
                                   items={runModeItems((mode) => run([t.id], mode))}
                                 />
                               ) : (
-                                <IconButton label="הרץ עכשיו" onClick={() => run([t.id])}>
+                                <IconButton label="הרצה עכשיו" onClick={() => run([t.id])}>
                                   <RunIcon size={16} />
                                 </IconButton>
                               )}
@@ -1151,7 +1158,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                           onClick: () => resume(t.id),
                                         },
                                         {
-                                          label: "התחל מחדש",
+                                          label: "התחלה מחדש",
                                           icon: <RotateCcw size={14} />,
                                           onClick: () => restart(t, null),
                                         },
@@ -1303,28 +1310,51 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   }
 }
 
-/** Size of the newest backup (it may be older than the last run, if that one failed). */
-function BackupSize({ last }: { last: LastBackup }) {
+/**
+ * Size of the newest backup alone (full or incremental; it may be older than the last run, if that
+ * one failed). Opens the task's backups on disk, each with its own size.
+ */
+function BackupSize({ last, onOpen }: { last: LastBackup; onOpen: () => void }) {
   return (
-    <span
-      title={`גודל הגיבוי האחרון שנשמר (${MODE_LABEL[last.mode]}) - ${fmtSmart(last.at)}`}
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+      className="w-fit rounded text-start hover:text-accent hover:underline"
+      title={`גודל הגיבוי האחרון שנשמר (${MODE_LABEL[last.mode]}) - ${fmtSmart(last.at)}\nלחיצה להצגת כל הגיבויים שבדיסק ואת הגודל של כל אחד`}
     >
-      גודל <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(last.bytes)}</bdi>
-    </span>
+      גודל <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(last.bytes)}</bdi> ({MODE_LABEL[last.mode]})
+    </button>
   );
 }
 
-/** Free space on the destination drive; warns when the last full backup wouldn't fit again. */
-function FreeSpace({ space, last }: { space: DiskSpace | null | undefined; last: LastBackup | null | undefined }) {
+/**
+ * Free space on the destination drive; warns when the next full backup (about the size of the
+ * previous one) wouldn't fit, counting what delete-before frees first.
+ */
+function FreeSpace({
+  space,
+  need,
+  deleteBefore,
+}: {
+  space: DiskSpace | null | undefined;
+  need: FullSpace | null | undefined;
+  deleteBefore: boolean;
+}) {
   if (space === undefined) return null;
   if (space === null) return <span title="כונן היעד לא מחובר כרגע, או שאי אפשר לקרוא אותו">היעד לא מחובר</span>;
-  const low = last?.mode === "full" && space.free < last.bytes;
+  const low = !!need && space.free + need.freed < need.needed;
   return (
     <span
       className={cx("flex items-center gap-1", low && "text-warn")}
       title={
         low
-          ? `בכונן היעד פנוי פחות מגודל הגיבוי המלא האחרון (${fmtBytes(last.bytes)}) - ייתכן שהגיבוי המלא הבא לא ייכנס. כדאי לפנות מקום או לשמור פחות גיבויים`
+          ? `הגיבוי המלא הבא צפוי לשקול כגודל הקודם (${fmtBytes(need.needed)}), ובכונן היעד פנוי ${fmtBytes(space.free)}` +
+            (deleteBefore && need.freed > 0 ? ` (וגם אחרי מחיקת הגיבויים הישנים, ${fmtBytes(need.freed)}, זה לא מספיק)` : "") +
+            " - ייתכן שהוא לא ייכנס. כדאי לפנות מקום או לשמור פחות גיבויים"
           : `מקום פנוי בכונן היעד, מתוך ${fmtBytes(space.total)}`
       }
     >

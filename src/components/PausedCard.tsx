@@ -106,7 +106,7 @@ export default function PausedCard({
                   icon={<RotateCcw size={14} />}
                   onClick={() => onRestart(t, d?.mode ?? null)}
                 >
-                  התחל מחדש
+                  התחלה מחדש
                 </Button>
                 <Button size="sm" variant="ghost" icon={<FileText size={14} />} onClick={() => onDetails(t.id)}>
                   פרטים

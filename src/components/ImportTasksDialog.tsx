@@ -333,12 +333,12 @@ function ImportTasksDialog({
           {importable.length > 1 && (
             <label className="flex items-center gap-2 text-sm text-muted">
               <Checkbox
-                label="בחר הכול"
+                label="בחירת הכול"
                 checked={allChecked}
                 indeterminate={chosen.length > 0 && !allChecked}
                 onChange={(on) => setChecked(new Set(on ? importable.map((i) => i.task.id) : []))}
               />
-              בחר הכול
+              בחירת הכול
             </label>
           )}
 

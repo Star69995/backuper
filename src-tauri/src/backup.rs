@@ -11,7 +11,7 @@
 
 use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters, ListedFile, Outcome, TotalsSource};
 use crate::manifest;
-use crate::model::{BackupFolder, BackupMode, KeepMode, RunRecord, RunStatus, Source, SourceBackups, SourceRun, Task};
+use crate::model::{BackupFolder, BackupMode, FullSpace, KeepMode, RunRecord, RunStatus, Source, SourceBackups, SourceRun, Task};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -152,6 +152,7 @@ pub fn list_backups(dest: &str, folder_name: &str) -> Vec<BackupFolder> {
                 created_at,
                 kind,
                 partial,
+                bytes: None,
             })
         })
         .collect();
@@ -166,13 +167,26 @@ pub fn has_partial(task: &Task) -> bool {
         .any(|s| list_backups(&task.destination, &s.folder_name).iter().any(|b| b.partial))
 }
 
+/// Every source's backups on disk, each with its size: from its index when it has one, else one
+/// fast listing (never per-file stats). A partial folder has no index and may still be growing,
+/// so its size is left for the user to ask for.
 pub fn list_task_backups(task: &Task) -> Vec<SourceBackups> {
     task.sources
         .iter()
-        .map(|s| SourceBackups {
-            source: s.path.clone(),
-            folder_name: s.folder_name.clone(),
-            backups: list_backups(&task.destination, &s.folder_name),
+        .map(|s| {
+            let mut backups = list_backups(&task.destination, &s.folder_name);
+            std::thread::scope(|scope| {
+                for b in backups.iter_mut().filter(|b| !b.partial) {
+                    scope.spawn(move || {
+                        let folder = Path::new(&b.path);
+                        b.bytes = Some(match manifest::read(folder) {
+                            Some(files) => files.iter().map(|f| f.size).sum(),
+                            None => manifest::scan(folder).0.iter().map(|f| f.size).sum(),
+                        });
+                    });
+                }
+            });
+            SourceBackups { source: s.path.clone(), folder_name: s.folder_name.clone(), backups }
         })
         .collect()
 }
@@ -298,15 +312,10 @@ impl Keep {
     }
 }
 
-/// Deletes old backups of one source. Keeps the complete full backups that `keep` selects
-/// (besides `protect`) together with their incrementals; everything else goes: older chains,
-/// partial folders, and (with `delete_empty`) incremental folders that are empty.
-/// Returns how many backups were deleted and how many bytes that freed.
-fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_empty: bool, notes: &mut Vec<String>) -> (u64, u64) {
-    let all: Vec<BackupFolder> = list_backups(dest, prefix)
-        .into_iter()
-        .filter(|b| Some(b.name.as_str()) != protect)
-        .collect();
+/// What `prune` deletes from `all` (newest first): keeps the complete full backups that `keep`
+/// selects together with their incrementals; everything else goes: older chains, partial
+/// folders, and (with `delete_empty`) incremental folders that are empty.
+fn prune_victims(all: &[BackupFolder], keep: Keep, delete_empty: bool) -> Vec<&BackupFolder> {
     let fulls = all.iter().filter(|b| b.kind == BackupMode::Full && !b.partial);
     let kept_fulls: Vec<&BackupFolder> = match keep {
         Keep::Fulls(n) => fulls.take(n).collect(),
@@ -317,20 +326,28 @@ fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_emp
         }
     };
     let oldest_kept = kept_fulls.last().map(|b| b.created_at);
+    all.iter()
+        .filter(|b| match b.kind {
+            BackupMode::Full => !kept_fulls.iter().any(|k| k.name == b.name),
+            BackupMode::Incremental => {
+                let in_kept_chain = !b.partial && oldest_kept.is_some_and(|d| b.created_at > d);
+                !in_kept_chain || (delete_empty && !has_files(Path::new(&b.path)))
+            }
+        })
+        .collect()
+}
+
+/// Deletes old backups of one source (`prune_victims`, besides `protect`).
+/// Returns how many backups were deleted and how many bytes that freed.
+fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_empty: bool, notes: &mut Vec<String>) -> (u64, u64) {
+    let all: Vec<BackupFolder> = list_backups(dest, prefix)
+        .into_iter()
+        .filter(|b| Some(b.name.as_str()) != protect)
+        .collect();
     let mut removed_empty = 0;
     let mut deleted = 0;
     let mut freed = 0;
-    for b in &all {
-        let keep = match b.kind {
-            BackupMode::Full => kept_fulls.iter().any(|k| k.name == b.name),
-            BackupMode::Incremental => {
-                let in_kept_chain = !b.partial && oldest_kept.is_some_and(|d| b.created_at > d);
-                in_kept_chain && !(delete_empty && !has_files(Path::new(&b.path)))
-            }
-        };
-        if keep {
-            continue;
-        }
+    for b in prune_victims(&all, keep, delete_empty) {
         let empty = b.kind == BackupMode::Incremental && !has_files(Path::new(&b.path));
         let size = if empty { 0 } else { backup_size(Path::new(&b.path)) };
         match fs::remove_dir_all(&b.path) {
@@ -347,6 +364,38 @@ fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_emp
         notes.push(format!("נמחקו {removed_empty} תיקיות אינקרמנטליות ריקות"));
     }
     (deleted, freed)
+}
+
+/// A full backup renames the previous full folder and updates it in place (when no include
+/// filter stands in the way, which the run checks) instead of copying everything again.
+fn reuses_previous_full(task: &Task) -> bool {
+    task.reuse_previous && task.keep_mode == KeepMode::Count && task.keep_count == 1
+}
+
+/// The space the task's next full backup needs on the destination, to compare with what is free
+/// (`None` = no full backup is expected, or nothing to compare with). A full backup needs about
+/// what the previous full weighed, less what delete-before removes first. Sizes come from the
+/// index files only, never a walk (this is polled by the UI).
+pub fn full_space(task: &Task, now: DateTime<Local>) -> Option<FullSpace> {
+    // Incremental-only tasks make a full backup just when a source has none yet.
+    let only_incremental = task.mode == BackupMode::Incremental && task.full_schedule.is_none();
+    let (mut needed, mut freed) = (0u64, 0u64);
+    for s in &task.sources {
+        let all = list_backups(&task.destination, &s.folder_name);
+        let Some(prev) = all.iter().find(|b| b.kind == BackupMode::Full && !b.partial) else {
+            continue; // the first full: nothing to compare with
+        };
+        if only_incremental || reuses_previous_full(task) {
+            continue;
+        }
+        let size = |b: &BackupFolder| manifest::read(Path::new(&b.path)).map_or(0, |f| f.iter().map(|f| f.size).sum());
+        needed += size(prev);
+        if task.delete_before {
+            let victims = prune_victims(&all, Keep::of(task, now, true), task.delete_empty_incrementals);
+            freed += victims.into_iter().filter(|b| !b.partial).map(size).sum::<u64>();
+        }
+    }
+    (needed > 0).then_some(FullSpace { needed, freed })
 }
 
 /// Decides whether this source's run is full or incremental (incremental needs a complete full).
@@ -682,9 +731,7 @@ pub fn backup_source(
                 None
             };
             let reused = resume.is_none()
-                && task.reuse_previous
-                && task.keep_mode == KeepMode::Count
-                && task.keep_count == 1
+                && reuses_previous_full(task)
                 && ctx.filters.include_files.is_empty()
                 && ctx.filters.include_regex.is_empty()
                 && latest_full.is_some_and(|prev| match rename_retry(Path::new(&prev.path), &work) {
@@ -1091,6 +1138,11 @@ mod tests {
         // Pics had no changes: its incremental folder exists, but is empty.
         let empty = dst.join("Pics 2026-10-02 03-00 אינקרמנטלי");
         assert!(empty.is_dir() && !has_files(&empty));
+        // The backups list gives each folder's own size (full 9, incremental 1 + 9, empty 0).
+        let listed: Vec<(BackupMode, Option<u64>)> =
+            list_task_backups(&t)[0].backups.iter().map(|b| (b.kind, b.bytes)).collect();
+        assert_eq!(listed, [(BackupMode::Incremental, Some(1 + 9)), (BackupMode::Full, Some(9))]);
+        assert_eq!(list_task_backups(&t)[1].backups[0].bytes, Some(0));
 
         // A second incremental only sees changes since the previous incremental.
         let r = env.run(&t, BackupMode::Incremental, "2026-10-03 03:00");
@@ -1301,6 +1353,38 @@ mod tests {
         });
         assert_eq!(prev_existed_at_copy, Some(true));
         assert_eq!(env.names(&t, 0), ["Src 2026-10-03 03-00 מלא"]);
+    }
+
+    #[test]
+    fn full_space_counts_what_delete_before_frees() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), vec![b'a'; 1000]).unwrap();
+        let base = Task {
+            mode: BackupMode::Full,
+            keep_count: 2,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        let now = Local::now();
+        // Nothing to compare with before the first full backup.
+        assert_eq!(full_space(&base, now), None);
+        env.run(&base, BackupMode::Full, "2026-10-01 03:00");
+        env.run(&base, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(full_space(&base, now), Some(FullSpace { needed: 1000, freed: 0 }));
+
+        // Delete-before with keep 2: the new full counts as one, so the older of the two goes first.
+        let before = Task { delete_before: true, ..base.clone() };
+        assert_eq!(full_space(&before, now), Some(FullSpace { needed: 1000, freed: 1000 }));
+        // Updating the previous full in place needs no new room.
+        let reuse = Task { reuse_previous: true, keep_count: 1, ..base.clone() };
+        assert_eq!(full_space(&reuse, now), None);
+        // An incremental-only task makes no full backup while one exists.
+        let inc = Task { mode: BackupMode::Incremental, ..base.clone() };
+        assert_eq!(full_space(&inc, now), None);
+        // ...unless it also has a full schedule (combined mode).
+        let combined = Task { full_schedule: Some(crate::model::Schedule::Daily { time: "03:00".into() }), ..inc };
+        assert_eq!(full_space(&combined, now), Some(FullSpace { needed: 1000, freed: 0 }));
     }
 
     /// Without the exact-progress setting no list-only pass runs before the copy: the totals come

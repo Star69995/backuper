@@ -14,6 +14,7 @@ export type ScheduleKind = Schedule["kind"];
 
 export type FilterRule =
   | { kind: "include"; value: string }
+  | { kind: "includeName"; value: string }
   | { kind: "extension"; value: string }
   | { kind: "pattern"; value: string }
   /** `folders`: matches folder names (always skipped, with their contents) instead of file names. */
@@ -137,6 +138,14 @@ export interface LastBackup {
 export interface DiskSpace {
   free: number;
   total: number;
+}
+
+/** What a task's next full backup needs on the destination (null = no full backup expected). */
+export interface FullSpace {
+  /** About the size of the previous full backup(s). */
+  needed: number;
+  /** What delete-before removes first (0 without it); counts as free space. */
+  freed: number;
 }
 
 export interface Progress {
@@ -283,6 +292,8 @@ export interface BackupFolder {
   createdAt: string;
   kind: BackupMode;
   partial: boolean;
+  /** Size of the folder's files; null when not known (a partial folder). */
+  bytes: number | null;
 }
 
 export interface SourceBackups {

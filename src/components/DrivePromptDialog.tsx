@@ -35,7 +35,7 @@ export default function DrivePromptDialog({ snap }: { snap: Snapshot }) {
         <>
           <Button onClick={() => answer([])}>לא עכשיו</Button>
           <Button variant="primary" icon={<RunIcon size={15} />} disabled={toRun.length === 0} onClick={() => answer(toRun)} autoFocus>
-            {tasks.length === 1 || toRun.length === tasks.length ? "גבה עכשיו" : `גבה ${toRun.length} משימות`}
+            {tasks.length === 1 || toRun.length === tasks.length ? "גיבוי עכשיו" : `גיבוי ${toRun.length} משימות`}
           </Button>
         </>
       }

@@ -57,12 +57,13 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
         .replace(/\?/g, ".")}$`,
       "i",
     );
-  const pats = (v: string) =>
+  const names = (v: string) =>
     v
       .split(/[,;]/)
       .map((x) => x.trim())
-      .filter(Boolean)
-      .map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`));
+      .filter(Boolean);
+  const pats = (v: string) =>
+    names(v).map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`));
   const re = (v: string) => {
     try {
       return new RegExp(v, "i");
@@ -96,9 +97,14 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
             return pats(r.value).some((p) => wild(p).test(name))
               ? { effect: "keeps", detail: null }
               : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
+          case "includeName":
+            return names(r.value).some((p) => wild(p).test(name))
+              ? { effect: "keeps", detail: null }
+              : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
           case "extension":
-          case "pattern":
             return pats(r.value).some((p) => wild(p).test(name)) ? skip() : empty();
+          case "pattern":
+            return names(r.value).some((p) => wild(p).test(name)) ? skip() : empty();
           case "file":
             return r.value.trim().toLowerCase() === path.toLowerCase() ? skip() : empty();
           case "largerThan":
@@ -409,7 +415,8 @@ export function installDevMock() {
         .map((createdAt, i): BackupFolder => {
           const kind = t.mode === "full" || i === 2 ? "full" : "incremental";
           const name = `${s.folderName} ${stamp(createdAt)} ${kind === "full" ? "מלא" : "אינקרמנטלי"}`;
-          return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false };
+          const bytes = kind === "full" ? 12_345_678_901 : 40_000_000 + i * 310_000_000;
+          return { name, path: `${t.destination}\\${name}`, createdAt, kind, partial: false, bytes };
         })
         // A failed last run leaves its half-done folder behind (the run details offer to continue in it).
         .concat(
@@ -421,6 +428,7 @@ export function installDevMock() {
                   createdAt: states[t.id].lastRunAt!,
                   kind: "full" as const,
                   partial: true,
+                  bytes: null,
                 },
               ]
             : [],
@@ -540,6 +548,12 @@ export function installDevMock() {
         return (a.paths as string[]).map((p) =>
           /^e:/i.test(p) ? { free: 412_000_000_000, total: 1_000_000_000_000 } : /^f:/i.test(p) ? null : { free: 18_500_000_000, total: 500_000_000_000 },
         );
+      case "full_space":
+        // The next full backup weighs ~20 GB; a task with delete-before frees 12 GB of it first.
+        return (a.taskIds as string[]).map((id) => ({
+          needed: 20_000_000_000,
+          freed: tasks.find((t) => t.id === id)?.deleteBefore ? 12_000_000_000 : 0,
+        }));
       case "folder_size":
         return String(a.path).endsWith("מלא") ? 12_345_678_901 : 48_200_000;
       case "read_log":

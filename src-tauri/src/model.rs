@@ -42,15 +42,21 @@ pub enum Schedule {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilterRule {
-    /// Back up only these: extensions ("lrcat, docx") or wildcards/names ("*.lrcat", "notes.txt").
+    /// Back up only these: extensions ("lrcat, docx"; older rules may also hold wildcards/names
+    /// like "*.lrcat", "notes.txt").
     Include {
+        value: String,
+    },
+    /// Back up only files with these names, exactly as typed (a bare word is a whole name, not an
+    /// extension): "notes.txt, report*"
+    IncludeName {
         value: String,
     },
     /// One or more extensions: "tmp", "tmp, log, .bak"
     Extension {
         value: String,
     },
-    /// Wildcard on the file name: "~$*", "Thumbs.db", "*.part"
+    /// Names or wildcards on the file name, comma-separated, exactly as typed: "~$*, Thumbs.db, *.part"
     Pattern {
         value: String,
     },
@@ -496,6 +502,8 @@ pub struct BackupFolder {
     pub created_at: DateTime<Local>,
     pub kind: BackupMode,
     pub partial: bool,
+    /// Size of the folder's files, filled by `list_task_backups` (None: not known, e.g. a partial folder).
+    pub bytes: Option<u64>,
 }
 
 /// The dated backups of one source.
@@ -505,6 +513,16 @@ pub struct SourceBackups {
     pub source: String,
     pub folder_name: String,
     pub backups: Vec<BackupFolder>,
+}
+
+/// What a task's next full backup needs on the destination drive (see `backup::full_space`).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FullSpace {
+    /// About the size of the previous full backup(s), all sources.
+    pub needed: u64,
+    /// What delete-before removes first (0 without it), which counts as free space.
+    pub freed: u64,
 }
 
 #[cfg(test)]

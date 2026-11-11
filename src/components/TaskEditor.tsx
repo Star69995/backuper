@@ -417,7 +417,7 @@ export default function TaskEditor({
           )}
           <Button onClick={onClose}>ביטול</Button>
           <Button variant="primary" onClick={save} disabled={saving}>
-            {isNew ? "צור משימה" : "שמור שינויים"}
+            {isNew ? "יצירת משימה" : "שמירת השינויים"}
           </Button>
         </>
       }

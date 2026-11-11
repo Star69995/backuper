@@ -69,7 +69,11 @@ fn is_full_path_rule(r: &FilterRule) -> bool {
 }
 
 fn is_only(r: &FilterRule) -> bool {
-    matches!(r, FilterRule::Include { .. } | FilterRule::Regex { include: true, .. })
+    matches!(r, FilterRule::Include { .. } | FilterRule::IncludeName { .. } | FilterRule::Regex { include: true, .. })
+}
+
+fn is_include_names(r: &FilterRule) -> bool {
+    matches!(r, FilterRule::Include { .. } | FilterRule::IncludeName { .. })
 }
 
 pub fn check(rules: &[FilterRule], global: &[FilterRule], sources: &[String], probe: &FilterProbe) -> FilterCheck {
@@ -218,7 +222,7 @@ pub fn check(rules: &[FilterRule], global: &[FilterRule], sources: &[String], pr
     // "Back up only" file-name rules add up: a file another one matches isn't left out by this one.
     let include_hit = all()
         .filter(usable)
-        .any(|r| matches!(r, FilterRule::Include { .. }) && alone(r) == Verdict::Kept);
+        .any(|r| is_include_names(r) && alone(r) == Verdict::Kept);
     let effect = |r: &FilterRule| -> RuleResult {
         if let Some(e) = invalid(r) {
             return RuleResult {
@@ -245,7 +249,7 @@ pub fn check(rules: &[FilterRule], global: &[FilterRule], sources: &[String], pr
                 effect: RuleEffect::Skips,
                 detail: (f != rel).then(|| format!("מדלג על התיקייה {} שבדרך", ltr(&f))),
             },
-            Verdict::File if matches!(r, FilterRule::Include { .. }) && include_hit => RuleResult::default(),
+            Verdict::File if is_include_names(r) && include_hit => RuleResult::default(),
             Verdict::File => RuleResult {
                 effect: RuleEffect::Skips,
                 detail: is_only(r).then(|| "הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה".to_string()),
