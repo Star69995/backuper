@@ -331,7 +331,7 @@ pub fn delete_backup(task: &Task, folder_name: &str, name: &str) -> Result<(), S
     fs::remove_dir_all(&found.path).map_err(|e| format!("מחיקה נכשלה: {e}"))
 }
 
-/// A dated folder's name: "<prefix> 2026-10-01 03h00 מלא" (with seconds: "... 03-00-15 מלא").
+/// A dated folder's name: "<prefix> 2026-10-01 03h00 מלא" (with seconds: "... 03h00m15s מלא").
 pub fn dated_folder_name(prefix: &str, at: NaiveDateTime, kind: BackupMode, seconds: bool) -> String {
     let tag = if kind == BackupMode::Full { FULL_TAG } else { INCREMENTAL_TAG };
     let fmt = if seconds { DATE_FMT_SECS } else { DATE_FMT };
@@ -2396,7 +2396,7 @@ mod tests {
         let r = env.run(&t, BackupMode::Full, "2026-10-03 03:00");
         assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
         assert_eq!(r[0].files_copied, 1, "continued the older, fuller folder: {r:?}");
-        assert!(r[0].message.contains("2026-10-01 03-00"), "{}", r[0].message);
+        assert!(r[0].message.contains("2026-10-01 03h00"), "{}", r[0].message);
     }
 
     /// A partial folder of the other kind isn't touched by a run (it's cleaned up with the next full).
