@@ -11,14 +11,17 @@ use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_ERRORS: usize = 50;
+/// A file this big (64 MB) gets live byte progress while it is copied; reported in steps of 1/64 of it (1 MB).
+const BIG_FILE: u64 = 64 << 20;
 /// Errors that mean the destination or the source drive itself is in trouble (full, gone), not one
 /// file: a copy with one of these is not a usable backup.
 const DRIVE_ERRORS: [u32; 10] = [39, 112, 21, 53, 55, 59, 64, 67, 1167, 1231];
@@ -178,15 +181,37 @@ fn read_stdout_errors(log: &Path) -> Vec<String> {
     text.lines().map(str::trim).filter(|l| l.starts_with("ERROR")).map(str::to_string).collect()
 }
 
+/// Bytes the process has written so far (its I/O counters), 0 if they can't be read. A file being
+/// copied is allocated up front, so its size on disk says nothing about how far the copy is.
+fn bytes_written(child: &Child) -> u64 {
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        other: [u64; 3],
+        read_bytes: u64,
+        write_bytes: u64,
+        other_bytes: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetProcessIoCounters(process: *mut std::ffi::c_void, counters: *mut IoCounters) -> i32;
+    }
+    let mut c = IoCounters::default();
+    // SAFETY: the handle belongs to the live `child`, and `c` is the struct the API fills in.
+    let ok = unsafe { GetProcessIoCounters(child.as_raw_handle(), &mut c) };
+    if ok != 0 { c.write_bytes } else { 0 }
+}
+
 /// Runs robocopy to completion. `on_tick` runs every poll (~150 ms), also while robocopy writes
-/// nothing (e.g. in the middle of one huge file). `abort` is checked after each poll.
+/// nothing (e.g. in the middle of one huge file), with the bytes the process has written so far.
+/// `abort` is checked after each poll.
 fn run_process(
     args: &[OsString],
     log: &Path,
     cancel: &AtomicBool,
     abort: &dyn Fn() -> bool,
     on_line: &mut dyn FnMut(&str),
-    on_tick: &mut dyn FnMut(),
+    on_tick: &mut dyn FnMut(u64),
 ) -> Result<Exit, String> {
     let _ = std::fs::remove_file(log);
     let stdout = File::create(stdout_path(log)).map_or_else(|_| Stdio::null(), Stdio::from);
@@ -201,7 +226,7 @@ fn run_process(
     let mut tail = LogTail::new(log);
     loop {
         tail.poll(on_line);
-        on_tick();
+        on_tick(bytes_written(&child));
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
@@ -217,7 +242,7 @@ fn run_process(
         match child.try_wait() {
             Ok(Some(status)) => {
                 tail.finish(on_line);
-                on_tick();
+                on_tick(0);
                 return Ok(Exit::Code(status.code().unwrap_or(-1)));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(150)),
@@ -348,7 +373,7 @@ impl CopyEngine for Robocopy {
                     cancel,
                     &|| false,
                     &mut |l| scan.feed(l),
-                    &mut || {},
+                    &mut |_| {},
                 ) {
                     Ok(Exit::Cancelled) => {
                         let _ = std::fs::remove_file(&scan_log);
@@ -397,6 +422,8 @@ impl CopyEngine for Robocopy {
         // A full destination fails every further file too (after robocopy's retries, for each one),
         // so the first such error ends the run.
         let disk_full = Cell::new(false);
+        // The process's written bytes now / when the current file started, that file's size and how much of it was reported.
+        let (written, file_start, file_size, file_reported) = (Cell::new(0u64), Cell::new(0u64), Cell::new(0u64), Cell::new(0u64));
         let code = run_process(
             &args,
             &job.log_file,
@@ -422,6 +449,9 @@ impl CopyEngine for Robocopy {
                     Line::Copy { size, path } => {
                         if path != last_file {
                             last_file.clone_from(&path);
+                            file_start.set(written.get());
+                            file_size.set(size);
+                            file_reported.set(0);
                             (on_event.borrow_mut())(EngineEvent::File { path, size });
                         }
                     }
@@ -429,7 +459,16 @@ impl CopyEngine for Robocopy {
                 }
             },
             // A background scan's result is passed on as soon as it arrives.
-            &mut || {
+            &mut |written_now| {
+                if written_now > 0 {
+                    written.set(written_now);
+                    // Only a file big enough to take a while is worth tracking (a small one is done before the next tick).
+                    let copied = written_now.saturating_sub(file_start.get()).min(file_size.get());
+                    if file_size.get() >= BIG_FILE && copied >= file_reported.get() + BIG_FILE / 64 {
+                        file_reported.set(copied);
+                        (on_event.borrow_mut())(EngineEvent::FileBytes(copied));
+                    }
+                }
                 if let Some(rx) = &job.late_totals {
                     while let Ok(late) = rx.try_recv() {
                         (on_event.borrow_mut())(match late {

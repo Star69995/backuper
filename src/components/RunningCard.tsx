@@ -138,6 +138,11 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
             <PathText path={p.currentFile} />
           </div>
         )}
+        {!scanning && !p.currentFile && (
+          <div className="text-xs text-muted">
+            מחכה לקובץ הראשון להעתקה. אם התיקייה כבר מכילה קבצים מהעתקה קודמת, הם נבדקים קודם והבדיקה יכולה לקחת כמה דקות
+          </div>
+        )}
         {queuedNames.length > 0 && <div className="text-xs text-muted">ממתינים בתור: {queuedNames.join(", ")}</div>}
       </div>
     </section>

@@ -125,6 +125,9 @@ pub enum EngineEvent {
     TotalsUnavailable,
     /// A file copy started.
     File { path: String, size: u64 },
+    /// How much of the file that started last has been written so far (an estimate from the engine's
+    /// own I/O, so a huge file moves the progress instead of freezing it until it is done).
+    FileBytes(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

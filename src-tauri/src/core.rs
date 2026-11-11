@@ -396,6 +396,8 @@ impl Core {
                 scheduled: matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
             };
+            // The bytes of the files finished so far, and the size of the one in progress (counted when it ends).
+            let mut done_before = 0u64;
             let mut pending_size = 0u64;
             let mut last_emit = Instant::now();
             let sources = backup::run_task(
@@ -421,6 +423,7 @@ impl Core {
                             progress.copy_started_at = None;
                             progress.current_file.clear();
                             pending_size = 0;
+                            done_before = 0;
                             force = true;
                         }
                         EngineEvent::Phase(p) => {
@@ -450,11 +453,13 @@ impl Core {
                             force = true;
                         }
                         EngineEvent::File { path, size } => {
-                            progress.bytes_done += pending_size;
+                            done_before += pending_size;
+                            progress.bytes_done = done_before;
                             pending_size = size;
                             progress.files_done += 1;
                             progress.current_file = path;
                         }
+                        EngineEvent::FileBytes(n) => progress.bytes_done = done_before + n.min(pending_size),
                     }
                     if force || last_emit.elapsed() >= Duration::from_millis(200) {
                         last_emit = Instant::now();
