@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { describeRetention, describeSchedule, KIND_LABEL, taskKind } from "../lib/format";
 import type { AdoptPlan, ImportPreview, ImportSplit, Task } from "../types";
-import { CobianListsDialog, planFolderCount, TakeoverSummary, takeoverToast } from "./CobianDialogs";
+import { CobianListsDialog, planFolderCount, TakeoverSummary } from "./CobianDialogs";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
 import { GroupInput, groupNames } from "./groups";
@@ -57,11 +57,12 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
   };
 
   /**
-   * Saves imported tasks, then takes over the Cobian backups of `takeOver` (ids). `replaces` = tasks
-   * of an earlier import of the same plain config (split differently), deleted first.
-   * Undo deletes the new tasks and restores the ones that were updated or replaced (renamed folders stay).
+   * Saves imported tasks. `replaces` = tasks of an earlier import of the same plain config (split
+   * differently), deleted first. Cobian's backups aren't renamed here: a task that continues from them
+   * (`cobianTakeover`) renames them right before its first run. Undo deletes the new tasks and restores
+   * the ones that were updated or replaced.
    */
-  const save = async (list: Task[], takeOver: string[], replaces: string[]) => {
+  const save = async (list: Task[], replaces: string[]) => {
     const before = tasks.filter((t) => list.some((n) => n.id === t.id));
     const replaced = tasks.filter((t) => replaces.includes(t.id));
     const added = list.filter((n) => !before.some((t) => t.id === n.id)).map((t) => t.id);
@@ -80,7 +81,9 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
         title: list.length === 1 ? "משימה אחת יובאה" : `${list.length} משימות יובאו`,
         message: list.some((t) => t.cobianPending)
           ? "המשימות מושבתות. כשתפעילו משימה תישאלו אם להמשיך מהגיבויים של Cobian."
-          : undefined,
+          : list.some((t) => t.cobianTakeover)
+            ? "שמות התיקיות של Cobian לא שונו. הם ישתנו רק בריצה הראשונה של כל משימה כאן."
+            : undefined,
         action: {
           label: "ביטול",
           onClick: () =>
@@ -96,17 +99,6 @@ export function useTaskListTransfer(tasks: Task[], refresh: () => void) {
       });
     } catch (e) {
       toast({ tone: "bad", title: "הייבוא נכשל", message: errorText(e) });
-      return;
-    }
-    if (takeOver.length === 0) return;
-    try {
-      toast(takeoverToast(await api.takeOverCobian(takeOver)));
-    } catch (e) {
-      toast({
-        tone: "warn",
-        title: "המשימות יובאו, אבל הגיבויים של Cobian לא הומרו",
-        message: `${errorText(e)}. אפשר להמיר אותם אחר כך מתפריט המשימה - "המשך מגיבויי Cobian".`,
-      });
     }
   };
 
@@ -174,7 +166,7 @@ function ImportTasksDialog({
   onSplit: (split: ImportSplit) => Promise<void>;
   groups: string[];
   onClose: () => void;
-  onImport: (tasks: Task[], takeOver: string[], replaces: string[]) => void;
+  onImport: (tasks: Task[], replaces: string[]) => void;
 }) {
   const items = preview.tasks;
   const cobian = preview.source === "cobian";
@@ -238,9 +230,10 @@ function ImportTasksDialog({
         ...i.task,
         ...((asDisabled || later) && { enabled: false }),
         ...(later && planFolderCount(plans?.[i.task.id]) > 0 && { cobianPending: true }),
+        // Renamed right before the task's first run here, not now.
+        ...(cobian && takeOver === "now" && planFolderCount(plans?.[i.task.id]) > 0 && { cobianTakeover: true }),
         ...(askGroup && !i.task.group && { group: group.trim() }),
       })),
-      cobian && takeOver === "now" ? foundTasks.map((i) => i.task.id) : [],
       preview.replaces.map((t) => t.id),
     );
   const importLabel = chosen.length === 1 ? "ייבוא משימה אחת" : `ייבוא ${chosen.length} משימות`;
@@ -500,7 +493,7 @@ function OptionsStep({
               {
                 value: "now",
                 title: "להמשיך מהגיבויים הקיימים של Cobian",
-                text: "מעבר חד-פעמי: התיקיות ש-Cobian יצר מקבלות את השמות של התוכנה הזו (רק שינוי שם, בלי להעתיק דבר), והגיבוי האינקרמנטלי הבא מעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian.",
+                text: "בריצה הראשונה של כל משימה כאן, התיקיות ש-Cobian יצר מקבלות את השמות של התוכנה הזו (רק שינוי שם, בלי להעתיק דבר), והגיבוי מעתיק רק מה שהשתנה מאז הגיבוי האחרון של Cobian. עד אז שום שם לא משתנה, ואפשר גם להחזיר את השמות של Cobian מתפריט המשימה.",
               },
               {
                 value: "never",
@@ -555,7 +548,9 @@ function OptionsStep({
 
       <Note>
         כדי שהמשימות לא ירוצו בשתי התוכנות, השביתו אותן ב-Cobian לפני שמפעילים אותן כאן (או סגרו את Cobian).
-        {found.length > 0 && takeOver === "now" && " אחרי ההמשך מהגיבויים Cobian כבר לא מזהה את התיקיות שלו ביעד."}
+        {found.length > 0 &&
+          takeOver === "now" &&
+          " מהריצה הראשונה כאן Cobian כבר לא מזהה את התיקיות שלו ביעד (אפשר להחזיר לו אותן מתפריט המשימה)."}
       </Note>
 
       {found.length === 0 && (

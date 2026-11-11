@@ -36,6 +36,7 @@ import {
   Pause,
   Square,
   Trash2,
+  Undo2,
   X,
   XCircle,
 } from "lucide-react";
@@ -59,7 +60,7 @@ import type { BackupMode, DiskSpace, FullSpace, LastBackup, RunRecord, RunStatus
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
-import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
+import { CobianPendingDialog, CobianRestoreDialog, CobianTakeoverDialog } from "./CobianDialogs";
 import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
@@ -215,6 +216,9 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     { kind: "new"; moving: Task[] | null } | { kind: "rename"; from: string } | null
   >(null);
   const [takeoverOf, setTakeoverOf] = useState<Task | null>(null);
+  const [restoreOf, setRestoreOf] = useState<Task[] | null>(null);
+  /** Recorded renames, or a task that never backed up here (an older version may have renamed without a record). */
+  const cobianRestorable = (t: Task) => (snap.cobianRenamed?.[t.id] ?? 0) > 0 || !snap.states[t.id]?.lastBackup;
   const [manualRun, setManualRun] = useState<{ ids: string[]; mode: BackupMode | null } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -775,6 +779,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           <Button size="sm" variant="ghost" icon={<Download size={15} />} onClick={() => transfer.exportTasks(selTasks)}>
             ייצוא
           </Button>
+          {selTasks.some(cobianRestorable) && (
+            <Button size="sm" variant="ghost" icon={<Undo2 size={15} />} onClick={() => setRestoreOf(selTasks.filter(cobianRestorable))}>
+              החזרת שמות Cobian
+            </Button>
+          )}
           <Button size="sm" variant="ghost" icon={<Power size={15} />} onClick={() => setEnabled(selTasks, true)}>
             הפעלה
           </Button>
@@ -1184,6 +1193,15 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   "separator",
                                   { label: "ניהול גיבויים", icon: <FolderTree size={14} />, onClick: () => setBackupsOf(t) },
                                   { label: "המשך מגיבויי Cobian", icon: <History size={14} />, onClick: () => setTakeoverOf(t) },
+                                  ...(cobianRestorable(t)
+                                    ? ([
+                                        {
+                                          label: "החזרת השמות של Cobian",
+                                          icon: <Undo2 size={14} />,
+                                          onClick: () => setRestoreOf([t]),
+                                        },
+                                      ] satisfies MenuItem[])
+                                    : []),
                                   {
                                     label: "פתיחת תיקיית היעד",
                                     icon: <FolderOpen size={14} />,
@@ -1240,6 +1258,16 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           onClose={() => setTakeoverOf(null)}
           onDone={() => {
             setTakeoverOf(null);
+            refresh();
+          }}
+        />
+      )}
+      {restoreOf && (
+        <CobianRestoreDialog
+          tasks={restoreOf}
+          onClose={() => setRestoreOf(null)}
+          onDone={() => {
+            setRestoreOf(null);
             refresh();
           }}
         />

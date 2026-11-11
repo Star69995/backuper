@@ -305,6 +305,30 @@ impl Core {
             let run_id = uuid::Uuid::new_v4().to_string();
             let requested = job.mode.unwrap_or(task.mode);
             let started_at = Local::now();
+            if task.cobian_takeover {
+                if let Err(message) = self.take_over_cobian(&task) {
+                    let record = RunRecord {
+                        id: run_id,
+                        task_id: task.id.clone(),
+                        task_name: task.name.clone(),
+                        trigger: job.trigger,
+                        mode: requested,
+                        started_at,
+                        finished_at: Local::now(),
+                        status: RunStatus::Failed,
+                        message,
+                        files_copied: 0,
+                        bytes_copied: 0,
+                        backup_bytes: 0,
+                        freed_bytes: 0,
+                        files_deleted: 0,
+                        files_failed: 0,
+                        sources: Vec::new(),
+                    };
+                    self.finish_run(&task, record);
+                    continue;
+                }
+            }
             let mut progress = Progress {
                 run_id: run_id.clone(),
                 task_id: task.id.clone(),
@@ -416,25 +440,53 @@ impl Core {
             );
 
             let record = summarize(run_id, &task, job.trigger, requested, started_at, sources);
-            let settings = {
-                let mut s = self.store.lock().unwrap();
-                let st = s.states.entry(task.id.clone()).or_default();
-                st.last_run_at = Some(record.finished_at);
-                st.last_status = Some(record.status);
-                st.last_message = Some(record.message.clone());
-                // A paused run left a folder to continue in; a full stop deleted it.
-                st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(&task);
-                if let Some(b) = crate::model::LastBackup::of(&record) {
-                    st.last_backup = Some(b);
-                }
-                s.save_states();
-                s.add_history(record.clone());
-                s.settings.clone()
-            };
-            *self.current.lock().unwrap() = None;
-            self.changed();
-            self.notify(&record, &settings);
+            self.finish_run(&task, record);
         }
+    }
+
+    /// Saves a finished run (state, history), clears the progress and notifies.
+    fn finish_run(&self, task: &Task, record: RunRecord) {
+        let settings = {
+            let mut s = self.store.lock().unwrap();
+            let st = s.states.entry(task.id.clone()).or_default();
+            st.last_run_at = Some(record.finished_at);
+            st.last_status = Some(record.status);
+            st.last_message = Some(record.message.clone());
+            // A paused run left a folder to continue in; a full stop deleted it.
+            st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(task);
+            if let Some(b) = crate::model::LastBackup::of(&record) {
+                st.last_backup = Some(b);
+            }
+            s.save_states();
+            s.add_history(record.clone());
+            s.settings.clone()
+        };
+        *self.current.lock().unwrap() = None;
+        self.changed();
+        self.notify(&record, &settings);
+    }
+
+    /// The user chose to continue from Cobian's backups: they get this app's names now, right
+    /// before the task's first run here. Every rename is recorded (to put the names back later).
+    /// On an error nothing is backed up (that would write a full backup beside Cobian's).
+    fn take_over_cobian(&self, task: &Task) -> Result<(), String> {
+        let all = self.store.lock().unwrap().tasks.clone();
+        let r = crate::cobianmigrate::apply(task, &all);
+        let mut s = self.store.lock().unwrap();
+        s.record_cobian_renames(task, &r.done);
+        if !r.errors.is_empty() {
+            let shown: Vec<&str> = r.errors.iter().take(3).map(String::as_str).collect();
+            return Err(format!(
+                "לא ניתן היה לשנות את השמות של {} מהגיבויים של Cobian ({}), ולכן הגיבוי לא התחיל. סגרו את Cobian ואת סייר הקבצים אם הם פתוחים על התיקיות האלה, והריצו את המשימה שוב",
+                r.errors.len(),
+                shown.join("; ")
+            ));
+        }
+        if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task.id) {
+            t.cobian_takeover = false;
+            s.save_tasks();
+        }
+        Ok(())
     }
 
     fn notify(&self, r: &RunRecord, settings: &Settings) {

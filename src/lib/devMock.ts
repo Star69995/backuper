@@ -3,6 +3,8 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   AdoptPlan,
+  RestoreFolder,
+  RestorePlan,
   BackupFolder,
   FilterCheck,
   FilterProbe,
@@ -453,6 +455,7 @@ export function installDevMock() {
     drivePrompts,
     notice,
     update,
+    cobianRenamed: Object.fromEntries(Object.entries(cobianRenamed).map(([id, f]) => [id, f.length])),
     queue: [{ taskId: "3", mode: null, trigger: "manual" }],
     current: {
       runId: "run",
@@ -477,7 +480,38 @@ export function installDevMock() {
     },
   });
 
-  const releaseCobianPending = (ids: string[]) => tasks.forEach((t) => ids.includes(t.id) && (t.cobianPending = false));
+  const setCobianDecision = (ids: string[], takeOver: boolean) =>
+    tasks.forEach((t) => {
+      if (!ids.includes(t.id)) return;
+      t.cobianPending = false;
+      t.cobianTakeover = takeOver;
+    });
+  // Folders a takeover renamed, per task (?cobian in the URL: the first task has some).
+  const cobianRenamed: Record<string, RestoreFolder[]> = new URLSearchParams(location.search).has("cobian")
+    ? { [tasks[0].id]: cobianPlan({ ...tasks[0], enabled: true }).sources.flatMap((s) => s.folders).map((f) => ({ ...f, problem: null })) }
+    : {};
+
+  const restorePlan = (id: string, naming: { date: string; kind: string }): RestorePlan => {
+    const task = tasks.find((t) => t.id === id)!;
+    const recorded = cobianRenamed[id] ?? [];
+    // Like the real one: recorded renames go back exactly; a task that never backed up gets names rebuilt.
+    const legacy = recorded.length === 0 && !states[id]?.lastBackup;
+    const folders: RestoreFolder[] = recorded.length
+      ? recorded.map((f) => ({ from: f.to, to: f.from, kind: f.kind, problem: f.problem }))
+      : legacy
+        ? cobianPlan({ ...task, enabled: true })
+            .sources.flatMap((s) => s.folders)
+            .map((f) => {
+              const stamp = f.from.match(/(\d{4})-(\d\d-\d\d) (\d\d);(\d\d)/)!;
+              const date = naming.date.startsWith("yy") ? `${stamp[1].slice(2)}-${stamp[2]}` : `${stamp[1]}-${stamp[2]}`;
+              const time = naming.date.endsWith("hms") ? `${stamp[3]};${stamp[4]};00` : `${stamp[3]};${stamp[4]}`;
+              const word = f.kind === "full" ? "Full" : "Incremental";
+              const tag = naming.kind === "word" ? ` ${word}` : naming.kind === "paren" ? ` (${word})` : "";
+              return { from: f.to, to: `${f.from.split(" ")[0]} ${date} ${time}${tag}`, kind: f.kind, problem: null };
+            })
+        : [];
+    return { taskId: id, destination: task.destination, folders, legacy };
+  };
 
   mockIPC((cmd, args) => {
     const a = args as Record<string, unknown>;
@@ -620,11 +654,23 @@ export function installDevMock() {
       case "plan_cobian_takeover":
         return (a.tasks as Task[]).map((t) => cobianPlan(t));
       case "take_over_cobian":
-        releaseCobianPending(a.ids as string[]);
-        return { renamed: (a.ids as string[]).length * 3, errors: [] };
-      case "decline_cobian_takeover":
-        releaseCobianPending(a.ids as string[]);
+        setCobianDecision(a.ids as string[], true);
         return null;
+      case "decline_cobian_takeover":
+        setCobianDecision(a.ids as string[], false);
+        return null;
+      case "plan_cobian_restore":
+        return (a.ids as string[]).map((id) => restorePlan(id, a.naming as { date: string; kind: string }));
+      case "restore_cobian_names": {
+        let renamed = 0;
+        for (const id of a.ids as string[]) {
+          const n = restorePlan(id, a.naming as { date: string; kind: string }).folders.length;
+          renamed += n;
+          delete cobianRenamed[id];
+          tasks.forEach((t) => t.id === id && ((t.cobianTakeover = false), n > 0 && (t.enabled = false)));
+        }
+        return { renamed, errors: [] };
+      }
       case "run_tasks":
         // Like the real queue: a task waiting for the Cobian decision doesn't run.
         return (a.ids as string[]).filter((id) => !tasks.find((t) => t.id === id)?.cobianPending).length;

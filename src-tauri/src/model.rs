@@ -145,6 +145,10 @@ pub struct Task {
     /// Imported from Cobian whose existing backups in the destination haven't been taken over or
     /// declined yet. Nothing runs (scheduled, drive-connect or manual) until the user decides.
     pub cobian_pending: bool,
+    /// The user chose to continue from Cobian's backups in the destination. They are renamed right
+    /// before the task's first run here (not when the choice is made), so until then Cobian still
+    /// sees them. Cleared once every folder was renamed.
+    pub cobian_takeover: bool,
     pub keep_mode: KeepMode,
     /// KeepMode::Count: how many full backups (each with its incrementals) to keep per source (>= 1).
     pub keep_count: u32,
@@ -184,6 +188,7 @@ impl Default for Task {
             full_schedule: None,
             enabled: true,
             cobian_pending: false,
+            cobian_takeover: false,
             keep_mode: KeepMode::Count,
             keep_count: 1,
             keep_days: 30,
@@ -211,6 +216,21 @@ impl Task {
             });
         }
     }
+}
+
+/// One Cobian backup folder that a takeover renamed (`cobian-renames.json`), so its name can be put back.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CobianRename {
+    pub task_id: String,
+    /// The folder that holds it.
+    pub destination: String,
+    /// Cobian's name.
+    pub from: String,
+    /// The name it got here.
+    pub to: String,
+    pub kind: BackupMode,
+    pub at: DateTime<Local>,
 }
 
 /// Runtime state per task, kept apart from the task config so edits/undo don't touch it.

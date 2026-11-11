@@ -468,15 +468,17 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
     if (!pos) return;
     const onDown = (e: MouseEvent) => !menu.current?.contains(e.target as Node) && close();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    // The page scrolling moves the anchor away; scrolling a long menu itself must not close it.
+    const onScroll = (e: Event) => !menu.current?.contains(e.target as Node) && close();
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
     window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [pos]);
 
@@ -490,7 +492,7 @@ export function Menu({ trigger, items, fill }: { trigger: (open: () => void) => 
           <div
             ref={menu}
             role="menu"
-            className="fixed z-50 max-h-72 min-w-48 overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl"
+            className="fixed z-50 max-h-[min(32rem,calc(100vh-16px))] min-w-48 overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl"
             style={{ top: pos.top, left: pos.left, ...(fill && { minWidth: anchor.current?.offsetWidth }) }}
           >
             {items.map((it, i) =>

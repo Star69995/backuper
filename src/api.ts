@@ -6,12 +6,14 @@ import type {
   AdoptResult,
   BackupMode,
   CobianLists,
+  CobianNaming,
   DiskSpace,
   FullSpace,
   ImportPreview,
   ImportSplit,
   Progress,
   RegexCheck,
+  RestorePlan,
   FilterCheck,
   FilterProbe,
   FilterRule,
@@ -66,10 +68,17 @@ export const api = {
   findCobianLists: () => invoke<CobianLists>("find_cobian_lists"),
   /** Which Cobian backup folders these tasks (saved or still in an import preview) would take over. */
   planCobianTakeover: (tasks: Task[]) => invoke<AdoptPlan[]>("plan_cobian_takeover", { tasks }),
-  /** Renames the saved tasks' Cobian backup folders, so they continue from Cobian's last backup. */
-  takeOverCobian: (ids: string[]) => invoke<AdoptResult>("take_over_cobian", { ids }),
-  /** "Don't continue from Cobian's backups" for tasks waiting for that decision: they may run now. */
+  /**
+   * "Continue from Cobian's backups" for saved tasks. Nothing is renamed now: the folders get this
+   * app's names right before each task's next run.
+   */
+  takeOverCobian: (ids: string[]) => invoke<void>("take_over_cobian", { ids }),
+  /** "Don't continue from Cobian's backups" (also cancels a takeover that hasn't run yet): they may run now. */
   declineCobianTakeover: (ids: string[]) => invoke<void>("decline_cobian_takeover", { ids }),
+  /** Which of the tasks' taken-over folders would get Cobian's names back (one plan per task). */
+  planCobianRestore: (ids: string[], naming: CobianNaming) => invoke<RestorePlan[]>("plan_cobian_restore", { ids, naming }),
+  /** Gives them Cobian's names back and switches off the tasks that got some back. */
+  restoreCobianNames: (ids: string[], naming: CobianNaming) => invoke<AdoptResult>("restore_cobian_names", { ids, naming }),
   dismissNotice: () => invoke<void>("dismiss_notice"),
   /** Shows a sample notification with this sound. */
   testSound: (sound: string) => invoke<void>("test_sound", { sound }),

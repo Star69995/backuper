@@ -176,6 +176,8 @@ pub fn run() {
             commands::plan_cobian_takeover,
             commands::take_over_cobian,
             commands::decline_cobian_takeover,
+            commands::plan_cobian_restore,
+            commands::restore_cobian_names,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
