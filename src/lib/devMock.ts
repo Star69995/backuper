@@ -452,6 +452,7 @@ export function installDevMock() {
           reason: "access",
           message: "Access is denied. (os error 5)",
           at: new Date().toISOString(),
+          blocking: true,
         },
       ]
     : [];

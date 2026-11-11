@@ -256,7 +256,13 @@ impl Core {
     /// A backup folder of `task` couldn't be deleted. Told right away - a notification and the main
     /// window with the question - since the folder keeps taking room the next backups need.
     pub fn report_delete_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error) {
+        self.report_problem(task, path, e, false)
+    }
+
+    /// `blocking`: the running backup waits for the user's answer (`await_delete_problems`).
+    fn report_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error, blocking: bool) {
         let problem = DeleteProblem {
+            blocking,
             task_id: task.id.clone(),
             task_name: task.name.clone(),
             path: path.to_string_lossy().to_string(),
@@ -276,7 +282,30 @@ impl Core {
         crate::tray::show_main(&self.app);
     }
 
-    /// The user closed the question without deleting.
+    /// Holds the running backup of `task_id` while a blocking report of it is open: the user deletes
+    /// it, or skips the delete (`dismiss_delete_problems`), or cancels the run.
+    fn await_delete_problems(&self, task_id: &str) {
+        loop {
+            let waiting = self.delete_problems.lock().unwrap().iter().any(|p| p.blocking && p.task_id == task_id);
+            if !waiting || self.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        // Nothing waits on them any more (a cancelled run, or the user's answer).
+        let mut list = self.delete_problems.lock().unwrap();
+        let mut changed = false;
+        for p in list.iter_mut().filter(|p| p.blocking && p.task_id == task_id) {
+            p.blocking = false;
+            changed = true;
+        }
+        drop(list);
+        if changed {
+            self.changed();
+        }
+    }
+
+    /// The user closed the question without deleting (a waiting backup goes on without the delete).
     pub fn dismiss_delete_problems(&self, paths: &[String]) {
         self.delete_problems.lock().unwrap().retain(|p| !paths.contains(&p.path));
         self.changed();
@@ -471,7 +500,8 @@ impl Core {
                 fresh: job.fresh,
                 scheduled: matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
-                delete_failed: &|p, e| self.report_delete_problem(&task, p, e),
+                delete_failed: &|p, e, blocking| self.report_problem(&task, p, e, blocking),
+                await_deletes: &|| self.await_delete_problems(&task.id),
             };
             // The bytes of the files finished so far, and the size of the one in progress (counted when it ends).
             let mut done_before = 0u64;

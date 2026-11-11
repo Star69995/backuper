@@ -7,7 +7,18 @@ import type { Job, Progress, Task } from "../types";
 import { useStopTask } from "./stopTask";
 import { Button, PathText, ProgressBar, SkipIcon, Spinner } from "./ui";
 
-export default function RunningCard({ progress: p, queue, tasks }: { progress: Progress; queue: Job[]; tasks: Task[] }) {
+export default function RunningCard({
+  progress: p,
+  queue,
+  tasks,
+  waitingForDelete = false,
+}: {
+  progress: Progress;
+  queue: Job[];
+  tasks: Task[];
+  /** A delete-before failed and the run waits for the user's answer (DeleteProblemDialog). */
+  waitingForDelete?: boolean;
+}) {
   const stopTask = useStopTask();
   // Re-render every second for the elapsed timer.
   const [, tick] = useState(0);
@@ -19,10 +30,10 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
   const scanning = p.phase !== "copying";
   const phaseText = {
     scanning: "סורק את הקבצים...",
-    deleting: "מוחק גיבויים קודמים לפני ההעתקה...",
+    deleting: waitingForDelete ? "ממתין להחלטה: גיבוי ישן לא נמחק" : "מוחק גיבויים קודמים לפני ההעתקה...",
     pruning: "מנקה מהגיבוי קבצים שכללי הסינון מדלגים עליהם...",
     copying: "מעתיק קבצים",
-  }[p.phase];
+  }[waitingForDelete ? "deleting" : p.phase];
   // No totals while copying = the pre-scan was skipped and nothing could estimate the work: counters only.
   // An estimate from the previous backup can fall short (the source grew): "X of Y" and a percentage would read wrong.
   const overshot = p.bytesDone > p.bytesTotal || p.filesDone > p.filesTotal;
@@ -85,11 +96,13 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
         <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted">
           {scanning ? (
             <span>
-              {p.phase === "deleting"
-                ? "מפנה מקום ביעד"
-                : p.phase === "pruning"
-                  ? "הכללים שונו מאז ההעתקה הקודמת בתיקייה"
-                  : "מחשב את כמות השינויים"}
+              {waitingForDelete
+                ? "הגיבוי ימשיך אחרי שתבחרו בחלון שנפתח"
+                : p.phase === "deleting"
+                  ? "מפנה מקום ביעד"
+                  : p.phase === "pruning"
+                    ? "הכללים שונו מאז ההעתקה הקודמת בתיקייה"
+                    : "מחשב את כמות השינויים"}
             </span>
           ) : unknownTotal ? (
             <span>

@@ -253,6 +253,8 @@ export interface DeleteProblem {
   /** Windows's own message. */
   message: string;
   at: string;
+  /** The running backup waits for the answer before it copies (a delete-before failed). */
+  blocking: boolean;
 }
 
 export interface Notice {

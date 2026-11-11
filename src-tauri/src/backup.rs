@@ -558,7 +558,7 @@ fn discard_stopped(ctx: &RunContext, work: &Path, safe: bool) -> bool {
     if work.exists() {
         if let Err(e) = native::remove_tree(work) {
             if work.exists() {
-                (ctx.delete_failed)(work, &e);
+                (ctx.delete_failed)(work, &e, false);
             }
         }
     }
@@ -613,7 +613,11 @@ pub struct RunContext<'a> {
     /// `Settings.exact_progress`: always run the list-only pass before a full copy.
     pub exact_progress: bool,
     /// A backup folder that had to go couldn't be deleted: told at once (the UI asks the user).
-    pub delete_failed: &'a (dyn Fn(&Path, &std::io::Error) + Sync),
+    /// `blocking` = the run waits for the answer (`await_deletes`) before it copies.
+    pub delete_failed: &'a (dyn Fn(&Path, &std::io::Error, bool) + Sync),
+    /// Waits until the user has dealt with the blocking reports of this run (deleted, or skipped
+    /// the delete to go on), or the run is cancelled.
+    pub await_deletes: &'a (dyn Fn() + Sync),
 }
 
 /// What a background scan compares the source with, to find how much a full copy will do.
@@ -835,12 +839,15 @@ pub fn backup_source(
                     Some(&file_name(&work)),
                     task.delete_empty_incrementals,
                     &mut notes,
-                    ctx.delete_failed,
+                    &|p, e| (ctx.delete_failed)(p, e, true),
                 );
                 run.freed_bytes += freed;
                 if deleted > 0 {
                     notes.push("הגיבויים הקודמים נמחקו לפני תחילת הגיבוי (לפי הגדרות המשימה)".into());
                 }
+                // The point of deleting first is room for this copy: let the user deal with what
+                // wouldn't go (delete as admin, close a program, or skip it) before copying.
+                (ctx.await_deletes)();
             }
             if !reused {
                 if let Err(e) = fs::create_dir_all(&work) {
@@ -1032,7 +1039,7 @@ pub fn backup_source(
                         Some(&file_name(&final_path)),
                         task.delete_empty_incrementals && mode == BackupMode::Full,
                         &mut notes,
-                        ctx.delete_failed,
+                        &|p, e| (ctx.delete_failed)(p, e, false),
                     );
                     run.freed_bytes += freed;
                 }
@@ -1183,7 +1190,8 @@ mod tests {
                 scheduled: self.scheduled.load(Ordering::SeqCst),
                 skip_scan: &self.skip_scan,
                 exact_progress: false,
-                delete_failed: &|_, _| {},
+                delete_failed: &|_, _, _| {},
+                await_deletes: &|| {},
             };
             let logs = self.root.clone();
             run_task(

@@ -437,6 +437,8 @@ pub struct DeleteProblem {
     /// Windows's own message, for the details.
     pub message: String,
     pub at: DateTime<Local>,
+    /// The running backup waits for the user's answer before it copies (a delete-before failed).
+    pub blocking: bool,
 }
 
 impl DeleteProblem {

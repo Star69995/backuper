@@ -725,7 +725,14 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         </nav>
       )}
 
-      {snap.current && <RunningCard progress={snap.current} queue={snap.queue} tasks={snap.tasks} />}
+      {snap.current && (
+        <RunningCard
+          progress={snap.current}
+          queue={snap.queue}
+          tasks={snap.tasks}
+          waitingForDelete={snap.deleteProblems.some((d) => d.blocking && d.taskId === snap.current?.taskId)}
+        />
+      )}
 
       <PausedCard
         tasks={pausedTasks}
