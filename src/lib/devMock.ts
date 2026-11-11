@@ -27,6 +27,9 @@ import type {
 } from "../types";
 import { newTask } from "../types";
 
+/** A mock task without the hidden / system rules a new task starts with, so the mock tasks show only the rules they list. */
+const plainTask = (): Task => ({ ...newTask(), filters: [] });
+
 const mockCopyStart = Date.now() - 60_000;
 
 /** Rough stand-in for filtercheck.rs (the real one uses the engine's matching and reads the disk). */
@@ -78,6 +81,10 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
   const one = (r: FilterRule): RuleResult => {
     const skip = (detail: string | null = null): RuleResult => ({ effect: "skips", detail });
     switch (r.kind) {
+      case "group": {
+        const c = r.rules.map(one);
+        return c.find((x) => x.effect === "skips") ?? c.find((x) => x.effect === "invalid") ?? empty();
+      }
       case "folder": {
         const hit = dirs.find((d) => wild(r.value.trim()).test(d));
         return hit ? skip(hit === name && out.folder ? null : `מדלג על התיקייה ${hit} שבדרך`) : empty();
@@ -170,7 +177,7 @@ const last = (s: Schedule) => occurrences(s, 1, true)[0] ?? null;
 export function installDevMock() {
   const tasks: Task[] = [
     {
-      ...newTask(),
+      ...plainTask(),
       id: "1",
       name: "מסמכים ותמונות",
       group: "מחשב הבית",
@@ -184,7 +191,7 @@ export function installDevMock() {
       fullSchedule: { kind: "weekly", days: [5], time: "03:00" },
     },
     {
-      ...newTask(),
+      ...plainTask(),
       id: "2",
       name: "תמונות משפחה",
       group: "מחשב הבית",
@@ -197,7 +204,7 @@ export function installDevMock() {
       schedule: { kind: "weekly", days: [5], time: "22:00" },
     },
     {
-      ...newTask(),
+      ...plainTask(),
       id: "3",
       name: "פרויקטים",
       group: "עבודה",
@@ -210,7 +217,7 @@ export function installDevMock() {
       ],
     },
     {
-      ...newTask(),
+      ...plainTask(),
       id: "4",
       name: "הגדרות תוכנות",
       sources: [src("C:\\Users\\User\\AppData\\Roaming", "AppData")],
@@ -219,7 +226,7 @@ export function installDevMock() {
       schedule: { kind: "monthly", day: 1, time: "12:00" },
     },
     {
-      ...newTask(),
+      ...plainTask(),
       id: "5",
       name: "סרטים",
       sources: [src("D:\\Videos", "Videos")],
@@ -773,7 +780,7 @@ function cobianPlan(t: Task): AdoptPlan {
 }
 
 function cobianImport(): ImportedTask[] {
-  const t = (id: string, name: string, extra: Partial<Task>): Task => ({ ...newTask(), id, name, ...extra });
+  const t = (id: string, name: string, extra: Partial<Task>): Task => ({ ...plainTask(), id, name, ...extra });
   return [
     {
       task: t("c1", "Docs to K Daily א-ב", {
@@ -842,7 +849,7 @@ function snapshotImport(current: Task[]): ImportPreview {
   }));
   items.push({
     task: {
-      ...newTask(),
+      ...plainTask(),
       id: "deleted",
       name: "גיבוי מסמכים ישן",
       sources: [{ path: "C:\\Old", folderName: "Old" }],
@@ -875,7 +882,7 @@ function simpleImport(split: ImportSplit): ImportPreview {
     replaces: split === "one" ? [] : [{ id: "simple-config", name: "גיבוי מהקובץ" }],
     tasks: parts.map((p, i) => ({
       task: {
-        ...newTask(),
+        ...plainTask(),
         id: p.id,
         name: p.name,
         sources: p.paths.map((path) => src(path, name(path))),

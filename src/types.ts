@@ -1,4 +1,5 @@
 // Mirrors src-tauri/src/model.rs (camelCase JSON).
+import { defaultRules } from "./lib/filterPresets";
 
 export type BackupMode = "full" | "incremental";
 
@@ -25,7 +26,10 @@ export type FilterRule =
   | { kind: "largerThan"; mb: number }
   | { kind: "olderThan"; days: number }
   | { kind: "hidden" }
-  | { kind: "system" };
+  | { kind: "system" }
+  /** Rules shown as one row in the editor; they all apply as if listed one by one. `name` is the row's label.
+   * Switched off (`enabled: false`) the rules stay in the row but none of them applies. */
+  | { kind: "group"; name: string; rules: FilterRule[]; enabled: boolean };
 
 export type FilterKind = FilterRule["kind"];
 
@@ -479,6 +483,8 @@ export const newTask = (): Task => ({
   copyEmptyDirs: false,
   catchUp: true,
   onDriveConnect: "off",
-  filters: [],
+  // New tasks skip files nobody needs in a backup (hidden, system, temp, Windows leftovers, cache folders);
+  // removing those rules in the filter editor turns it off.
+  filters: defaultRules(),
   useGlobalFilters: true,
 });

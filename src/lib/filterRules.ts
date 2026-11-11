@@ -26,8 +26,14 @@ const pattern = (p: string) =>
 const slashes = (v: string) => v.trim().replace(/\//g, "\\");
 const lower = (v: string) => v.toLowerCase();
 
+/** The rules that apply: each group replaced by the rules inside it. */
+export const flatRules = (rules: FilterRule[]): FilterRule[] =>
+  rules.flatMap((r) => (r.kind !== "group" ? [r] : r.enabled ? flatRules(r.rules) : []));
+
 function atomsOf(r: FilterRule): Atom[] {
   switch (r.kind) {
+    case "group":
+      return r.enabled ? r.rules.flatMap(atomsOf) : [];
     case "include":
       return splitList(r.value).map((p) => ({ t: "onlyName", v: lower(pattern(p)) }));
     case "includeName":
@@ -190,8 +196,10 @@ export function relations(rules: FilterRule[], globalRules: FilterRule[] = []): 
   });
 }
 
-const KIND_ORDER = (r: FilterRule) => {
+const KIND_ORDER = (r: FilterRule): number => {
   switch (r.kind) {
+    case "group":
+      return -1;
     case "extension":
       return 0;
     case "pattern":
@@ -237,6 +245,8 @@ export function normalizeRule(r: FilterRule): FilterRule {
       return { ...r, value: slashes(r.value) };
     case "regex":
       return { ...r, value: r.value.trim() };
+    case "group":
+      return { ...r, rules: r.rules.map(normalizeRule) };
     default:
       return r;
   }

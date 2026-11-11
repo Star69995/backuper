@@ -46,7 +46,7 @@ fn is_file_path(p: &str) -> bool {
 }
 
 pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
-    for r in rules {
+    for r in FilterRule::flatten(rules) {
         match r {
             FilterRule::Include { value } if patterns(value).is_empty() => {
                 return Err("כלל סינון: יש להזין אילו קבצים לגבות (למשל *.lrcat)".into())
@@ -101,7 +101,7 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
 
 pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
     let mut f = Filters::default();
-    for r in rules {
+    for r in FilterRule::flatten(rules) {
         match r {
             FilterRule::Include { value } => f.include_files.extend(patterns(value)),
             FilterRule::Extension { value } => f.exclude_files.extend(patterns(value)),
@@ -120,6 +120,7 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
             FilterRule::OlderThan { days } => f.max_age_days = Some(f.max_age_days.map_or(*days, |d| d.min(*days))),
             FilterRule::Hidden => f.exclude_hidden = true,
             FilterRule::System => f.exclude_system = true,
+            FilterRule::Group { .. } => {}
         }
     }
     f.include_files.dedup();
@@ -150,6 +151,32 @@ mod tests {
         assert_eq!(f.exclude_dirs, ["node_modules"]);
         assert_eq!(f.max_size, Some(10 * 1024 * 1024));
         assert!(f.exclude_hidden && !f.exclude_system);
+    }
+
+    #[test]
+    fn a_group_applies_its_rules_as_if_listed() {
+        let group = FilterRule::Group {
+            name: "x".into(),
+            enabled: true,
+            rules: vec![
+                FilterRule::Hidden,
+                FilterRule::Extension { value: "tmp".into() },
+                FilterRule::Group { name: "y".into(), enabled: true, rules: vec![FilterRule::Folder { value: "Cache".into() }] },
+            ],
+        };
+        let f = compile(&[group.clone(), FilterRule::System]);
+        assert!(f.exclude_hidden && f.exclude_system);
+        assert_eq!((f.exclude_files, f.exclude_dirs), (vec!["*.tmp".to_string()], vec!["Cache".to_string()]));
+        assert!(validate(std::slice::from_ref(&group)).is_ok());
+        let bad = FilterRule::Group { name: "x".into(), enabled: true, rules: vec![FilterRule::Extension { value: " ".into() }] };
+        assert!(validate(&[bad]).is_err());
+        // Switched off: nothing applies, and a group saved before the switch existed is on.
+        let off = FilterRule::Group { name: "x".into(), enabled: false, rules: vec![FilterRule::Hidden] };
+        assert_eq!(compile(&[off]), Filters::default());
+        let old: FilterRule = serde_json::from_str(r#"{"kind":"group","name":"x","rules":[{"kind":"hidden"}]}"#).unwrap();
+        assert!(compile(&[old]).exclude_hidden);
+        let json = serde_json::to_string(&group).unwrap();
+        assert_eq!(serde_json::from_str::<FilterRule>(&json).unwrap(), group);
     }
 
     #[test]

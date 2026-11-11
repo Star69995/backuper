@@ -104,7 +104,7 @@ export default function SettingsView({ snap, refresh }: { snap: Snapshot; refres
 
       <Card title="כללי סינון כלליים" icon={<Filter size={18} />}>
         <p className="-mt-2 text-[13px] text-muted">
-          קבצים שתואמים לכללים האלה לא יגובו באף משימה (אלא אם כיבו במשימה את "החלת כללי הסינון הכלליים").
+          קבצים שתואמים לכללים האלה לא יגובו באף משימה (אלא אם כיבו במשימה את "גם הכללים הכלליים מההגדרות").
         </p>
         <FilterRulesEditor rules={filters} onChange={setFilters} emptyText="אין כללים כלליים." />
         {filtersDirty && (

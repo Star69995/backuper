@@ -93,7 +93,7 @@ pub fn check(rules: &[FilterRule], global: &[FilterRule], sources: &[String], pr
     }
     let folder_hint = typed.ends_with('\\');
     let path = typed.trim_end_matches('\\');
-    let all = || rules.iter().chain(global);
+    let all = || FilterRule::flatten(rules.iter().chain(global)).into_iter();
 
     // Which source the path is in: its base for full-path rules, and where the folders on the way start.
     let sources: Vec<String> = sources

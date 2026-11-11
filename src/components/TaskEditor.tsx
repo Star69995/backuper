@@ -37,7 +37,7 @@ import {
   taskKind,
 } from "../lib/format";
 import type { BackupMode, DriveAction, FilterRule, KeepMode, Source, Task } from "../types";
-import FilterRulesEditor from "./FilterRulesEditor";
+import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { Section, type SectionInfo, SectionNav, useScrollSpy } from "./sections";
@@ -618,16 +618,18 @@ export default function TaskEditor({
               sources={t.sources.map((s) => s.path)}
               globalRules={t.useGlobalFilters ? globalFilters : []}
             />
-            <Toggle
-              checked={t.useGlobalFilters}
-              onChange={(v) => set("useGlobalFilters", v)}
-              label="החלת כללי הסינון הכלליים"
-              description={
-                globalFilters.length === 0
-                  ? "עדיין לא הוגדרו כללים כלליים (אפשר להגדיר אותם בהגדרות)."
-                  : `${globalFilters.length} כללים שמוגדרים בהגדרות וחלים על כל המשימות.`
-              }
-            />
+            <div className="mt-2 border-t border-line pt-3">
+              <Toggle
+                checked={t.useGlobalFilters}
+                onChange={(v) => set("useGlobalFilters", v)}
+                label="גם הכללים הכלליים מההגדרות"
+                description={
+                  globalFilters.length === 0
+                    ? "עדיין לא הוגדרו כללים כלליים (אפשר להגדיר אותם בהגדרות)."
+                    : `כללים שמוגדרים פעם אחת בהגדרות ומשותפים לכל המשימות: ${globalFilters.map(describeFilter).join("; ")}`
+                }
+              />
+            </div>
           </Section>
 
           <Section {...sec("advanced")}>

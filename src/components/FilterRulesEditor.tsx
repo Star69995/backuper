@@ -2,6 +2,8 @@ import {
   AlertTriangle,
   CalendarX,
   Check,
+  ChevronDown,
+  ChevronUp,
   ArrowDownUp,
   CircleHelp,
   Copy,
@@ -12,6 +14,7 @@ import {
   FileX,
   Filter,
   Folder,
+  Layers,
   FolderX,
   Info,
   Plus,
@@ -27,13 +30,17 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { api, errorText } from "../api";
-import { addRules, relations, tidy, type Added, type Relation } from "../lib/filterRules";
-import { CACHE_FOLDERS } from "../lib/cacheFolders";
+import { addRules, flatRules, relations, tidy, type Added, type Relation } from "../lib/filterRules";
+import { CACHE_RULES, defaultGroup, TEMP_FILES, WINDOWS_JUNK } from "../lib/filterPresets";
 import type { FilterCheck, FilterKind, FilterProbe, FilterRule, RegexCheck, RuleResult } from "../types";
 import { useFeedback } from "./feedback";
-import { AutoGrowInput, Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
+import { AutoGrowInput, Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, TextInput, Toggle } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
+  group: {
+    label: "קבוצת כללים",
+    icon: <Layers size={15} />,
+  },
   // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
   include: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
   includeName: { label: "סוגי קבצים ושמות", icon: <Type size={15} /> },
@@ -150,28 +157,16 @@ const blank = (kind: FilterKind): FilterRule => {
     case "hidden":
     case "system":
       return { kind };
+    case "group":
+      return defaultGroup();
   }
 };
 
 const PRESETS: { label: string; rules: FilterRule[] }[] = [
-  {
-    label: "קבצים זמניים",
-    rules: [
-      { kind: "extension", value: "tmp, temp, bak, part, crdownload" },
-      { kind: "pattern", value: "~$*" },
-    ],
-  },
-  {
-    label: "קבצי Windows מיותרים",
-    rules: [
-      { kind: "pattern", value: "Thumbs.db" },
-      { kind: "pattern", value: "desktop.ini" },
-    ],
-  },
-  {
-    label: "קבצי מטמון",
-    rules: CACHE_FOLDERS.map((value) => ({ kind: "folder", value })),
-  },
+  { label: "קבצי מערכת ומיותרים", rules: [defaultGroup()] },
+  { label: "קבצים זמניים", rules: TEMP_FILES },
+  { label: "קבצי Windows מיותרים", rules: WINDOWS_JUNK },
+  { label: "קבצי מטמון", rules: CACHE_RULES },
   {
     label: "תיקיות פיתוח",
     rules: [
@@ -202,6 +197,8 @@ export function describeFilter(r: FilterRule) {
       return r.mb % 1024 === 0 ? `קבצים גדולים מ-${r.mb / 1024}GB` : `קבצים גדולים מ-${r.mb}MB`;
     case "olderThan":
       return `קבצים שלא שונו ${r.days} ימים`;
+    case "group":
+      return `${r.name} (${r.rules.length === 1 ? "כלל אחד" : `${r.rules.length} כללים`}${r.enabled ? "" : ", כבויה"})`;
     default:
       return KINDS[r.kind].label;
   }
@@ -492,7 +489,7 @@ function FilterCheckPanel({
   onClose: () => void;
 }) {
   const id = useId();
-  const any = (k: FilterKind) => rules.some((r) => r.kind === k) || globalRules.some((r) => r.kind === k);
+  const any = (k: FilterKind) => flatRules([...rules, ...globalRules]).some((r) => r.kind === k);
   // Size, date and attributes are asked only for a file that isn't on disk, and only when a rule looks at them.
   const askValues = check?.kept != null && !check.onDisk && !check.folder;
   const pick = async (folder: boolean) => {
@@ -633,6 +630,99 @@ function addSummary(a: Added) {
     a.partial.length > 0 && `${a.partial.length} חופפים חלקית לכלל קיים`,
   ].filter(Boolean);
   return parts.join(", ") || "לא נוספו כללים";
+}
+
+/** What the default group skips, in the group row's own words. */
+const GROUP_SKIPS = "קבצים מוסתרים, קבצי מערכת, קבצים זמניים, קבצי Windows מיותרים ותיקיות מטמון.";
+
+/** A rule row, or a group's row (its rules open on demand, each one a row of its own). */
+function RuleItem(props: {
+  rule: FilterRule;
+  onChange: (r: FilterRule) => void;
+  onRemove: () => void;
+  tested?: RuleResult;
+  related?: Relation[];
+}) {
+  return props.rule.kind === "group" ? <GroupRow {...props} rule={props.rule} /> : <RuleRow {...props} />;
+}
+
+function GroupRow({
+  rule: r,
+  onChange,
+  onRemove,
+  tested,
+}: {
+  rule: Extract<FilterRule, { kind: "group" }>;
+  onChange: (r: FilterRule) => void;
+  onRemove: () => void;
+  tested?: RuleResult;
+}) {
+  const [open, setOpen] = useState(false);
+  const { confirm } = useFeedback();
+  // Off is one click. On again asks first: it stops backing those files up (and a quick full backup then
+  // removes them from the folder it updates).
+  const toggle = async (on: boolean) => {
+    if (on) {
+      const ok = await confirm({
+        title: `הפעלה מחדש של "${r.name}"`,
+        message:
+          "הקבצים והתיקיות שהכללים בקבוצה מדלגים עליהם לא יגובו מעכשיו. גיבויים שכבר נשמרו נשארים כמו שהם, חוץ מגיבוי מלא מהיר (שמעדכן את הגיבוי המלא הקודם): הוא יסיר ממנו את מה שהכללים מדלגים עליו.",
+        confirmLabel: "הפעלה",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onChange({ ...r, enabled: on });
+  };
+  return (
+    <li className="rounded-lg border border-line bg-panel2 px-3 py-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <span className="flex flex-wrap items-center gap-2 text-[13px] font-medium">
+            <span className="text-muted">{KINDS.group.icon}</span>
+            {r.name}
+            {tested && <EffectBadge result={tested} />}
+          </span>
+          <span className="text-xs text-muted">
+            {r.enabled ? `לא מגבה: ${GROUP_SKIPS}` : "כבוי - הקבצים האלה יגובו כרגיל."}
+          </span>
+        </div>
+        <label className="flex shrink-0 items-center gap-2 text-xs font-medium">
+          <span className={r.enabled ? "text-accent" : "text-muted"}>{r.enabled ? "פעיל" : "כבוי"}</span>
+          <Toggle checked={r.enabled} onChange={toggle} ariaLabel={`${r.name}: ${r.enabled ? "כיבוי" : "הפעלה"}`} />
+        </label>
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="mt-1 flex items-center gap-1 rounded text-xs font-medium text-accent hover:underline"
+      >
+        {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        {open ? "הסתרת הכללים" : `עריכת הכללים (${r.rules.length})`}
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-col gap-2">
+          <ul className="flex flex-col gap-2">
+            {r.rules.map((c, i) => (
+              <RuleItem
+                key={i}
+                rule={c}
+                onChange={(n) => onChange({ ...r, rules: r.rules.map((x, j) => (j === i ? n : x)) })}
+                onRemove={() => onChange({ ...r, rules: r.rules.filter((_, j) => j !== i) })}
+              />
+            ))}
+            {r.rules.length === 0 && <li className="text-xs text-muted">אין כללים בקבוצה.</li>}
+          </ul>
+          <div>
+            <Button size="sm" variant="ghost" icon={<Trash2 size={14} />} onClick={onRemove}>
+              מחיקת הקבוצה
+            </Button>
+          </div>
+        </div>
+      )}
+    </li>
+  );
 }
 
 /** One rule on one line; its explanation sits behind the info button so a long list stays compact. */
@@ -816,10 +906,13 @@ export default function FilterRulesEditor({
 
   const update = (i: number, r: FilterRule) => onChange(rules.map((x, j) => (j === i ? r : x)));
   const remove = (i: number) => onChange(rules.filter((_, j) => j !== i));
-  const singleton = (k: FilterKind) => (k === "hidden" || k === "system") && rules.some((r) => r.kind === k);
+  const singleton = (k: FilterKind) => (k === "hidden" || k === "system") && flatRules(rules).some((r) => r.kind === k);
 
   const { toast, choose } = useFeedback();
-  const related = useMemo(() => relations(rules, globalRules), [rules, globalRules]);
+  const related = useMemo(
+    () => relations(rules, globalRules).map((r, i) => (rules[i].kind === "group" ? [] : r)),
+    [rules, globalRules],
+  );
   const repeats = related.filter((r) => r.some((x) => x.kind === "same")).length;
   const covered = related.filter((r) => r.some((x) => x.kind === "inside")).length;
 
@@ -898,6 +991,9 @@ export default function FilterRulesEditor({
     }
   };
 
+  // A quick-add that would add nothing (its rules are already in the list, or inside other rules) isn't offered.
+  const presets = PRESETS.filter((p) => addRules(rules, p.rules).added.length > 0);
+
   return (
     <div className="flex flex-col gap-2">
       {(repeats > 0 || covered > 0) && (
@@ -927,7 +1023,7 @@ export default function FilterRulesEditor({
       ) : (
         <ul className="flex flex-col gap-2">
           {rules.map((r, i) => (
-            <RuleRow
+            <RuleItem
               key={i}
               rule={r}
               onChange={(n) => update(i, n)}
@@ -952,10 +1048,12 @@ export default function FilterRulesEditor({
             onClick: () => add([blank(kind)]),
           }))}
         />
-        <span className="flex items-center gap-1 text-xs text-muted">
-          <Sparkles size={13} /> הוספה מהירה:
-        </span>
-        {PRESETS.map((p) => (
+        {presets.length > 0 && (
+          <span className="flex items-center gap-1 text-xs text-muted">
+            <Sparkles size={13} /> הוספה מהירה:
+          </span>
+        )}
+        {presets.map((p) => (
           <button
             key={p.label}
             type="button"

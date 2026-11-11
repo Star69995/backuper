@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
 import { cacheFolderIn } from "../lib/cacheFolders";
+import { flatRules } from "../lib/filterRules";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
 import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
 import { useFeedback } from "./feedback";
@@ -159,7 +160,7 @@ const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 function isSkipped(task: Task, path: string) {
   const p = norm(path);
   const parts = p.split("\\");
-  return task.filters.some(
+  return flatRules(task.filters).some(
     (r) =>
       (r.kind === "file" && norm(r.value) === p) ||
       (r.kind === "folder" &&
@@ -302,7 +303,7 @@ async function errorsText(run: RunRecord, src: SourceRun, index: number, task: T
   if (task) {
     lines.push(
       `task: copy empty folders ${task.copyEmptyDirs}, global rules ${task.useGlobalFilters}, ${task.filters.length} own rules`,
-      ...task.filters.map((r) => `  rule: ${describeFilter(r)}`),
+      ...flatRules(task.filters).map((r) => `  rule: ${describeFilter(r)}`),
       ...(task.useGlobalFilters ? globalRules.map((r) => `  global rule: ${describeFilter(r)}`) : []),
     );
   }

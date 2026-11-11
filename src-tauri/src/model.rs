@@ -89,6 +89,35 @@ pub enum FilterRule {
     },
     Hidden,
     System,
+    /// Rules shown as one row in the editor (a new task starts with one for the files nobody needs in
+    /// a backup); they all apply, as if they were listed one by one. `name` is the row's label.
+    /// A switched-off group (`enabled: false`) keeps its rules but applies none of them.
+    Group {
+        name: String,
+        rules: Vec<FilterRule>,
+        #[serde(default = "enabled_by_default")]
+        enabled: bool,
+    },
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+impl FilterRule {
+    /// The rules to apply: the given ones with each group replaced by the rules inside it (groups may
+    /// nest; a switched-off group gives none).
+    pub fn flatten<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Vec<&'a FilterRule> {
+        let mut out = Vec::new();
+        for r in rules {
+            match r {
+                FilterRule::Group { enabled: false, .. } => {}
+                FilterRule::Group { rules, .. } => out.extend(Self::flatten(rules)),
+                r => out.push(r),
+            }
+        }
+        out
+    }
 }
 
 /// What a task does when its drives (destination / sources) get connected.
