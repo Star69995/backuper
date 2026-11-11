@@ -4,7 +4,7 @@
 use crate::backup;
 use crate::drives::DriveWatch;
 use crate::engine::{robocopy::Robocopy, CopyEngine, EngineEvent};
-use crate::model::{BackupMode, DriveAction, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
+use crate::model::{BackupMode, DeleteProblem, DriveAction, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
 use crate::schedule;
 use crate::store::Store;
 use chrono::{Duration as ChronoDuration, Local};
@@ -151,6 +151,8 @@ pub struct Core {
     working: AtomicBool,
     /// Tasks waiting for the user to answer "the drive was connected - back up now?".
     drive_prompts: Mutex<Vec<String>>,
+    /// Backup folders that should have been deleted but weren't, until the user deals with them.
+    delete_problems: Mutex<Vec<DeleteProblem>>,
     engine: Box<dyn CopyEngine>,
     app: AppHandle,
 }
@@ -167,6 +169,7 @@ impl Core {
             skip_scan: AtomicBool::new(false),
             working: AtomicBool::new(false),
             drive_prompts: Mutex::new(Vec::new()),
+            delete_problems: Mutex::new(Vec::new()),
             engine: Box::new(Robocopy),
             app,
         })
@@ -246,6 +249,79 @@ impl Core {
         self.changed();
     }
 
+    pub fn delete_problems(&self) -> Vec<DeleteProblem> {
+        self.delete_problems.lock().unwrap().clone()
+    }
+
+    /// A backup folder of `task` couldn't be deleted. Told right away - a notification and the main
+    /// window with the question - since the folder keeps taking room the next backups need.
+    pub fn report_delete_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error) {
+        let problem = DeleteProblem {
+            task_id: task.id.clone(),
+            task_name: task.name.clone(),
+            path: path.to_string_lossy().to_string(),
+            reason: DeleteProblem::reason_of(e).into(),
+            message: e.to_string(),
+            at: Local::now(),
+        };
+        {
+            let mut list = self.delete_problems.lock().unwrap();
+            list.retain(|p| p.path != problem.path);
+            list.push(problem);
+        }
+        let sound = self.store.lock().unwrap().settings.sound_failure.clone();
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        toast(&self.app, format!("גיבוי ישן לא נמחק: {}", task.name), format!("{name} - הוא ממשיך לתפוס מקום בכונן הגיבוי. פתחו את Backuper כדי לטפל בזה"), &sound);
+        self.changed();
+        crate::tray::show_main(&self.app);
+    }
+
+    /// The user closed the question without deleting.
+    pub fn dismiss_delete_problems(&self, paths: &[String]) {
+        self.delete_problems.lock().unwrap().retain(|p| !paths.contains(&p.path));
+        self.changed();
+    }
+
+    /// Tries again to delete reported folders (only those: nothing else can be handed in), `elevated`
+    /// = as admin, after Windows's permission prompt. Returns the paths that are still there.
+    pub fn retry_delete(&self, paths: &[String], elevated: bool) -> Result<Vec<String>, String> {
+        let known: Vec<String> = self
+            .delete_problems
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| paths.contains(&p.path))
+            .map(|p| p.path.clone())
+            .collect();
+        let mut failures: Vec<(String, std::io::Error)> = Vec::new();
+        let result = if elevated {
+            crate::acl::delete_elevated(&known)
+        } else {
+            for p in &known {
+                if let Err(e) = crate::engine::native::remove_tree(std::path::Path::new(p)) {
+                    failures.push((p.clone(), e));
+                }
+            }
+            Ok(())
+        };
+        let left: Vec<String> = known.iter().filter(|p| std::path::Path::new(p).exists()).cloned().collect();
+        {
+            let mut list = self.delete_problems.lock().unwrap();
+            list.retain(|p| !known.contains(&p.path) || left.contains(&p.path));
+            for p in list.iter_mut() {
+                if let Some((_, e)) = failures.iter().find(|(f, _)| *f == p.path) {
+                    p.reason = DeleteProblem::reason_of(e).into();
+                    p.message = e.to_string();
+                } else if elevated && left.contains(&p.path) {
+                    // Even admin couldn't: most likely a program still has a file open.
+                    p.reason = "inUse".into();
+                }
+            }
+        }
+        self.changed();
+        result.map(|_| left)
+    }
+
     /// Cancels a queued or running task. A running one is paused (its folder is kept, the next run
     /// continues in it), or with `discard` stopped for good.
     pub fn cancel(&self, task_id: &str, discard: bool) {
@@ -268,7 +344,7 @@ impl Core {
         }
         let task = self.store.lock().unwrap().tasks.iter().find(|t| t.id == task_id).cloned();
         let Some(task) = task else { return Ok(()) };
-        if delete && backup::discard_partials(&task) > 0 {
+        if delete && backup::discard_partials(&task, &|p, e| self.report_delete_problem(&task, p, e)) > 0 {
             return Err("חלק מההעתקה החלקית לא נמחק: זה הגיבוי המלא היחיד שיש, או שהתיקייה בשימוש. אפשר להסיר את ההשהיה בלי למחוק".into());
         }
         let mut s = self.store.lock().unwrap();
@@ -395,6 +471,7 @@ impl Core {
                 fresh: job.fresh,
                 scheduled: matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
+                delete_failed: &|p, e| self.report_delete_problem(&task, p, e),
             };
             // The bytes of the files finished so far, and the size of the one in progress (counted when it ends).
             let mut done_before = 0u64;

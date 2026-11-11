@@ -37,6 +37,9 @@ export const api = {
   /** Continues a task whose last run was stopped (false = already queued or running). */
   resumeTask: (id: string) => invoke<boolean>("resume_task", { id }),
   /** Answers the drive-connected question: `run` get queued, all of `ids` stop waiting. */
+  /** Deletes again backup folders that couldn't be deleted; `elevated` = as admin (Windows asks first). Resolves to the ones still there. */
+  retryDelete: (paths: string[], elevated: boolean) => invoke<string[]>("retry_delete", { paths, elevated }),
+  dismissDeleteProblems: (paths: string[]) => invoke<void>("dismiss_delete_problems", { paths }),
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),

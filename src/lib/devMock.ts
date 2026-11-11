@@ -12,6 +12,7 @@ import type {
   RuleResult,
   ImportedTask,
   ImportPreview,
+  DeleteProblem,
   ImportSplit,
   Notice,
   RunRecord,
@@ -441,6 +442,19 @@ export function installDevMock() {
     }));
   // Open with the drive-connected question showing (?prompt in the URL).
   let drivePrompts = new URLSearchParams(location.search).has("prompt") ? ["1", "2"] : [];
+  // Open with the "old backup wasn't deleted" question (?undeleted in the URL).
+  let deleteProblems: DeleteProblem[] = new URLSearchParams(location.search).has("undeleted")
+    ? [
+        {
+          taskId: "1",
+          taskName: "מסמכים ותמונות",
+          path: "E:\\Backups\\Documents 2026-10-01 03-00 מלא",
+          reason: "access",
+          message: "Access is denied. (os error 5)",
+          at: new Date().toISOString(),
+        },
+      ]
+    : [];
   // Open with the "task list recovered" notice (?notice in the URL).
   let notice: Notice | null = new URLSearchParams(location.search).has("notice")
     ? {
@@ -458,6 +472,7 @@ export function installDevMock() {
     settings,
     autostart: true,
     drivePrompts,
+    deleteProblems: [...deleteProblems],
     notice,
     update,
     cobianRenamed: Object.fromEntries(Object.entries(cobianRenamed).map(([id, f]) => [id, f.length])),
@@ -636,6 +651,10 @@ export function installDevMock() {
           savedAt: iso(-minutesAgo),
           taskCount: tasks.length - i,
         }));
+      case "retry_delete":
+      case "dismiss_delete_problems":
+        deleteProblems = deleteProblems.filter((p) => !(a.paths as string[]).includes(p.path));
+        return cmd === "retry_delete" ? [] : null;
       case "answer_drive_prompts":
         drivePrompts = drivePrompts.filter((id) => !(a.ids as string[]).includes(id));
         return null;

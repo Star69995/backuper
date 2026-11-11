@@ -192,15 +192,20 @@ pub fn has_partial(task: &Task) -> bool {
 /// when no complete full sits next to it in that source (it may be the previous full, updated in
 /// place, i.e. the only backup there is). Returns how many folders were left, so the caller knows
 /// whether anything is still there to continue.
-pub fn discard_partials(task: &Task) -> usize {
+pub fn discard_partials(task: &Task, failed: &dyn Fn(&Path, &std::io::Error)) -> usize {
     let mut left = 0;
     for s in &task.sources {
         let backups = list_backups(&task.destination, &s.folder_name);
         let has_full = backups.iter().any(|b| !b.partial && b.kind == BackupMode::Full);
         for b in backups.iter().filter(|b| b.partial) {
             let safe = b.kind == BackupMode::Incremental || has_full;
-            if !safe || native::remove_tree(Path::new(&b.path)).is_err() {
+            if !safe {
                 left += 1;
+            } else if let Err(e) = native::remove_tree(Path::new(&b.path)) {
+                if Path::new(&b.path).exists() {
+                    failed(Path::new(&b.path), &e);
+                    left += 1;
+                }
             }
         }
     }
@@ -232,7 +237,7 @@ pub fn list_task_backups(task: &Task) -> Vec<SourceBackups> {
 }
 
 /// Deletes one backup folder, only if it really is one of this task's dated folders.
-pub fn delete_backup(task: &Task, folder_name: &str, name: &str) -> Result<(), String> {
+pub fn delete_backup(task: &Task, folder_name: &str, name: &str, failed: &dyn Fn(&Path, &std::io::Error)) -> Result<(), String> {
     if !task.sources.iter().any(|s| s.folder_name == folder_name) {
         return Err("תיקיית המקור לא נמצאה במשימה".into());
     }
@@ -240,7 +245,14 @@ pub fn delete_backup(task: &Task, folder_name: &str, name: &str) -> Result<(), S
         .into_iter()
         .find(|b| b.name == name)
         .ok_or("תיקיית הגיבוי לא נמצאה")?;
-    native::remove_tree(Path::new(&found.path)).map_err(|e| format!("מחיקה נכשלה: {e}"))
+    let path = Path::new(&found.path);
+    match native::remove_tree(path) {
+        Err(e) if path.exists() => {
+            failed(path, &e);
+            Err(format!("מחיקה נכשלה: {e}"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A dated folder's name: "<prefix> 2026-10-01 03-00 מלא" (with seconds: "... 03-00-15 מלא").
@@ -379,7 +391,15 @@ fn prune_victims(all: &[BackupFolder], keep: Keep, delete_empty: bool) -> Vec<&B
 
 /// Deletes old backups of one source (`prune_victims`, besides `protect`).
 /// Returns how many backups were deleted and how many bytes that freed.
-fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_empty: bool, notes: &mut Vec<String>) -> (u64, u64) {
+fn prune(
+    dest: &str,
+    prefix: &str,
+    keep: Keep,
+    protect: Option<&str>,
+    delete_empty: bool,
+    notes: &mut Vec<String>,
+    failed: &dyn Fn(&Path, &std::io::Error),
+) -> (u64, u64) {
     let all: Vec<BackupFolder> = list_backups(dest, prefix)
         .into_iter()
         .filter(|b| Some(b.name.as_str()) != protect)
@@ -397,7 +417,13 @@ fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_emp
                 freed += size;
                 notes.push(format!("נמחק גיבוי קודם: {} ({})", b.name, fmt_bytes(size)));
             }
-            Err(e) => notes.push(format!("לא ניתן למחוק את {}: {e}", b.name)),
+            Err(e) => {
+                // A half-deleted folder can be gone by now after all.
+                if Path::new(&b.path).exists() {
+                    notes.push(format!("לא ניתן למחוק את {}: {e}", b.name));
+                    failed(Path::new(&b.path), &e);
+                }
+            }
         }
     }
     if removed_empty > 0 {
@@ -530,7 +556,11 @@ fn discard_stopped(ctx: &RunContext, work: &Path, safe: bool) -> bool {
         return false;
     }
     if work.exists() {
-        let _ = native::remove_tree(work);
+        if let Err(e) = native::remove_tree(work) {
+            if work.exists() {
+                (ctx.delete_failed)(work, &e);
+            }
+        }
     }
     !work.exists()
 }
@@ -582,6 +612,8 @@ pub struct RunContext<'a> {
     pub skip_scan: &'a AtomicBool,
     /// `Settings.exact_progress`: always run the list-only pass before a full copy.
     pub exact_progress: bool,
+    /// A backup folder that had to go couldn't be deleted: told at once (the UI asks the user).
+    pub delete_failed: &'a (dyn Fn(&Path, &std::io::Error) + Sync),
 }
 
 /// What a background scan compares the source with, to find how much a full copy will do.
@@ -803,6 +835,7 @@ pub fn backup_source(
                     Some(&file_name(&work)),
                     task.delete_empty_incrementals,
                     &mut notes,
+                    ctx.delete_failed,
                 );
                 run.freed_bytes += freed;
                 if deleted > 0 {
@@ -999,6 +1032,7 @@ pub fn backup_source(
                         Some(&file_name(&final_path)),
                         task.delete_empty_incrementals && mode == BackupMode::Full,
                         &mut notes,
+                        ctx.delete_failed,
                     );
                     run.freed_bytes += freed;
                 }
@@ -1149,6 +1183,7 @@ mod tests {
                 scheduled: self.scheduled.load(Ordering::SeqCst),
                 skip_scan: &self.skip_scan,
                 exact_progress: false,
+                delete_failed: &|_, _| {},
             };
             let logs = self.root.clone();
             run_task(

@@ -234,11 +234,25 @@ export interface Snapshot {
   autostart: boolean;
   /** Ids of tasks whose drive was connected, waiting for "back up now?". */
   drivePrompts: string[];
+  /** Backup folders that should have been deleted but weren't (shown by DeleteProblemDialog). */
+  deleteProblems: DeleteProblem[];
   /** Shown until dismissed (e.g. the task list was recovered from a backup). */
   notice: Notice | null;
   update: UpdateStatus;
   /** Per task id: how many of its folders a Cobian takeover renamed (their names can be put back). */
   cobianRenamed: Record<string, number>;
+}
+
+/** A backup folder that should have been deleted but wasn't (model.rs `DeleteProblem`). */
+export interface DeleteProblem {
+  taskId: string;
+  taskName: string;
+  path: string;
+  /** access = needs admin, inUse = a program has a file open. */
+  reason: "access" | "inUse" | "other";
+  /** Windows's own message. */
+  message: string;
+  at: string;
 }
 
 export interface Notice {

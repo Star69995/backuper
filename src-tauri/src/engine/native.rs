@@ -776,21 +776,34 @@ pub fn clear_readonly(dir: &Path) -> u64 {
     changed
 }
 
-/// Deletes a folder tree the app wrote (a backup folder or part of one). Files and folders copied
-/// from a read-only source item used to keep the attribute, and a read-only item makes the delete
-/// fail with "access denied" (always on FAT32 / exFAT drives), so on a failure the attribute is
-/// cleared throughout and the delete tried again.
+/// Deletes a folder tree the app wrote (a backup folder or part of one). When Windows refuses
+/// ("access denied"), two more tries: with the read-only attribute cleared throughout (items copied
+/// from a read-only source used to keep it; FAT32 / exFAT then always refuse), then with full
+/// control granted to us on the tree (`acl::grant_own_tree`: works on items we own, the usual case;
+/// the destination's own permissions may be what blocks). What still fails is the caller's to
+/// report (`core::Core::report_delete_problem`): it may need admin, or a program has a file open.
 pub fn remove_tree(path: &Path) -> io::Result<()> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(e),
-        Err(first) => {
-            if clear_readonly(path) == 0 {
-                return Err(first);
-            }
-            fs::remove_dir_all(path)
+    let denied = |e: &io::Error| e.raw_os_error() == Some(5);
+    let first = match fs::remove_dir_all(path) {
+        Ok(()) => return Ok(()),
+        Err(e) if !denied(&e) => return Err(e),
+        Err(e) => e,
+    };
+    let second = if clear_readonly(path) > 0 {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if !denied(&e) => return Err(e),
+            Err(e) => e,
         }
+    } else {
+        first
+    };
+    if crate::acl::grant_own_tree(path).is_err() {
+        return Err(second);
     }
+    // The reset dropped every item's own entries, read-only ones may have been unreachable before.
+    clear_readonly(path);
+    fs::remove_dir_all(path)
 }
 
 const ATTRIBUTE_NAMES: [(u32, &str); 15] = [
