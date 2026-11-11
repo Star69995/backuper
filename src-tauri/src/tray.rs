@@ -2,6 +2,7 @@
 
 use crate::core::Core;
 use crate::model::RunStatus;
+use crate::updater::Updates;
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -12,16 +13,44 @@ const TRAY_ID: &str = "main";
 
 pub struct TrayItems {
     pause: CheckMenuItem<Wry>,
-    /// The tray's last icon state (true = error badge), so the icon is only replaced when it changes.
-    badged: std::sync::atomic::AtomicBool,
+    /// The badge the tray icon shows now (a `Badge` as u8), so the icon is only replaced when it changes.
+    badged: std::sync::atomic::AtomicU8,
 }
 
-/// The app icon with a red dot and a white "!" in its bottom-right corner.
-fn badge_icon(base: &Image<'_>) -> Image<'static> {
+/// The dot on the tray icon, worst first: it shows the most important thing that needs a look.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Badge {
+    None = 0,
+    /// Green dot: a new version is available or downloaded.
+    Update = 1,
+    /// Orange "!": a task's last run finished with warnings.
+    Warning = 2,
+    /// Red "!": a task's last run failed.
+    Error = 3,
+}
+
+impl Badge {
+    fn from_u8(n: u8) -> Badge {
+        match n {
+            1 => Badge::Update,
+            2 => Badge::Warning,
+            3 => Badge::Error,
+            _ => Badge::None,
+        }
+    }
+}
+
+/// The app icon with a colored dot (and a white "!" for errors and warnings) in its bottom-right corner.
+fn badge_icon(base: &Image<'_>, badge: Badge) -> Image<'static> {
+    let color = match badge {
+        Badge::Error => [220, 38, 38],
+        Badge::Warning => [234, 138, 0],
+        _ => [22, 163, 74],
+    };
     let (w, h) = (base.width() as i32, base.height() as i32);
     let mut px = base.rgba().to_vec();
     let size = w.min(h) as f32;
-    let r = size * 0.30;
+    let r = size * 0.26;
     let (cx, cy) = (w as f32 - r - size * 0.02, h as f32 - r - size * 0.02);
     let mut put = |x: i32, y: i32, c: [u8; 3], a: f32| {
         if x < 0 || y < 0 || x >= w || y >= h || a <= 0.0 {
@@ -41,19 +70,19 @@ fn badge_icon(base: &Image<'_>) -> Image<'static> {
             let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
             // White ring, then red fill (1px soft edge).
             put(x, y, [255, 255, 255], (r + 1.0 - d).clamp(0.0, 1.0));
-            put(x, y, [220, 38, 38], (r - size * 0.05 + 1.0 - d).clamp(0.0, 1.0));
+            put(x, y, color, (r - size * 0.05 + 1.0 - d).clamp(0.0, 1.0));
         }
     }
     // The "!": a bar and a dot.
     let half = (size * 0.045).max(0.8);
-    let bar = (cy - r * 0.55, cy + r * 0.15);
-    let dot = (cy + r * 0.38, half * 1.1);
+    let bar = (cy - r * 0.60, cy + r * 0.0);
+    let dot = (cy + r * 0.45, half * 1.0);
     for y in 0..h {
         for x in 0..w {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
             let in_bar = (fx - cx).abs() <= half && fy >= bar.0 && fy <= bar.1;
             let in_dot = ((fx - cx).powi(2) + (fy - dot.0).powi(2)).sqrt() <= dot.1;
-            if in_bar || in_dot {
+            if badge != Badge::Update && (in_bar || in_dot) {
                 put(x, y, [255, 255, 255], 1.0);
             }
         }
@@ -80,7 +109,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&open, &pause, &PredefinedMenuItem::separator(app)?, &quit])?;
     app.manage(TrayItems {
         pause,
-        badged: std::sync::atomic::AtomicBool::new(false),
+        badged: std::sync::atomic::AtomicU8::new(0),
     });
 
     TrayIconBuilder::with_id(TRAY_ID)
@@ -132,33 +161,60 @@ pub fn refresh(app: &AppHandle) {
     ) else {
         return;
     };
-    let (paused, failed) = {
+    let (paused, failed, warned) = {
         let s = core.store.lock().unwrap();
-        // A task whose latest run failed; the next successful run clears it.
-        let failed = s
-            .tasks
-            .iter()
-            .filter(|t| t.enabled)
-            .filter_map(|t| s.states.get(&t.id))
-            .filter(|st| st.last_status == Some(RunStatus::Failed))
-            .count();
-        (s.settings.scheduler_paused, failed)
+        // The latest run of each enabled task; the next run replaces it.
+        let count = |status| {
+            s.tasks
+                .iter()
+                .filter(|t| t.enabled)
+                .filter_map(|t| s.states.get(&t.id))
+                .filter(|st| st.last_status == Some(status))
+                .count()
+        };
+        (s.settings.scheduler_paused, count(RunStatus::Failed), count(RunStatus::Warning))
     };
+    let update = app
+        .try_state::<Arc<Updates>>()
+        .map(|u| u.status())
+        .filter(|u| u.state == "available" || u.state == "ready")
+        .and_then(|u| u.version.or(Some(String::new())));
     let running = core.current.lock().unwrap().as_ref().map(|p| p.task_name.clone());
-    let tip = match (running, paused) {
+    let mut tip = match (running, paused) {
         (Some(name), _) => format!("Backuper - מגבה: {name}"),
         (None, true) => "Backuper - התזמון מושהה".to_string(),
         (None, false) => "Backuper - פעיל".to_string(),
     };
-    let tip = match failed {
-        0 => tip,
-        1 => format!("{tip}\nשגיאה בגיבוי אחד"),
-        n => format!("{tip}\nשגיאה ב-{n} גיבויים"),
+    match failed {
+        0 => {}
+        1 => tip.push_str("\nשגיאה בגיבוי אחד"),
+        n => tip.push_str(&format!("\nשגיאה ב-{n} גיבויים")),
+    }
+    match warned {
+        0 => {}
+        1 => tip.push_str("\nאזהרה בגיבוי אחד"),
+        n => tip.push_str(&format!("\nאזהרה ב-{n} גיבויים")),
+    }
+    if let Some(v) = &update {
+        if v.is_empty() {
+            tip.push_str("\nיש גרסה חדשה");
+        } else {
+            tip.push_str(&format!("\nיש גרסה חדשה: {v}"));
+        }
+    }
+    let badge = if failed > 0 {
+        Badge::Error
+    } else if warned > 0 {
+        Badge::Warning
+    } else if update.is_some() {
+        Badge::Update
+    } else {
+        Badge::None
     };
-    let was = items.badged.swap(failed > 0, std::sync::atomic::Ordering::Relaxed);
-    if was != (failed > 0) {
+    let was = Badge::from_u8(items.badged.swap(badge as u8, std::sync::atomic::Ordering::Relaxed));
+    if was != badge {
         if let Some(base) = app.default_window_icon() {
-            let _ = tray.set_icon(Some(if failed > 0 { badge_icon(base) } else { base.clone() }));
+            let _ = tray.set_icon(Some(if badge == Badge::None { base.clone() } else { badge_icon(base, badge) }));
         }
     }
     let _ = tray.set_tooltip(Some(tip));
