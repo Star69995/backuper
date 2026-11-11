@@ -17,8 +17,6 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// A failed check (offline, GitHub down) is retried sooner.
 const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 const TICK: Duration = Duration::from_secs(60);
-/// No keyboard/mouse input for this long = the user is away, so "auto" may restart the app.
-const AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// The marker's content when the window should stay in the tray after the update.
 const MARKER_HIDDEN: &str = "hidden";
@@ -107,7 +105,7 @@ impl Updates {
 
     /// Installs the downloaded version on its own when that bothers no one: after "update now"
     /// had to wait for the backups, or in "auto" mode while the app isn't in use - the window is
-    /// in the tray or minimized, or nobody touched the computer for `AWAY_AFTER`. Never with
+    /// in the tray or minimized, or nobody touched the computer for `settings.update_idle_minutes`. Never with
     /// unsaved changes in the window (`install_if_idle`).
     fn install_if_due(&self) {
         let window = self.app.get_webview_window("main");
@@ -119,7 +117,7 @@ impl Updates {
             if hidden || minimized {
                 // A minimized window comes back in the tray, so the restart doesn't pop it up.
                 self.install_if_idle(true, false);
-            } else if user_away() {
+            } else if user_away(self.core.store.lock().unwrap().settings.update_idle_minutes) {
                 self.install_if_idle(false, false);
             }
         }
@@ -348,9 +346,12 @@ pub fn after_update(app: &AppHandle, core: &Core) -> Option<bool> {
     Some(content.trim() == MARKER_HIDDEN)
 }
 
-/// Nobody has used the keyboard or mouse for `AWAY_AFTER` (any app, not just ours).
+/// Nobody has used the keyboard or mouse (in any app) for `minutes`. 0 = never counts as away.
 #[cfg(windows)]
-fn user_away() -> bool {
+fn user_away(minutes: u32) -> bool {
+    if minutes == 0 {
+        return false;
+    }
     #[repr(C)]
     struct LastInputInfo {
         size: u32,
@@ -370,11 +371,11 @@ fn user_away() -> bool {
         if GetLastInputInfo(&mut info) == 0 {
             return false;
         }
-        u64::from(GetTickCount().wrapping_sub(info.time)) >= AWAY_AFTER.as_millis() as u64
+        u64::from(GetTickCount().wrapping_sub(info.time)) >= u64::from(minutes) * 60_000
     }
 }
 
 #[cfg(not(windows))]
-fn user_away() -> bool {
+fn user_away(_minutes: u32) -> bool {
     false
 }

@@ -413,8 +413,11 @@ pub struct Settings {
     pub global_filters: Vec<FilterRule>,
     /// Folder that always holds a copy of the task list (e.g. on the backup drive). Empty = off.
     pub task_list_copy_dir: String,
-    /// "auto" (download, install when idle and in the tray) | "notify" | "off".
+    /// "auto" (download, install when the app isn't in use) | "notify" | "off".
     pub update_mode: String,
+    /// "auto" also installs while the window is open once nobody has touched the computer for
+    /// this many minutes. 0 = only while the window is closed to the tray or minimized.
+    pub update_idle_minutes: u32,
     /// Before a full copy, walk the whole tree once just to get exact progress totals. Off: the
     /// copy starts at once and a scan of the source beside it finds the totals (see `backup::full_totals`).
     pub exact_progress: bool,
@@ -447,6 +450,7 @@ impl Default for Settings {
             global_filters: Vec::new(),
             task_list_copy_dir: String::new(),
             update_mode: "auto".into(),
+            update_idle_minutes: 2,
             exact_progress: false,
             background_totals: true,
         }

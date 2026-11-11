@@ -205,6 +205,8 @@ export interface Settings {
   globalFilters: FilterRule[];
   /** auto = download and install by itself (from the tray, between backups); notify = only say so. */
   updateMode: "auto" | "notify" | "off";
+  /** "auto" also installs with the window open after this many idle minutes (0 = only when closed/minimized). */
+  updateIdleMinutes: number;
   /** Walk the whole tree once before a full copy, just for an exact percentage (slow on big drives). */
   exactProgress: boolean;
   backgroundTotals: boolean;

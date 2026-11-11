@@ -6,8 +6,12 @@ import { useFeedback } from "./feedback";
 import { Button, Modal } from "./ui";
 
 /** When the "auto" mode installs a found version by itself (`Updates::install_if_due`). */
-export function autoInstallWhen(): string {
-  return "הגרסה החדשה תותקן מעצמה כשהתוכנה לא בשימוש - החלון סגור או ממוזער, או שלא נגעו במחשב 10 דקות - ורק כשאין גיבוי שרץ או ממתין ואין שינויים שלא נשמרו.";
+export function autoInstallWhen(idleMinutes: number): string {
+  const when =
+    idleMinutes > 0
+      ? `החלון סגור או ממוזער, או שלא נגעו במחשב ${idleMinutes === 1 ? "דקה" : `${idleMinutes} דקות`}`
+      : "החלון סגור או ממוזער";
+  return `הגרסה החדשה תותקן מעצמה כשהתוכנה לא בשימוש - ${when} - ורק כשאין גיבוי שרץ או ממתין ואין שינויים שלא נשמרו.`;
 }
 
 /**
@@ -102,7 +106,7 @@ export default function UpdateDialog({ snap, onClose }: { snap: Snapshot; onClos
         {!u.installWaiting && (
           <p className="text-[13px] text-muted">
             {mode === "auto"
-              ? autoInstallWhen()
+              ? autoInstallWhen(snap.settings.updateIdleMinutes)
               : "אם לא תעדכנו עכשיו, אפשר לעדכן בכל זמן מהכפתור בתחתית התפריט הצדדי או מ\"הגדרות\" - \"עדכוני תוכנה\"."}
           </p>
         )}

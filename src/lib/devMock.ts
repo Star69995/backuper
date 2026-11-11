@@ -269,6 +269,7 @@ export function installDevMock() {
     taskListCopyDir: "",
     globalFilters: [{ kind: "pattern", value: "~$*" }],
     updateMode: "auto",
+    updateIdleMinutes: 2,
     exactProgress: false,
     backgroundTotals: true,
   };
