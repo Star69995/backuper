@@ -514,6 +514,12 @@ export function installDevMock() {
         return (a.paths as string[]).map((p) =>
           /^e:/i.test(p) ? { free: 412_000_000_000, total: 1_000_000_000_000 } : /^f:/i.test(p) ? null : { free: 18_500_000_000, total: 500_000_000_000 },
         );
+      case "full_space":
+        // The next full backup weighs ~20 GB; a task with delete-before frees 12 GB of it first.
+        return (a.taskIds as string[]).map((id) => ({
+          needed: 20_000_000_000,
+          freed: tasks.find((t) => t.id === id)?.deleteBefore ? 12_000_000_000 : 0,
+        }));
       case "folder_size":
         return String(a.path).endsWith("מלא") ? 12_345_678_901 : 48_200_000;
       case "read_log":

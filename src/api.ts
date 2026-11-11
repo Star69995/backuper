@@ -7,6 +7,7 @@ import type {
   BackupMode,
   CobianLists,
   DiskSpace,
+  FullSpace,
   ImportPreview,
   ImportSplit,
   Progress,
@@ -46,6 +47,7 @@ export const api = {
   folderSize: (path: string) => invoke<number>("folder_size", { path }),
   /** Free space on the drive of each path (null = drive not connected), same order. */
   diskSpace: (paths: string[]) => invoke<(DiskSpace | null)[]>("disk_space", { paths }),
+  fullSpace: (taskIds: string[]) => invoke<(FullSpace | null)[]>("full_space", { taskIds }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   previewSchedule: (schedule: Schedule) => invoke<string[]>("preview_schedule", { schedule }),
   /** Validates a regex filter, explains it, and tries it on `sample` (a file or folder name). */

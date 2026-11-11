@@ -138,6 +138,14 @@ export interface DiskSpace {
   total: number;
 }
 
+/** What a task's next full backup needs on the destination (null = no full backup expected). */
+export interface FullSpace {
+  /** About the size of the previous full backup(s). */
+  needed: number;
+  /** What delete-before removes first (0 without it); counts as free space. */
+  freed: number;
+}
+
 export interface Progress {
   runId: string;
   taskId: string;

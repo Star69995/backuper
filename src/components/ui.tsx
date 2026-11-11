@@ -391,8 +391,14 @@ export function Modal({
   /** The scrolling body, for content that tracks its own scroll position. */
   bodyRef?: Ref<HTMLDivElement>;
 }) {
+  const dialog = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // A dialog opened over this one (portals mount last on top) takes Escape; this one stays open.
+      const open = document.querySelectorAll('[role="dialog"]');
+      if (open[open.length - 1] === dialog.current) onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -403,6 +409,7 @@ export function Modal({
       onMouseDown={(e) => dismissable && e.target === e.currentTarget && onClose()}
     >
       <div
+        ref={dialog}
         role="dialog"
         aria-modal
         className={cx(

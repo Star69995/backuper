@@ -157,6 +157,7 @@ pub fn run() {
             commands::delete_backup,
             commands::folder_size,
             commands::disk_space,
+            commands::full_space,
             commands::open_path,
             commands::preview_schedule,
             commands::check_regex,

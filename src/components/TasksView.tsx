@@ -53,9 +53,9 @@ import {
   type TaskKind,
 } from "../lib/format";
 import { fitColumns, useColumnWidths } from "../lib/useColumnWidths";
-import { useDiskSpace } from "../lib/useDiskSpace";
+import { useDiskSpace, useFullSpace } from "../lib/useDiskSpace";
 import { groupTasks, moveInOrder, SORT_LABEL, type SortKey, sortTasks, useCustomOrder, useTaskSort } from "../lib/sortTasks";
-import type { BackupMode, DiskSpace, LastBackup, RunRecord, RunStatus, Snapshot, Task } from "../types";
+import type { BackupMode, DiskSpace, FullSpace, LastBackup, RunRecord, RunStatus, Snapshot, Task } from "../types";
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
@@ -287,6 +287,13 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   const space = useDiskSpace(
     snap.tasks.map((t) => t.destination).filter(Boolean),
     `${snap.current?.runId ?? ""}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
+  );
+  // What each task's next full backup needs; also re-read when a setting that decides it changes.
+  const fullSpace = useFullSpace(
+    snap.tasks.filter((t) => t.destination).map((t) => t.id),
+    `${snap.current?.runId ?? ""}|${snap.tasks
+      .map((t) => [t.id, t.destination, t.mode, !!t.fullSchedule, t.keepMode, t.keepCount, t.keepDays, t.deleteBefore, t.reusePrevious, t.deleteEmptyIncrementals, t.sources.length].join(":"))
+      .join()}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
   );
 
   const usedGroups = groupNames(snap.tasks);
@@ -1084,7 +1091,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                             )}
                             <div className="mt-1 flex flex-col text-xs text-muted">
                               {st?.lastBackup && <BackupSize last={st.lastBackup} onOpen={() => setBackupsOf(t)} />}
-                              <FreeSpace space={space[t.destination]} last={st?.lastBackup} />
+                              <FreeSpace space={space[t.destination]} need={fullSpace[t.id]} deleteBefore={t.deleteBefore} />
                             </div>
                           </td>
                           <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
@@ -1296,17 +1303,30 @@ function BackupSize({ last, onOpen }: { last: LastBackup; onOpen: () => void }) 
   );
 }
 
-/** Free space on the destination drive; warns when the last full backup wouldn't fit again. */
-function FreeSpace({ space, last }: { space: DiskSpace | null | undefined; last: LastBackup | null | undefined }) {
+/**
+ * Free space on the destination drive; warns when the next full backup (about the size of the
+ * previous one) wouldn't fit, counting what delete-before frees first.
+ */
+function FreeSpace({
+  space,
+  need,
+  deleteBefore,
+}: {
+  space: DiskSpace | null | undefined;
+  need: FullSpace | null | undefined;
+  deleteBefore: boolean;
+}) {
   if (space === undefined) return null;
   if (space === null) return <span title="כונן היעד לא מחובר כרגע, או שאי אפשר לקרוא אותו">היעד לא מחובר</span>;
-  const low = last?.mode === "full" && space.free < last.bytes;
+  const low = !!need && space.free + need.freed < need.needed;
   return (
     <span
       className={cx("flex items-center gap-1", low && "text-warn")}
       title={
         low
-          ? `בכונן היעד פנוי פחות מגודל הגיבוי המלא האחרון (${fmtBytes(last.bytes)}) - ייתכן שהגיבוי המלא הבא לא ייכנס. כדאי לפנות מקום או לשמור פחות גיבויים`
+          ? `הגיבוי המלא הבא צפוי לשקול כגודל הקודם (${fmtBytes(need.needed)}), ובכונן היעד פנוי ${fmtBytes(space.free)}` +
+            (deleteBefore && need.freed > 0 ? ` (וגם אחרי מחיקת הגיבויים הישנים, ${fmtBytes(need.freed)}, זה לא מספיק)` : "") +
+            " - ייתכן שהוא לא ייכנס. כדאי לפנות מקום או לשמור פחות גיבויים"
           : `מקום פנוי בכונן היעד, מתוך ${fmtBytes(space.total)}`
       }
     >
