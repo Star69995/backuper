@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Task, TaskState } from "../types";
 import { nextRunOf } from "./format";
 
-export type SortKey = "order" | "name" | "nextRun" | "source" | "destination";
+export type SortKey = "custom" | "order" | "name" | "nextRun" | "source" | "destination";
 export interface SortState {
   key: SortKey;
   desc: boolean;
@@ -10,6 +10,7 @@ export interface SortState {
 
 export const SORT_LABEL: Record<SortKey, string> = {
   order: "סדר יצירה",
+  custom: "סדר מותאם אישית",
   name: "שם",
   nextRun: "הריצה הבאה",
   source: "תיקיית מקור",
@@ -29,8 +30,39 @@ const nextAt = (t: Task, states: Record<string, TaskState>) => {
   return n ? new Date(n.at).getTime() : null;
 };
 
-export function sortTasks(tasks: Task[], { key, desc }: SortState, states: Record<string, TaskState>): Task[] {
+/**
+ * Tasks in the user's own order (ids, remembered per machine). Tasks missing from it (new ones)
+ * follow in creation order.
+ */
+export function applyOrder(tasks: Task[], order: string[]): Task[] {
+  const at = new Map(order.map((id, i) => [id, i]));
+  const end = order.length;
+  return tasks
+    .map((t, i) => ({ t, k: at.get(t.id) ?? end + i }))
+    .sort((a, b) => a.k - b.k)
+    .map((x) => x.t);
+}
+
+/** The custom order after moving one task before / after another (positions within the whole list). */
+export function moveInOrder(all: Task[], order: string[], id: string, target: string, after: boolean): string[] {
+  const ids = applyOrder(all, order)
+    .map((t) => t.id)
+    .filter((x) => x !== id);
+  const i = ids.indexOf(target);
+  if (i < 0) return order;
+  ids.splice(after ? i + 1 : i, 0, id);
+  return ids;
+}
+
+export function sortTasks(
+  tasks: Task[],
+  { key, desc }: SortState,
+  states: Record<string, TaskState>,
+  order: string[] = [],
+): Task[] {
   const dir = desc ? -1 : 1;
+  // The custom order has no direction: it is exactly what the user arranged.
+  if (key === "custom") return applyOrder(tasks, order);
   if (key === "order") return desc ? [...tasks].reverse() : tasks;
   if (key === "nextRun") {
     const at = new Map(tasks.map((t) => [t.id, nextAt(t, states)]));
@@ -89,4 +121,27 @@ export function useTaskSort() {
     }
   }, [sort]);
   return [sort, setSort] as const;
+}
+
+const ORDER_KEY = "backuper.taskOrder";
+
+/** The custom task order (task ids), remembered per machine. */
+export function useCustomOrder() {
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(ORDER_KEY) ?? "null");
+      if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string");
+    } catch {
+      /* ignore */
+    }
+    return [];
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(order));
+    } catch {
+      /* ignore */
+    }
+  }, [order]);
+  return [order, setOrder] as const;
 }
