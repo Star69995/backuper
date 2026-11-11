@@ -121,7 +121,7 @@ pub enum KeepMode {
 #[serde(rename_all = "camelCase", default)]
 pub struct Source {
     pub path: String,
-    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03-00 מלא").
+    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03h00 מלא").
     pub folder_name: String,
 }
 

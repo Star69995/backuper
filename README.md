@@ -12,9 +12,9 @@ Backups are **plain files and folders**: no private format, no compression, no e
 A task has **one or more source folders**, one destination folder and a schedule. All sources of a task run together and their backup folders share the same date. Each source has its own chain of dated folders in the destination, named after the source folder (editable):
 
 ```
-E:\Backups\Documents 2026-10-01 03-00 מלא            <- full: identical to the source
-E:\Backups\Documents 2026-10-02 03-00 אינקרמנטלי     <- only files new/changed since the previous backup
-E:\Backups\Pictures  2026-10-01 03-00 מלא
+E:\Backups\Documents 2026-10-01 03h00 מלא            <- full: identical to the source
+E:\Backups\Documents 2026-10-02 03h00 אינקרמנטלי     <- only files new/changed since the previous backup
+E:\Backups\Pictures  2026-10-01 03h00 מלא
 ```
 
 - **Full**: a new dated folder identical to the source (files deleted from the source don't show up).
