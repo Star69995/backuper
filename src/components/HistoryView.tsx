@@ -1,4 +1,4 @@
-import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
+import { Check, CircleAlert, Copy, EyeOff, File, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
@@ -166,7 +166,8 @@ function isSkipped(task: Task, path: string) {
 /** Skipping a failed path in the next runs: the task, whether a path is already skipped, and the action. */
 interface Skipper {
   isSkipped: (path: string) => boolean;
-  skip: (path: string, source: string) => void;
+  /** `all` = every failed path of that source, to show how many errors each level would cover. */
+  skip: (path: string, source: string, all: string[]) => void;
 }
 
 /** One kind of copy failure: what happened, why, what to do, and the affected files. */
@@ -174,11 +175,13 @@ function ErrorGroup({
   kind,
   errors,
   source,
+  allPaths,
   skipper,
 }: {
   kind: ErrorKind;
   errors: FileError[];
   source: string;
+  allPaths: string[];
   skipper: Skipper | null;
 }) {
   const canSkip = skipper !== null && !NOT_SKIPPABLE.has(kind.id);
@@ -218,7 +221,7 @@ function ErrorGroup({
                   ) : (
                     <button
                       type="button"
-                      onClick={() => skipper.skip(e.path, source)}
+                      onClick={() => skipper.skip(e.path, source, allPaths)}
                       className="flex shrink-0 items-center gap-1 rounded-full border border-line px-2 py-0.5 hover:bg-hover"
                     >
                       <EyeOff size={12} /> לדלג בפעמים הבאות
@@ -238,13 +241,75 @@ function ErrorGroup({
   );
 }
 
+/** The errors of one source as plain text (grouped by kind like on screen), for pasting into a message or a note. */
+function errorsText(run: RunRecord, src: SourceRun) {
+  const lines = [
+    `${run.taskName} - ${fmtDateTime(run.startedAt)}`,
+    `${src.folderName}: ${src.source}`,
+    `${src.message}`,
+  ];
+  for (const g of groupFileErrors(src.errors)) {
+    lines.push("", `${g.kind.title} (${g.errors.length})`, `למה: ${g.kind.why}`, `מה לעשות: ${g.kind.fix}`);
+    for (const e of g.errors) {
+      const detail = [e.code !== null ? `שגיאה ${e.code}` : "", e.message].filter(Boolean).join(" - ");
+      lines.push(detail ? `${e.path}\t${detail}` : e.path);
+    }
+  }
+  if (src.filesFailed > src.errors.length) {
+    lines.push("", `(מוצגים ${src.errors.length} מתוך ${src.filesFailed} - הרשימה המלאה ביומן המפורט)`);
+  }
+  return lines.join("\r\n");
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Older WebView / no permission: the classic way.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (!ok) throw new Error("copy failed");
+  }
+}
+
+function CopyErrorsButton({ text }: { text: () => string }) {
+  const { toast } = useFeedback();
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    if (!done) return;
+    const t = setTimeout(() => setDone(false), 2000);
+    return () => clearTimeout(t);
+  }, [done]);
+  return (
+    <Button
+      size="sm"
+      icon={done ? <Check size={14} /> : <Copy size={14} />}
+      onClick={() =>
+        copyText(text())
+          .then(() => setDone(true))
+          .catch(() => toast({ tone: "bad", title: "ההעתקה לא הצליחה" }))
+      }
+    >
+      {done ? "הועתק" : "העתק את השגיאות"}
+    </Button>
+  );
+}
+
 function SourceCard({
+  run,
   src,
   index,
   onShowLog,
   skipper,
   resumable,
 }: {
+  run: RunRecord;
   src: SourceRun;
   index: number;
   onShowLog: (i: number) => void;
@@ -289,7 +354,14 @@ function SourceCard({
         </div>
       )}
       {groupFileErrors(src.errors).map((g) => (
-        <ErrorGroup key={g.kind.id} kind={g.kind} errors={g.errors} source={src.source} skipper={skipper} />
+        <ErrorGroup
+          key={g.kind.id}
+          kind={g.kind}
+          errors={g.errors}
+          source={src.source}
+          allPaths={src.errors.map((e) => e.path).filter(Boolean)}
+          skipper={skipper}
+        />
       ))}
       {src.filesFailed > src.errors.length && src.errors.length > 0 && (
         <p className="text-xs text-muted">
@@ -311,6 +383,7 @@ function SourceCard({
             יומן מפורט
           </Button>
         )}
+        {src.errors.length > 0 && <CopyErrorsButton text={() => errorsText(run, src)} />}
       </div>
     </section>
   );
@@ -318,7 +391,7 @@ function SourceCard({
 
 /** Details of one run (per source: result, errors, full log). Also opened from the tasks table. */
 export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
-  const { toast, choose } = useFeedback();
+  const { toast } = useFeedback();
   // The run's task as it is now (null = deleted since), for "skip this next time".
   const [task, setTask] = useState<Task | null>(null);
   // This run is the task's last one, it was paused, and its folder is still there: it can be continued from here.
@@ -340,45 +413,19 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
   }, [r.taskId, r.status, r.finishedAt]);
   const { resume, restart } = useResumeTask();
 
-  const skip = async (path: string, source: string) => {
-    const dir = path.endsWith("\\");
-    const clean = path.replace(/\\+$/, "");
-    const parent = dir ? clean : clean.slice(0, clean.lastIndexOf("\\"));
-    // Skipping the drive itself or the whole source folder would leave nothing to back up.
-    const folderOk = /\\./.test(parent) && !/^[a-z]:$/i.test(parent) && norm(parent) !== norm(source);
-    const options: { value: "file" | "folder"; label: string }[] = [];
-    if (!dir) options.push({ value: "file", label: "דלג על הקובץ" });
-    if (folderOk) options.push({ value: "folder", label: dir ? "דלג על התיקייה" : "דלג על כל התיקייה שלו" });
-    if (!options.length) return;
-    const answer = await choose({
-      title: "לדלג על זה בגיבויים הבאים?",
-      message: (
-        <span className="flex flex-col gap-2">
-          <span>
-            {dir ? "התיקייה" : "הקובץ"} לא {dir ? "תגובה" : "יגובה"} יותר במשימה "<bdi>{r.taskName}</bdi>", והשגיאה לא תחזור:
-          </span>
-          <PathText path={clean} className="block font-mono text-xs break-all" />
-          {folderOk && !dir && (
-            <>
-              <span className="text-muted">אפשר לדלג רק על הקובץ, או על כל התיקייה שלו:</span>
-              <PathText path={parent} className="block font-mono text-xs break-all" />
-            </>
-          )}
-          <span className="text-muted">אפשר לבטל את זה בכל זמן בהגדרות המשימה, בחלק "סינון".</span>
-        </span>
-      ),
-      options,
-    });
-    if (!answer) return;
+  // The path waiting for "skip this next time" (the dialog picks the file or one of the folders above it).
+  const [skipAsk, setSkipAsk] = useState<{ path: string; source: string; all: string[] } | null>(null);
+
+  const skip = async (rule: FilterRule) => {
+    setSkipAsk(null);
     try {
       const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
       if (!now) throw new Error("המשימה נמחקה");
-      const rule: FilterRule = answer === "file" ? { kind: "file", value: clean } : { kind: "folder", value: parent };
       const [saved] = await api.saveTasks([{ ...now, filters: [...now.filters, rule] }]);
       setTask(saved);
       toast({
         tone: "ok",
-        title: answer === "file" ? "הקובץ ידולג בגיבויים הבאים" : "התיקייה תדולג בגיבויים הבאים",
+        title: rule.kind === "file" ? "הקובץ ידולג בגיבויים הבאים" : "התיקייה תדולג בגיבויים הבאים",
         action: {
           label: "ביטול",
           onClick: () =>
@@ -392,7 +439,10 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
       toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
     }
   };
-  const skipper: Skipper | null = task && { isSkipped: (p) => isSkipped(task, p), skip };
+  const askSkip = (path: string, source: string, all: string[]) => {
+    if (skipLevels(path, source).length) setSkipAsk({ path, source, all });
+  };
+  const skipper: Skipper | null = task && { isSkipped: (p) => isSkipped(task, p), skip: askSkip };
 
   // A failed run (e.g. destination full) can be continued while it is the task's latest run and its half-done folder is
   // still there (the continue happens in that folder; after a newer run it no longer belongs to this record).
@@ -512,7 +562,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
           {stat("סיום", fmtDateTime(r.finishedAt))}
         </div>
         {r.sources.map((src, i) => (
-          <SourceCard key={i} src={src} index={i} onShowLog={showLog} skipper={skipper} resumable={resumable} />
+          <SourceCard key={i} run={r} src={src} index={i} onShowLog={showLog} skipper={skipper} resumable={resumable} />
         ))}
         {log !== null && (
           <div className="flex flex-col gap-2">
@@ -536,6 +586,162 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
             </pre>
           </div>
         )}
+      </div>
+      {skipAsk && (
+        <SkipDialog
+          taskName={r.taskName}
+          {...skipAsk}
+          onSkip={skip}
+          onClose={() => setSkipAsk(null)}
+        />
+      )}
+    </Modal>
+  );
+}
+
+interface SkipLevel {
+  rule: FilterRule;
+  /** The full path the rule leaves out. */
+  path: string;
+}
+
+/**
+ * What "skip this next time" can leave out for a failed path: the file itself, then each folder above it up to (not
+ * including) the task's source folder - skipping the source or the drive would leave nothing to back up. A path outside
+ * the source (shouldn't happen) gets only its own folder, as before.
+ */
+function skipLevels(path: string, source: string): SkipLevel[] {
+  const dir = path.endsWith("\\");
+  const clean = path.replace(/\\+$/, "");
+  const levels: SkipLevel[] = [];
+  if (!dir) levels.push({ rule: { kind: "file", value: clean }, path: clean });
+  const src = norm(source);
+  const under = (p: string) => norm(p).startsWith(src + "\\");
+  const ok = (p: string) => /\\./.test(p) && !/^[a-z]:$/i.test(p) && norm(p) !== src;
+  let folder = dir ? clean : clean.slice(0, clean.lastIndexOf("\\"));
+  if (!under(clean)) {
+    if (folder && ok(folder)) levels.push({ rule: { kind: "folder", value: folder }, path: folder });
+    return levels;
+  }
+  while (folder && under(folder) && ok(folder)) {
+    levels.push({ rule: { kind: "folder", value: folder }, path: folder });
+    folder = folder.slice(0, folder.lastIndexOf("\\"));
+  }
+  return levels;
+}
+
+/** Picks what to skip in the next runs: the failed file, or one of the folders above it, with what each one covers. */
+function SkipDialog({
+  taskName,
+  path,
+  source,
+  all,
+  onSkip,
+  onClose,
+}: {
+  taskName: string;
+  path: string;
+  source: string;
+  all: string[];
+  onSkip: (rule: FilterRule) => void;
+  onClose: () => void;
+}) {
+  const levels = useMemo(() => skipLevels(path, source), [path, source]);
+  const [pick, setPick] = useState(0);
+  // How many of this source's failed paths each level would leave out (a folder covers everything under it).
+  const covers = (l: SkipLevel) => {
+    if (l.rule.kind === "file") return 1;
+    const p = norm(l.path);
+    return all.filter((a) => norm(a) === p || norm(a).startsWith(p + "\\")).length;
+  };
+  const chosen = levels[pick];
+  const firstFolder = levels.findIndex((l) => l.rule.kind === "folder");
+  if (!chosen) return null;
+  const sourceName = (p: string) => {
+    // Show each folder relative to the source, so the levels are easy to tell apart; the full path is below.
+    if (!norm(p).startsWith(norm(source) + "\\")) return p;
+    return p.slice(source.replace(/\\+$/, "").length).replace(/^\\+/, "") || p;
+  };
+  return (
+    <Modal
+      size="md"
+      title="לדלג על זה בגיבויים הבאים?"
+      subtitle={
+        <>
+          במשימה "<bdi>{taskName}</bdi>"
+        </>
+      }
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="primary" icon={<EyeOff size={15} />} onClick={() => onSkip(chosen.rule)}>
+            {chosen.rule.kind === "file" ? "דלג על הקובץ" : "דלג על התיקייה"}
+          </Button>
+          <Button variant="ghost" onClick={onClose}>
+            ביטול
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 text-sm leading-relaxed">
+        <p>
+          {levels.length > 1
+            ? "בחרו על מה לדלג: הקובץ עצמו, או תיקייה שמעליו (התיקייה וכל מה שבתוכה לא יגובו יותר):"
+            : "זה לא יגובה יותר, והשגיאה לא תחזור:"}
+        </p>
+        <div role="radiogroup" className="flex flex-col gap-1.5">
+          {levels.map((l, i) => {
+            const n = covers(l);
+            const on = i === pick;
+            return (
+              <button
+                key={l.path}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                onClick={() => setPick(i)}
+                className={cx(
+                  "flex min-w-0 items-start gap-2.5 rounded-lg border px-3 py-2 text-start",
+                  on ? "border-accent bg-accent-soft" : "border-line hover:bg-hover",
+                )}
+              >
+                <span
+                  className={cx(
+                    "mt-1 flex size-4 shrink-0 items-center justify-center rounded-full border",
+                    on ? "border-accent" : "border-line",
+                  )}
+                >
+                  {on && <span className="size-2 rounded-full bg-accent" />}
+                </span>
+                {l.rule.kind === "file" ? (
+                  <File size={16} className="mt-0.5 shrink-0 text-muted" />
+                ) : (
+                  <Folder size={16} className="mt-0.5 shrink-0 text-accent" />
+                )}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="font-medium">
+                    {l.rule.kind === "file"
+                      ? "רק הקובץ"
+                      : i === firstFolder
+                        ? path.endsWith("\\")
+                          ? "התיקייה עצמה"
+                          : "התיקייה שלו"
+                        : "תיקייה מעל"}
+                  </span>
+                  <PathText path={sourceName(l.path)} className="block font-mono text-xs break-all" />
+                  {l.rule.kind === "folder" && n > 1 && (
+                    <span className="text-xs text-muted">כולל {fmtNumber(n)} מהקבצים שנכשלו בריצה הזו</span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-col gap-1 rounded-lg bg-panel2 px-3 py-2">
+          <span className="text-xs text-muted">{chosen.rule.kind === "file" ? "הקובץ שידולג:" : "התיקייה שתדולג, עם כל מה שבתוכה:"}</span>
+          <PathText path={chosen.path} className="block font-mono text-xs break-all" />
+        </div>
+        <p className="text-muted">אפשר לבטל את זה בכל זמן בהגדרות המשימה, בחלק "סינון".</p>
       </div>
     </Modal>
   );
