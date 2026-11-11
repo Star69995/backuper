@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type Ref,
   type SelectHTMLAttributes,
+  type TextareaHTMLAttributes,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -116,6 +117,51 @@ export const inputCls =
 
 export function TextInput({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cx(inputCls, withWidth(className))} {...rest} />;
+}
+
+/**
+ * A one-line field that wraps and grows in height with its text, for values that can get long (a list of
+ * extensions, a path). Still a single value: Enter does nothing and pasted line breaks become `joiner`
+ * (", " for a list; pass "" for a path).
+ */
+export function AutoGrowInput({
+  className,
+  value,
+  onChange,
+  joiner = ", ",
+  ...rest
+}: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange" | "rows"> & {
+  value: string;
+  onChange: (v: string) => void;
+  joiner?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  useLayoutEffect(fit, [value]);
+  // The width changes with the window / the row's other controls, and so does where the text wraps.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      className={cx(inputCls, "h-auto min-h-9 resize-none overflow-hidden py-1.5 leading-normal", withWidth(className))}
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/\s*[\r\n]+\s*/g, joiner))}
+      onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+      {...rest}
+    />
+  );
 }
 
 /** Text field with a magnifier on the start side; `className` sizes the field itself. */

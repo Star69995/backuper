@@ -9,7 +9,7 @@ import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
 import { useResumeTask } from "./resumeTask";
 import { statusBadge } from "./TasksView";
-import { Badge, Button, cx, EmptyState, IconButton, Modal, PathText, RunIcon, Select, Spinner, TextInput } from "./ui";
+import { AutoGrowInput, Badge, Button, cx, EmptyState, IconButton, Modal, PathText, RunIcon, Select, Spinner, TextInput } from "./ui";
 
 export default function HistoryView({ snap }: { snap: Snapshot }) {
   const { toast, confirm } = useFeedback();
@@ -245,12 +245,24 @@ function ErrorGroup({
   );
 }
 
-/** Lines of a robocopy log around its ERROR lines (the retries show whether a file went through in the end). */
+/**
+ * Lines of a robocopy log around its ERROR lines (the retries show whether a file went through in the end) - for the
+ * first file of each error code only: the per-file errors are already listed above, and every file of a code retries
+ * the same way, so more examples only repeat it.
+ */
 function logErrorExcerpt(log: string, limit = 80): string[] {
   const lines = log.split(/\r?\n/);
   const out: string[] = [];
+  const firstPath = new Map<string, string>();
   lines.forEach((l, i) => {
-    if (out.length < limit && l.includes(" ERROR ")) out.push(...lines.slice(i, i + 4).filter((x) => x.trim()));
+    if (out.length >= limit || !l.includes(" ERROR ")) return;
+    const m = /ERROR (\d+) \(0x[0-9a-f]+\) (.*)$/i.exec(l);
+    if (m) {
+      const first = firstPath.get(m[1]);
+      if (first === undefined) firstPath.set(m[1], m[2]);
+      else if (first !== m[2]) return;
+    }
+    out.push(...lines.slice(i, i + 4).filter((x) => x.trim()));
   });
   return out.slice(0, limit);
 }
@@ -297,7 +309,7 @@ async function errorsText(run: RunRecord, src: SourceRun, index: number, task: T
   if (src.logFile) {
     try {
       const excerpt = logErrorExcerpt(await api.readLog(run.id, index));
-      if (excerpt.length) lines.push("", "--- log lines around errors ---", ...excerpt);
+      if (excerpt.length) lines.push("", "--- log lines around errors (first file of each error code) ---", ...excerpt);
     } catch {
       lines.push("(the detailed log could not be read)");
     }
@@ -796,12 +808,13 @@ function SkipDialog({
             dir ? "התיקייה, עם כל מה שבתוכה" : "תיקייה שלמה, עם כל מה שבתוכה",
             <>
               <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                <TextInput
+                <AutoGrowInput
                   dir="ltr"
+                  joiner=""
                   value={folder}
-                  onChange={(e) => setFolder(e.target.value)}
+                  onChange={setFolder}
                   onFocus={() => setKind("folder")}
-                  className="min-w-0 flex-1 font-mono"
+                  className="min-w-0 flex-1 text-left font-mono"
                   aria-label="נתיב התיקייה"
                 />
                 <IconButton

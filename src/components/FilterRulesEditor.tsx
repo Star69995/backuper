@@ -31,7 +31,7 @@ import { addRules, relations, tidy, type Added, type Relation } from "../lib/fil
 import { CACHE_FOLDERS } from "../lib/cacheFolders";
 import type { FilterCheck, FilterKind, FilterProbe, FilterRule, RegexCheck, RuleResult } from "../types";
 import { useFeedback } from "./feedback";
-import { Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
+import { AutoGrowInput, Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
   // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
@@ -520,14 +520,15 @@ function FilterCheckPanel({
         <label htmlFor={id} className="sr-only">
           נתיב לבדיקה
         </label>
-        <TextInput
+        <AutoGrowInput
           id={id}
           dir="ltr"
+          joiner=""
           autoFocus
           className="min-w-48 flex-1 text-left font-mono"
           placeholder={sources[0] ? `${sources[0].replace(/\\+$/, "")}\\...` : "Documents\\~$report.docx"}
           value={probe.path}
-          onChange={(e) => setProbe({ ...probe, path: e.target.value })}
+          onChange={(path) => setProbe({ ...probe, path })}
         />
         <Button size="sm" icon={<File size={14} />} onClick={() => pick(false)}>
           קובץ...
@@ -712,16 +713,28 @@ function RuleRow({
               ]}
             />
           )}
-          {hasText(r) && (
-            <TextInput
-              dir="ltr"
-              className="min-w-40 flex-1 text-left font-mono"
-              autoFocus={!r.value}
-              value={r.value}
-              placeholder={folders ? "^(build|cache)\\d*$" : PLACEHOLDERS[r.kind]}
-              onChange={(e) => onChange({ ...r, value: e.target.value })}
-            />
-          )}
+          {hasText(r) &&
+            (r.kind !== "regex" ? (
+              // A list of extensions / names, or a path, wraps onto more lines instead of scrolling out of view.
+              <AutoGrowInput
+                dir="ltr"
+                joiner={isFiles(r) ? ", " : ""}
+                className="min-w-40 flex-1 text-left font-mono"
+                autoFocus={!r.value}
+                value={r.value}
+                placeholder={PLACEHOLDERS[r.kind]}
+                onChange={(value) => onChange({ ...r, value })}
+              />
+            ) : (
+              <TextInput
+                dir="ltr"
+                className="min-w-40 flex-1 text-left font-mono"
+                autoFocus={!r.value}
+                value={r.value}
+                placeholder={folders ? "^(build|cache)\\d*$" : PLACEHOLDERS[r.kind]}
+                onChange={(e) => onChange({ ...r, value: e.target.value })}
+              />
+            ))}
           {r.kind === "largerThan" && (
             <div className="flex items-center gap-2">
               <NumberInput className="w-28" min={1} value={r.mb} onChange={(mb) => onChange({ ...r, mb })} />

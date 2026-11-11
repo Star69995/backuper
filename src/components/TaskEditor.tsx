@@ -39,7 +39,7 @@ import FilterRulesEditor from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { Section, type SectionInfo, SectionNav, useScrollSpy } from "./sections";
-import { Button, cx, EmptyState, Field, IconButton, Modal, NumberInput, SearchBox, Segmented, TextInput, Toggle } from "./ui";
+import { AutoGrowInput, Button, cx, EmptyState, Field, IconButton, Modal, NumberInput, SearchBox, Segmented, TextInput, Toggle } from "./ui";
 
 type SectionId = "general" | "sources" | "destination" | "kind" | "retention" | "schedule" | "filters" | "advanced";
 
@@ -55,14 +55,8 @@ export function PathPicker({
   placeholder: string;
 }) {
   return (
-    <div className="flex gap-2">
-      <TextInput
-        dir="ltr"
-        className="text-left"
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-      />
+    <div className="flex items-start gap-2">
+      <AutoGrowInput dir="ltr" joiner="" className="text-left" value={value} placeholder={placeholder} onChange={onChange} />
       <Button
         icon={<FolderOpen size={16} />}
         onClick={async () => {
