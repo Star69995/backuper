@@ -296,7 +296,7 @@ function CopyErrorsButton({ text }: { text: () => string }) {
           .catch(() => toast({ tone: "bad", title: "ההעתקה לא הצליחה" }))
       }
     >
-      {done ? "הועתק" : "העתק את השגיאות"}
+      {done ? "הועתק" : "העתקת השגיאות"}
     </Button>
   );
 }
