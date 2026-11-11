@@ -17,6 +17,8 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// A failed check (offline, GitHub down) is retried sooner.
 const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 const TICK: Duration = Duration::from_secs(60);
+/// No keyboard/mouse input for this long = the user is away, so "auto" may restart the app.
+const AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// The marker's content when the window should stay in the tray after the update.
 const MARKER_HIDDEN: &str = "hidden";
@@ -34,6 +36,9 @@ pub struct Updates {
     /// app again (a second instance, which only brings this one up), so the next opening of the
     /// window is taken as the click.
     notified_unseen: AtomicBool,
+    /// What the window has open with unsaved changes (`set_unsaved`, e.g. a task being edited).
+    /// An install the user didn't just confirm waits while this isn't empty and asks first.
+    unsaved: Mutex<Vec<String>>,
     core: Arc<Core>,
     app: AppHandle,
 }
@@ -51,6 +56,7 @@ impl Updates {
             busy: AtomicBool::new(false),
             notified: Mutex::new(None),
             notified_unseen: AtomicBool::new(false),
+            unsaved: Mutex::new(Vec::new()),
             core,
             app,
         })
@@ -90,16 +96,38 @@ impl Updates {
             if has_pending && (mode == "auto" || self.status().install_waiting) {
                 let _ = tauri::async_runtime::block_on(self.download());
             }
-            let window_hidden = self
-                .app
-                .get_webview_window("main")
-                .is_some_and(|w| !w.is_visible().unwrap_or(true));
-            // Unasked, only from the tray, so it never closes a window the user is looking at.
-            if self.status().install_waiting || (mode == "auto" && window_hidden) {
-                self.install_if_idle(window_hidden);
-            }
+            self.install_if_due();
             std::thread::sleep(TICK);
         }
+    }
+
+    fn window_hidden(&self) -> bool {
+        self.app.get_webview_window("main").is_some_and(|w| !w.is_visible().unwrap_or(true))
+    }
+
+    /// Installs the downloaded version on its own when that bothers no one: after "update now"
+    /// had to wait for the backups, or in "auto" mode while the app isn't in use - the window is
+    /// in the tray or minimized, or nobody touched the computer for `AWAY_AFTER`. Never with
+    /// unsaved changes in the window (`install_if_idle`).
+    fn install_if_due(&self) {
+        let window = self.app.get_webview_window("main");
+        let hidden = window.as_ref().is_some_and(|w| !w.is_visible().unwrap_or(true));
+        let minimized = window.as_ref().is_some_and(|w| w.is_minimized().unwrap_or(false));
+        if self.status().install_waiting {
+            self.install_if_idle(hidden, false);
+        } else if self.mode() == "auto" {
+            if hidden || minimized {
+                // A minimized window comes back in the tray, so the restart doesn't pop it up.
+                self.install_if_idle(true, false);
+            } else if user_away() {
+                self.install_if_idle(false, false);
+            }
+        }
+    }
+
+    /// The window's list of things with unsaved changes; an install it didn't ask for waits for it.
+    pub fn set_unsaved(&self, what: Vec<String>) {
+        *self.unsaved.lock().unwrap() = what;
     }
 
     /// Looks for a newer release. Ok(true) = one is available.
@@ -204,6 +232,7 @@ impl Updates {
     }
 
     /// The user's "update now": downloads, then installs right away or once the backups are done.
+    /// Installs right away (unsaved changes or not: the user asked) unless a backup is running.
     pub async fn install_now(&self) -> Result<(), String> {
         if self.pending.lock().unwrap().is_none() && !self.check().await? {
             return Err("אין עדכון זמין - זו כבר הגרסה האחרונה.".into());
@@ -211,17 +240,20 @@ impl Updates {
         self.download().await?;
         self.set(|s| s.install_waiting = true);
         // Exits the app when it installs; otherwise the update loop retries every minute.
-        let hidden = self.app.get_webview_window("main").is_some_and(|w| !w.is_visible().unwrap_or(true));
-        self.install_if_idle(hidden);
+        self.install_if_idle(self.window_hidden(), true);
         Ok(())
     }
 
     /// Runs the downloaded installer (which closes the app and starts it again) if no backup is
-    /// running or queued. `stay_hidden` = the restarted app stays in the tray.
-    fn install_if_idle(&self, stay_hidden: bool) {
+    /// running or queued. `stay_hidden` = the restarted app stays in the tray. Without `force` (an
+    /// install the user didn't just ask for) it also waits while the window has unsaved changes.
+    fn install_if_idle(&self, stay_hidden: bool, force: bool) {
         let Some((update, Some(bytes))) = self.pending.lock().unwrap().clone() else {
             return;
         };
+        if !force && !self.unsaved.lock().unwrap().is_empty() {
+            return;
+        }
         let marker = self.core.store.lock().unwrap().after_update_marker();
         let result = self.core.when_idle(|| {
             let _ = std::fs::write(&marker, if stay_hidden { MARKER_HIDDEN } else { "" });
@@ -314,4 +346,35 @@ pub fn after_update(app: &AppHandle, core: &Core) -> Option<bool> {
         "",
     );
     Some(content.trim() == MARKER_HIDDEN)
+}
+
+/// Nobody has used the keyboard or mouse for `AWAY_AFTER` (any app, not just ours).
+#[cfg(windows)]
+fn user_away() -> bool {
+    #[repr(C)]
+    struct LastInputInfo {
+        size: u32,
+        time: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetLastInputInfo(info: *mut LastInputInfo) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTickCount() -> u32;
+    }
+    let mut info = LastInputInfo { size: std::mem::size_of::<LastInputInfo>() as u32, time: 0 };
+    // SAFETY: plain Win32 calls with a correctly sized struct.
+    unsafe {
+        if GetLastInputInfo(&mut info) == 0 {
+            return false;
+        }
+        u64::from(GetTickCount().wrapping_sub(info.time)) >= AWAY_AFTER.as_millis() as u64
+    }
+}
+
+#[cfg(not(windows))]
+fn user_away() -> bool {
+    false
 }

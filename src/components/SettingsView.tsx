@@ -8,6 +8,7 @@ import FilterRulesEditor from "./FilterRulesEditor";
 import { useTaskListTransfer } from "./ImportTasksDialog";
 import { PathPicker } from "./TaskEditor";
 import { autoInstallWhen } from "./UpdateDialog";
+import { useUnsaved } from "../lib/unsaved";
 import { Button, IconButton, Modal, PathText, Segmented, Select, Toggle } from "./ui";
 
 function Card({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
@@ -37,6 +38,7 @@ export default function SettingsView({ snap, refresh }: { snap: Snapshot; refres
   // Filter rules are edited as a draft and saved explicitly (a new rule starts empty).
   const [filters, setFilters] = useState(s.globalFilters);
   const filtersDirty = JSON.stringify(filters) !== JSON.stringify(s.globalFilters);
+  useUnsaved(filtersDirty ? "כללי הסינון הכלליים בהגדרות" : null);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4 md:p-6">
@@ -189,7 +191,7 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
   else if (u.state === "ready")
     status =
       mode === "auto"
-        ? `גרסה ${u.version} הורדה. ${autoInstallWhen(snap.settings)} אפשר גם לעדכן עכשיו.`
+        ? `גרסה ${u.version} הורדה. ${autoInstallWhen()} אפשר גם לעדכן עכשיו.`
         : `גרסה ${u.version} הורדה ומוכנה להתקנה.`;
   else if (u.state === "available") status = `גרסה ${u.version} זמינה.`;
   else if (u.state === "upToDate") status = `זו הגרסה האחרונה. נבדק ${fmtRelative(u.checkedAt)}.`;
@@ -203,7 +205,7 @@ function UpdatesCard({ snap, update }: { snap: Snapshot; update: (patch: Partial
           <span className="text-sm font-medium">עדכון אוטומטי</span>
           <span className="text-xs text-muted">
             {mode === "auto"
-              ? "גרסה חדשה מורדת ומותקנת מעצמה, רק כשהחלון סגור (התוכנה ליד השעון) ואין גיבוי פעיל, כך שהעדכון לא מפריע. התוכנה עולה מחדש מיד אחרי ההתקנה, ומופיעה התראה שהיא עודכנה."
+              ? "גרסה חדשה מורדת ומותקנת מעצמה, בלי לשאול, כשהתוכנה לא בשימוש: החלון סגור או ממוזער, או שלא נגעו במחשב 10 דקות. אף פעם לא באמצע גיבוי או עם שינויים שלא נשמרו. התוכנה עולה מחדש מיד אחרי ההתקנה."
               : mode === "notify"
                 ? "כשיש גרסה חדשה תופיע התראה, וההתקנה רק בלחיצה על \"עדכון עכשיו\"."
                 : "לא נבדק אם יש גרסה חדשה. אפשר לבדוק ידנית."}

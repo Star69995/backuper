@@ -606,6 +606,12 @@ pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
     updates.install_now().await
 }
 
+/// What the window has open with unsaved changes (an automatic install waits for them).
+#[tauri::command]
+pub fn set_unsaved(updates: UpdatesState, what: Vec<String>) {
+    updates.inner().set_unsaved(what);
+}
+
 /// The update dialog was closed (the notification's request is answered).
 #[tauri::command]
 pub fn dismiss_update_prompt(updates: UpdatesState) {

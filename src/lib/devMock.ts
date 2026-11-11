@@ -648,6 +648,8 @@ export function installDevMock() {
       case "install_update":
         update.installWaiting = true;
         return null;
+      case "set_unsaved":
+        return null;
       case "dismiss_update_prompt":
         update.prompt = false;
         return null;

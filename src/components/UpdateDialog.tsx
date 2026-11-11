@@ -1,18 +1,13 @@
 import { ArrowLeft, Download } from "lucide-react";
 import { api, errorText } from "../api";
 import { fmtBytes } from "../lib/format";
-import type { Settings, Snapshot } from "../types";
+import type { Snapshot } from "../types";
 import { useFeedback } from "./feedback";
 import { Button, Modal } from "./ui";
 
-/** When the "auto" mode installs a found version by itself, in the user's current settings. */
-export function autoInstallWhen(s: Settings): string {
-  const idle = "כשאין גיבוי שרץ או ממתין בתור";
-  if (s.closeToTray)
-    return `הגרסה החדשה תותקן מעצמה כשהחלון של Backuper סגור (התוכנה ממשיכה לפעול ליד השעון) ו${idle}. כל עוד החלון פתוח, ההתקנה מחכה.`;
-  if (s.startWithWindows)
-    return `הגרסה החדשה תותקן מעצמה בהדלקה הבאה של המחשב, ${idle} (כאן סגירת החלון יוצאת מהתוכנה, ולכן אין הזדמנות קודמת).`;
-  return 'כאן סגירת החלון יוצאת מהתוכנה והיא לא עולה עם המחשב, ולכן הגרסה החדשה לא תותקן מעצמה - לחצו על "עדכון עכשיו".';
+/** When the "auto" mode installs a found version by itself (`Updates::install_if_due`). */
+export function autoInstallWhen(): string {
+  return "הגרסה החדשה תותקן מעצמה כשהתוכנה לא בשימוש - החלון סגור או ממוזער, או שלא נגעו במחשב 10 דקות - ורק כשאין גיבוי שרץ או ממתין ואין שינויים שלא נשמרו.";
 }
 
 /**
@@ -101,12 +96,13 @@ export default function UpdateDialog({ snap, onClose }: { snap: Snapshot; onClos
         )}
         {u.state === "error" && u.error && <p className="text-[13px] text-bad">{u.error}</p>}
         <p className="text-[13px] text-muted">
-          בעדכון Backuper נסגר לכמה שניות ועולה מחדש לבד. המשימות, ההגדרות והיומן נשמרים. אם רץ גיבוי, ההתקנה מחכה לסיומו ולא עוצרת אותו.
+          &quot;עדכון עכשיו&quot; סוגר את Backuper מיד לכמה שניות, והוא עולה מחדש לבד. המשימות, ההגדרות והיומן נשמרים. אם רץ גיבוי, ההתקנה
+          מחכה לסיומו ולא עוצרת אותו.
         </p>
         {!u.installWaiting && (
           <p className="text-[13px] text-muted">
             {mode === "auto"
-              ? autoInstallWhen(snap.settings)
+              ? autoInstallWhen()
               : "אם לא תעדכנו עכשיו, אפשר לעדכן בכל זמן מהכפתור בתחתית התפריט הצדדי או מ\"הגדרות\" - \"עדכוני תוכנה\"."}
           </p>
         )}

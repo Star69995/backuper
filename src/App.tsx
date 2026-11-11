@@ -1,5 +1,5 @@
 import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Settings as SettingsIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { api } from "./api";
 import DrivePromptDialog from "./components/DrivePromptDialog";
 import HelpView from "./components/HelpView";
@@ -9,6 +9,7 @@ import SettingsView from "./components/SettingsView";
 import TasksView from "./components/TasksView";
 import UpdateDialog from "./components/UpdateDialog";
 import { cx, RunIcon, Spinner } from "./components/ui";
+import { resetUnsaved } from "./lib/unsaved";
 import { useSnapshot, useTheme } from "./lib/useSnapshot";
 
 type View = "tasks" | "history" | "settings" | "help";
@@ -19,6 +20,8 @@ export default function App() {
   // The update dialog, opened from the side menu (a click on the notification opens it via `update.prompt`).
   const [updateOpen, setUpdateOpen] = useState(false);
   useTheme(snap?.settings.theme);
+  // A reloaded page has nothing unsaved (the backend keeps the last list it was told).
+  useEffect(resetUnsaved, []);
 
   if (!snap) {
     return (

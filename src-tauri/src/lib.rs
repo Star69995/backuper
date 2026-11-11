@@ -177,6 +177,7 @@ pub fn run() {
             commands::check_updates,
             commands::install_update,
             commands::dismiss_update_prompt,
+            commands::set_unsaved,
             commands::find_cobian_lists,
             commands::plan_cobian_takeover,
             commands::take_over_cobian,
