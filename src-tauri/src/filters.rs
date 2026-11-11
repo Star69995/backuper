@@ -25,6 +25,17 @@ pub fn patterns(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// "Thumbs.db, ~$*; notes" -> ["Thumbs.db", "~$*", "notes"]: names and wildcards exactly as typed
+/// (unlike `patterns`, a bare word is a whole name, not an extension).
+pub fn names(value: &str) -> Vec<String> {
+    value
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// "C:\\dir\\file" or "\\\\server\\share\\file": a full path that names a file, not a folder.
 fn is_full_file_path(p: &str) -> bool {
     let b = p.as_bytes();
@@ -59,7 +70,13 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
                     return Err(format!("כלל סינון: הביטוי הרגולרי \"{value}\" לא תקין - {e}"));
                 }
             }
-            FilterRule::Pattern { value } if value.trim().is_empty() => return Err("כלל סינון: יש להזין תבנית שם קובץ".into()),
+            FilterRule::IncludeName { value } if names(value).is_empty() => {
+                return Err("כלל סינון: יש להזין אילו שמות קבצים לגבות (למשל notes.txt)".into())
+            }
+            FilterRule::IncludeName { value } if value.contains('\\') => {
+                return Err(format!("כלל סינון: שם קובץ לא יכול לכלול נתיב ({value})"))
+            }
+            FilterRule::Pattern { value } if names(value).is_empty() => return Err("כלל סינון: יש להזין תבנית שם קובץ".into()),
             FilterRule::Pattern { value } if value.contains('\\') => {
                 return Err(format!(
                     "כלל סינון: תבנית שם קובץ לא יכולה לכלול נתיב ({value}). לתיקיות יש כלל \"תיקייה\""
@@ -85,7 +102,8 @@ pub fn compile<'a>(rules: impl IntoIterator<Item = &'a FilterRule>) -> Filters {
         match r {
             FilterRule::Include { value } => f.include_files.extend(patterns(value)),
             FilterRule::Extension { value } => f.exclude_files.extend(patterns(value)),
-            FilterRule::Pattern { value } => f.exclude_files.push(value.trim().to_string()),
+            FilterRule::IncludeName { value } => f.include_files.extend(names(value)),
+            FilterRule::Pattern { value } => f.exclude_files.extend(names(value)),
             FilterRule::Regex { value, folders: true, .. } => f.exclude_dir_regex.push(value.trim().to_string()),
             FilterRule::Regex { value, include: true, .. } => f.include_regex.push(value.trim().to_string()),
             FilterRule::Regex { value, include: false, .. } => f.exclude_regex.push(value.trim().to_string()),
@@ -146,6 +164,21 @@ mod tests {
             patterns("lrcat, .docx; *.xlsx, notes.txt, ~$*"),
             ["*.lrcat", "*.docx", "*.xlsx", "notes.txt", "~$*"]
         );
+    }
+
+    #[test]
+    fn names_are_not_extensions() {
+        assert_eq!(names("Thumbs.db, ~$*; notes"), ["Thumbs.db", "~$*", "notes"]);
+        let f = compile(&[
+            FilterRule::Pattern { value: "Thumbs.db, desktop.ini".into() },
+            FilterRule::IncludeName { value: "notes".into() },
+            FilterRule::Include { value: "notes".into() },
+        ]);
+        assert_eq!(f.exclude_files, ["Thumbs.db", "desktop.ini"]);
+        assert_eq!(f.include_files, ["notes", "*.notes"]);
+        assert!(validate(&[FilterRule::IncludeName { value: " , ".into() }]).is_err());
+        assert!(validate(&[FilterRule::IncludeName { value: r"a\b".into() }]).is_err());
+        assert!(validate(&[FilterRule::Pattern { value: " , ".into() }]).is_err());
     }
 
     #[test]

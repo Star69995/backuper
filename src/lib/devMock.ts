@@ -55,12 +55,13 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
         .replace(/\?/g, ".")}$`,
       "i",
     );
-  const pats = (v: string) =>
+  const names = (v: string) =>
     v
       .split(/[,;]/)
       .map((x) => x.trim())
-      .filter(Boolean)
-      .map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`));
+      .filter(Boolean);
+  const pats = (v: string) =>
+    names(v).map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`));
   const re = (v: string) => {
     try {
       return new RegExp(v, "i");
@@ -94,9 +95,14 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
             return pats(r.value).some((p) => wild(p).test(name))
               ? { effect: "keeps", detail: null }
               : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
+          case "includeName":
+            return names(r.value).some((p) => wild(p).test(name))
+              ? { effect: "keeps", detail: null }
+              : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
           case "extension":
-          case "pattern":
             return pats(r.value).some((p) => wild(p).test(name)) ? skip() : empty();
+          case "pattern":
+            return names(r.value).some((p) => wild(p).test(name)) ? skip() : empty();
           case "file":
             return r.value.trim().toLowerCase() === path.toLowerCase() ? skip() : empty();
           case "largerThan":

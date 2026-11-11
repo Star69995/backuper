@@ -14,6 +14,7 @@ export type ScheduleKind = Schedule["kind"];
 
 export type FilterRule =
   | { kind: "include"; value: string }
+  | { kind: "includeName"; value: string }
   | { kind: "extension"; value: string }
   | { kind: "pattern"; value: string }
   /** `folders`: matches folder names (always skipped, with their contents) instead of file names. */

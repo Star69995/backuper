@@ -42,15 +42,21 @@ pub enum Schedule {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilterRule {
-    /// Back up only these: extensions ("lrcat, docx") or wildcards/names ("*.lrcat", "notes.txt").
+    /// Back up only these: extensions ("lrcat, docx"; older rules may also hold wildcards/names
+    /// like "*.lrcat", "notes.txt").
     Include {
+        value: String,
+    },
+    /// Back up only files with these names, exactly as typed (a bare word is a whole name, not an
+    /// extension): "notes.txt, report*"
+    IncludeName {
         value: String,
     },
     /// One or more extensions: "tmp", "tmp, log, .bak"
     Extension {
         value: String,
     },
-    /// Wildcard on the file name: "~$*", "Thumbs.db", "*.part"
+    /// Names or wildcards on the file name, comma-separated, exactly as typed: "~$*, Thumbs.db, *.part"
     Pattern {
         value: String,
     },

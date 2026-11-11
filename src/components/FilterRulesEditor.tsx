@@ -29,6 +29,7 @@ import { Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, Text
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
   // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
   include: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
+  includeName: { label: "סוגי קבצים ושמות", icon: <Type size={15} /> },
   extension: { label: "סוגי קבצים ושמות", icon: <FileType size={15} /> },
   pattern: { label: "סוגי קבצים ושמות", icon: <Type size={15} /> },
   regex: {
@@ -63,15 +64,43 @@ const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string 
 /** Rules offered in the add menu. */
 const MENU: FilterKind[] = ["extension", "regex", "folder", "file", "largerThan", "olderThan", "hidden", "system"];
 
-const isFiles = (r: FilterRule): r is Extract<FilterRule, { kind: "include" | "extension" | "pattern" }> =>
-  r.kind === "include" || r.kind === "extension" || r.kind === "pattern";
+type FilesKind = "include" | "includeName" | "extension" | "pattern";
+
+const isFiles = (r: FilterRule): r is Extract<FilterRule, { kind: FilesKind }> =>
+  r.kind === "include" || r.kind === "includeName" || r.kind === "extension" || r.kind === "pattern";
 
 /** "Only these" (back up only matches) vs "skip these". */
-const isOnly = (r: FilterRule) => r.kind === "include" || (r.kind === "regex" && r.include);
+const isOnly = (r: FilterRule) => r.kind === "include" || r.kind === "includeName" || (r.kind === "regex" && r.include);
+
+/** A file-name rule that matches whole names ("Thumbs.db", "~$*") rather than extensions ("tmp"). */
+const isByName = (r: FilterRule) => r.kind === "includeName" || r.kind === "pattern";
+
+const filesKind = (only: boolean, byName: boolean): FilesKind =>
+  only ? (byName ? "includeName" : "include") : byName ? "pattern" : "extension";
+
+const splitList = (v: string) =>
+  v
+    .split(/[,;]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+/** Extensions -> names when the rule is switched to "names": "tmp, .log" -> "*.tmp, *.log" (what they matched). */
+const extsToNames = (v: string) =>
+  splitList(v)
+    .map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`))
+    .join(", ");
+
+/** Names -> extensions when switched back: only the plain "*.ext" entries become bare extensions. */
+const namesToExts = (v: string) =>
+  splitList(v)
+    .map((x) => x.match(/^\*\.([^.*?]+)$/)?.[1] ?? x)
+    .join(", ");
 
 const FILES_HINT = {
-  skip: "קבצים עם הסיומות או השמות האלה לא יגובו. מפרידים בפסיק, למשל tmp, log, Thumbs.db. הסימן * מייצג כל טקסט: ~$*",
-  only: "רק קבצים עם הסיומות או השמות האלה יגובו, כל השאר לא. מפרידים בפסיק, למשל docx, xlsx. הסימן * מייצג כל טקסט.",
+  skipExt: "קבצים עם הסיומות האלה לא יגובו. מפרידים בפסיק, למשל tmp, log, bak.",
+  onlyExt: "רק קבצים עם הסיומות האלה יגובו, כל השאר לא. מפרידים בפסיק, למשל docx, xlsx.",
+  skipName: "קבצים עם השמות האלה לא יגובו. שם מלא כולל סיומת, מפרידים בפסיק, למשל Thumbs.db, desktop.ini. הסימן * מייצג כל טקסט: ~$*",
+  onlyName: "רק קבצים עם השמות האלה יגובו, כל השאר לא. שם מלא כולל סיומת, מפרידים בפסיק, למשל notes.txt, report*. הסימן * מייצג כל טקסט.",
 };
 
 const REGEX_FOLDERS_HINT =
@@ -79,8 +108,9 @@ const REGEX_FOLDERS_HINT =
 
 const PLACEHOLDERS: Partial<Record<FilterKind, string>> = {
   include: "docx, xlsx, jpg",
-  extension: "tmp, log, ~$*",
-  pattern: "~$*",
+  includeName: "notes.txt, report*",
+  extension: "tmp, log, bak",
+  pattern: "Thumbs.db, ~$*",
   regex: "^IMG_\\d+",
   folder: "node_modules",
   file: "C:\\pagefile.sys",
@@ -88,7 +118,7 @@ const PLACEHOLDERS: Partial<Record<FilterKind, string>> = {
 
 /** The explanation of a rule, shown on demand (and right away while the rule is still empty). */
 const hintOf = (r: FilterRule) => {
-  if (isFiles(r)) return FILES_HINT[isOnly(r) ? "only" : "skip"];
+  if (isFiles(r)) return FILES_HINT[`${isOnly(r) ? "only" : "skip"}${isByName(r) ? "Name" : "Ext"}`];
   if (r.kind === "regex" && r.folders) return REGEX_FOLDERS_HINT;
   return KINDS[r.kind].hint;
 };
@@ -98,6 +128,7 @@ const hasText = (r: FilterRule): r is Extract<FilterRule, { value: string }> => 
 const blank = (kind: FilterKind): FilterRule => {
   switch (kind) {
     case "include":
+    case "includeName":
     case "extension":
     case "pattern":
     case "folder":
@@ -144,6 +175,7 @@ export function describeFilter(r: FilterRule) {
   switch (r.kind) {
     // Values are isolated left-to-right, so "*.lrcat" doesn't render as "lrcat.*" inside Hebrew text.
     case "include":
+    case "includeName":
     case "extension":
     case "pattern":
       return `${isOnly(r) ? "לגבות רק" : "לדלג על"}: ⁦${r.value}⁩`;
@@ -531,11 +563,26 @@ function RuleRow({
               value={isOnly(r) ? "only" : "skip"}
               onChange={(v) => {
                 if (r.kind === "regex") onChange({ ...r, include: v === "only" });
-                else onChange({ kind: v === "only" ? "include" : r.kind === "include" ? "extension" : r.kind, value: r.value });
+                else if (isFiles(r)) onChange({ kind: filesKind(v === "only", isByName(r)), value: r.value });
               }}
               options={[
                 { value: "skip", label: "לדלג על" },
                 { value: "only", label: "לגבות רק" },
+              ]}
+            />
+          )}
+          {isFiles(r) && (
+            <Segmented
+              compact
+              value={isByName(r) ? "name" : "ext"}
+              onChange={(v) => {
+                const byName = v === "name";
+                if (byName === isByName(r)) return;
+                onChange({ kind: filesKind(isOnly(r), byName), value: byName ? extsToNames(r.value) : namesToExts(r.value) });
+              }}
+              options={[
+                { value: "ext", label: "סיומות", icon: <FileType size={14} /> },
+                { value: "name", label: "שמות", icon: <Type size={14} /> },
               ]}
             />
           )}
