@@ -1,9 +1,9 @@
-import { HardDrive, Play } from "lucide-react";
+import { HardDrive } from "lucide-react";
 import { useState } from "react";
 import { api, errorText } from "../api";
 import type { Snapshot } from "../types";
 import { useFeedback } from "./feedback";
-import { Button, Checkbox, Modal, PathText } from "./ui";
+import { Button, Checkbox, Modal, PathText, RunIcon } from "./ui";
 
 /** "The drive was connected - back up now?" for tasks set to ask (Task.onDriveConnect = "ask"). */
 export default function DrivePromptDialog({ snap }: { snap: Snapshot }) {
@@ -34,7 +34,7 @@ export default function DrivePromptDialog({ snap }: { snap: Snapshot }) {
       footer={
         <>
           <Button onClick={() => answer([])}>לא עכשיו</Button>
-          <Button variant="primary" icon={<Play size={15} />} disabled={toRun.length === 0} onClick={() => answer(toRun)} autoFocus>
+          <Button variant="primary" icon={<RunIcon size={15} />} disabled={toRun.length === 0} onClick={() => answer(toRun)} autoFocus>
             {tasks.length === 1 || toRun.length === tasks.length ? "גבה עכשיו" : `גבה ${toRun.length} משימות`}
           </Button>
         </>

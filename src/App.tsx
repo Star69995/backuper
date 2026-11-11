@@ -1,4 +1,4 @@
-import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Play, Settings as SettingsIcon } from "lucide-react";
+import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Settings as SettingsIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { api } from "./api";
 import DrivePromptDialog from "./components/DrivePromptDialog";
@@ -7,7 +7,7 @@ import HistoryView from "./components/HistoryView";
 import NoticeDialog from "./components/NoticeDialog";
 import SettingsView from "./components/SettingsView";
 import TasksView from "./components/TasksView";
-import { cx, Spinner } from "./components/ui";
+import { cx, RunIcon, Spinner } from "./components/ui";
 import { useSnapshot, useTheme } from "./lib/useSnapshot";
 
 type View = "tasks" | "history" | "settings" | "help";
@@ -90,7 +90,7 @@ export default function App() {
               paused ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-muted hover:bg-hover",
             )}
           >
-            {paused ? <Play size={16} /> : <Pause size={16} />}
+            {paused ? <RunIcon size={16} /> : <Pause size={16} />}
             <span className="hidden flex-col leading-tight md:flex">
               <span className="font-medium text-fg">{paused ? "התזמון מושהה" : "התזמון פעיל"}</span>
               <span className="text-xs">{paused ? "לחצו לחידוש" : "לחצו להשהיה"}</span>

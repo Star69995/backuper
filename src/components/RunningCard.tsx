@@ -1,11 +1,11 @@
-import { Pause, SkipForward, Square } from "lucide-react";
+import { Pause, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useEta } from "../lib/eta";
 import { fmtBytes, fmtDuration, fmtFinishAt, fmtNumber, fmtRemaining, MODE_LABEL } from "../lib/format";
 import type { Job, Progress, Task } from "../types";
 import { useStopTask } from "./stopTask";
-import { Button, PathText, ProgressBar, Spinner } from "./ui";
+import { Button, PathText, ProgressBar, SkipIcon, Spinner } from "./ui";
 
 export default function RunningCard({ progress: p, queue, tasks }: { progress: Progress; queue: Job[]; tasks: Task[] }) {
   const stopTask = useStopTask();
@@ -115,7 +115,7 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
               <Button
                 size="sm"
                 variant="ghost"
-                icon={<SkipForward size={13} />}
+                icon={<SkipIcon size={13} />}
                 title="ההעתקה ממשיכה כרגיל, בלי אחוזים וזמן סיום משוער"
                 onClick={() => api.skipTotalsScan()}
               >
