@@ -281,6 +281,94 @@ impl Rules {
     }
 }
 
+/// One folder or file on a path, for `verdict` (from `find`, or made up for a path that isn't on disk).
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub name: String,
+    /// The 8.3 name (empty when there is none or it isn't known).
+    pub short_name: String,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub size: u64,
+    /// FILETIME.
+    pub modified: u64,
+}
+
+impl Item {
+    fn entry(&self) -> Entry {
+        Entry {
+            name: self.name.encode_utf16().collect(),
+            short_name: self.short_name.encode_utf16().collect(),
+            attributes: self.attributes,
+            reparse_tag: self.reparse_tag,
+            size: self.size,
+            modified: self.modified,
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.attributes & ATTR_DIRECTORY != 0
+    }
+}
+
+/// The folder or file at `path` as a directory listing reports it (with its 8.3 name), or None.
+pub fn find(path: &Path) -> Option<Item> {
+    let p = path.to_string_lossy();
+    if p.contains(['*', '?']) {
+        return None;
+    }
+    let mut w = verbatim(path).ok()?;
+    w.push(0);
+    let mut d: FindData = unsafe { std::mem::zeroed() };
+    let h = unsafe { FindFirstFileExW(w.as_ptr(), 0, &mut d, 0, std::ptr::null(), 0) };
+    if h == -1 {
+        return None;
+    }
+    unsafe { FindClose(h) };
+    Some(Item {
+        name: String::from_utf16_lossy(&until_nul(&d.name)),
+        short_name: String::from_utf16_lossy(&until_nul(&d.short_name)),
+        attributes: d.attributes,
+        reparse_tag: d.reserved0,
+        size: ((d.size_high as u64) << 32) | d.size_low as u64,
+        modified: ((d.written[1] as u64) << 32) | d.written[0] as u64,
+    })
+}
+
+/// What a backup of `base` does with one path under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Kept,
+    /// Inside (or is) a link to another place, given relative to the base: never followed (/XJ).
+    Link(String),
+    /// Inside (or is) a skipped folder, given relative to the base.
+    Folder(String),
+    /// The file itself is skipped.
+    File,
+}
+
+/// `parts` = each folder under `base` on the way, then the item itself. The same decisions
+/// `list_files` makes while walking the tree, so the filter check can't drift from a real backup.
+pub fn verdict(base: &str, parts: &[Item], filters: &Filters) -> Verdict {
+    let rules = Rules::new(Path::new(base), filters);
+    let mut rel = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        let e = p.entry();
+        rel = if rel.is_empty() { p.name.clone() } else { format!("{rel}\\{}", p.name) };
+        if e.is_link() {
+            return Verdict::Link(rel);
+        }
+        if i + 1 < parts.len() || p.is_dir() {
+            if rules.skip_dir(&e, &rel) || rules.regex_skips_dir(&e).is_some() {
+                return Verdict::Folder(rel);
+            }
+        } else if !rules.keep_file(&e) || rules.skip_file_path(&rel) {
+            return Verdict::File;
+        }
+    }
+    Verdict::Kept
+}
+
 /// Longest list of names handed to robocopy on its command line (the limit is 32,767 characters).
 const MAX_NAMES_LEN: usize = 28_000;
 

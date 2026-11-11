@@ -507,3 +507,66 @@ pub struct RegexPart {
     pub token: String,
     pub meaning: String,
 }
+
+/// A path to run through all the filter rules (the filter check in the rule editor).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FilterProbe {
+    /// Full path, or a path relative to the task's source. Ending with `\` = a folder.
+    pub path: String,
+    /// Used when the path isn't on disk (on disk, the real values are used).
+    pub size_mb: Option<f64>,
+    pub age_days: Option<u32>,
+    pub hidden: bool,
+    pub system: bool,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleEffect {
+    /// Doesn't change what happens to this path.
+    #[default]
+    None,
+    /// Leaves the path out of the backup.
+    Skips,
+    /// A "back up only" rule the path matches.
+    Keeps,
+    /// Can't tell: the rule needs the size or date of a file that isn't on disk.
+    Unknown,
+    /// The rule isn't complete or valid, so it wasn't checked.
+    Invalid,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleResult {
+    pub effect: RuleEffect,
+    /// Hebrew: how (e.g. the skipped folder on the way), or why it wasn't checked.
+    pub detail: Option<String>,
+}
+
+/// The real file or folder the check used.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OnDisk {
+    pub size: u64,
+    /// RFC 3339.
+    pub modified: Option<String>,
+    pub hidden: bool,
+    pub system: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterCheck {
+    /// None = nothing to check (no path, or not a usable one: see `notes`).
+    pub kept: Option<bool>,
+    pub folder: bool,
+    /// Hebrew: why it is left out (None when kept).
+    pub reason: Option<String>,
+    pub on_disk: Option<OnDisk>,
+    pub notes: Vec<String>,
+    /// One per rule, in the order given.
+    pub rules: Vec<RuleResult>,
+    pub global_rules: Vec<RuleResult>,
+}

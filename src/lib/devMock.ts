@@ -4,6 +4,10 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   AdoptPlan,
   BackupFolder,
+  FilterCheck,
+  FilterProbe,
+  FilterRule,
+  RuleResult,
   ImportedTask,
   ImportPreview,
   ImportSplit,
@@ -21,6 +25,108 @@ import type {
 import { newTask } from "../types";
 
 const mockCopyStart = Date.now() - 60_000;
+
+/** Rough stand-in for filtercheck.rs (the real one uses the engine's matching and reads the disk). */
+function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: string[], probe: FilterProbe): FilterCheck {
+  const empty = (): RuleResult => ({ effect: "none", detail: null });
+  const out: FilterCheck = {
+    kept: null,
+    folder: false,
+    reason: null,
+    onDisk: null,
+    notes: [],
+    rules: rules.map(empty),
+    globalRules: global.map(empty),
+  };
+  let path = probe.path.trim().replace(/\//g, "\\");
+  if (!path) return out;
+  out.folder = path.endsWith("\\");
+  path = path.replace(/\\+$/, "");
+  const base = sources.find((s) => path.toLowerCase().startsWith(s.toLowerCase().replace(/\\+$/, "") + "\\"));
+  const rel = base ? path.slice(base.replace(/\\+$/, "").length + 1) : path.replace(/^[a-z]:\\/i, "");
+  const parts = rel.split("\\").filter(Boolean);
+  const name = parts[parts.length - 1] ?? "";
+  const dirs = out.folder ? parts : parts.slice(0, -1);
+  const wild = (p: string) =>
+    new RegExp(
+      `^${p
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".")}$`,
+      "i",
+    );
+  const pats = (v: string) =>
+    v
+      .split(/[,;]/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map((x) => (/[*?]/.test(x) ? x : x.startsWith(".") ? `*${x}` : x.includes(".") ? x : `*.${x}`));
+  const re = (v: string) => {
+    try {
+      return new RegExp(v, "i");
+    } catch {
+      return null;
+    }
+  };
+  const one = (r: FilterRule): RuleResult => {
+    const skip = (detail: string | null = null): RuleResult => ({ effect: "skips", detail });
+    switch (r.kind) {
+      case "folder": {
+        const hit = dirs.find((d) => wild(r.value.trim()).test(d));
+        return hit ? skip(hit === name && out.folder ? null : `מדלג על התיקייה ${hit} שבדרך`) : empty();
+      }
+      case "regex": {
+        const x = re(r.value);
+        if (!r.value.trim() || !x) return { effect: "invalid", detail: "הביטוי לא תקין" };
+        if (r.folders) {
+          const hit = dirs.find((d) => x.test(d));
+          return hit ? skip(`מדלג על התיקייה ${hit} שבדרך`) : empty();
+        }
+        if (out.folder) return empty();
+        if (r.include)
+          return x.test(name) ? { effect: "keeps", detail: null } : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
+        return x.test(name) ? skip() : empty();
+      }
+      default:
+        if (out.folder) return empty();
+        switch (r.kind) {
+          case "include":
+            return pats(r.value).some((p) => wild(p).test(name))
+              ? { effect: "keeps", detail: null }
+              : skip("הקובץ לא תואם לכלל, וכל מה שלא תואם לא יגובה");
+          case "extension":
+          case "pattern":
+            return pats(r.value).some((p) => wild(p).test(name)) ? skip() : empty();
+          case "file":
+            return r.value.trim().toLowerCase() === path.toLowerCase() ? skip() : empty();
+          case "largerThan":
+            return probe.sizeMb === null
+              ? { effect: "unknown", detail: "הקובץ לא נמצא בדיסק - הזינו גודל כדי לבדוק" }
+              : probe.sizeMb > r.mb
+                ? skip()
+                : empty();
+          case "olderThan":
+            return probe.ageDays === null
+              ? { effect: "unknown", detail: "הקובץ לא נמצא בדיסק - הזינו לפני כמה ימים שונה" }
+              : probe.ageDays > r.days
+                ? skip()
+                : empty();
+          case "hidden":
+            return probe.hidden ? skip() : empty();
+          case "system":
+            return probe.system ? skip() : empty();
+        }
+    }
+  };
+  out.rules = rules.map(one);
+  out.globalRules = global.map(one);
+  const all = [...out.rules, ...out.globalRules];
+  out.kept = !all.some((r) => r.effect === "skips");
+  if (!out.kept) out.reason = out.folder ? "כלל סינון מדלג על התיקייה, יחד עם כל מה שבתוכה." : "כלל סינון מדלג על הקובץ.";
+  if (!base && sources.length)
+    out.notes.push("הנתיב לא נמצא בתוך אף אחת מתיקיות המקור של המשימה, אז הוא נבדק כאילו מגבים את הכונן כולו.");
+  return out;
+}
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
 const src = (path: string, folderName: string) => ({ path, folderName });
 
@@ -341,6 +447,13 @@ export function installDevMock() {
         return "Backuper - גיבוי אינקרמנטלי\nמקור: C:\\Users\\User\\Pictures\n\nהועתק\t1234\tC:\\Users\\User\\Pictures\\a.jpg\n";
       case "preview_schedule":
         return occurrences(a.schedule as Schedule, 3);
+      case "check_filters":
+        return mockFilterCheck(
+          a.rules as FilterRule[],
+          a.globalRules as FilterRule[],
+          a.sources as string[],
+          a.probe as FilterProbe,
+        );
       case "check_regex": {
         // Rough stand-in for the Rust reader: real parsing and wording live in regexcheck.rs.
         const pattern = String(a.pattern).trim();
