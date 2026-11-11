@@ -38,6 +38,37 @@ export interface RegexCheck {
   matchedText: string | null;
 }
 
+/** A path to run through all the filter rules together (the filter check under the rule list). */
+export interface FilterProbe {
+  /** Full path, or relative to the task's source. Ending with "\\" = a folder. */
+  path: string;
+  /** Used only when the path isn't on disk. */
+  sizeMb: number | null;
+  ageDays: number | null;
+  hidden: boolean;
+  system: boolean;
+}
+
+export type RuleEffect = "none" | "skips" | "keeps" | "unknown" | "invalid";
+
+export interface RuleResult {
+  effect: RuleEffect;
+  detail: string | null;
+}
+
+export interface FilterCheck {
+  /** null = nothing to check (see notes). */
+  kept: boolean | null;
+  folder: boolean;
+  reason: string | null;
+  /** The real file the check used, when the path exists. */
+  onDisk: { size: number; modified: string | null; hidden: boolean; system: boolean } | null;
+  notes: string[];
+  /** One per rule, in order. */
+  rules: RuleResult[];
+  globalRules: RuleResult[];
+}
+
 /** What a task does when its drives (destination / sources) get connected. */
 export type DriveAction = "off" | "run" | "ask";
 

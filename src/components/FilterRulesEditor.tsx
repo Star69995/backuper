@@ -1,8 +1,30 @@
-import { AlertTriangle, CalendarX, EyeOff, FileType, FileX, Filter, FolderX, Info, Plus, Regex, Scale, ShieldOff, Sparkles, Trash2, Type } from "lucide-react";
+import {
+  AlertTriangle,
+  CalendarX,
+  Check,
+  CircleHelp,
+  EyeOff,
+  File,
+  FileType,
+  FileX,
+  Filter,
+  Folder,
+  FolderX,
+  Info,
+  Plus,
+  Regex,
+  Scale,
+  ShieldOff,
+  Sparkles,
+  TestTube,
+  Trash2,
+  Type,
+  X,
+} from "lucide-react";
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { api } from "../api";
-import type { FilterKind, FilterRule, RegexCheck } from "../types";
-import { Badge, Button, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
+import type { FilterCheck, FilterKind, FilterProbe, FilterRule, RegexCheck, RuleResult } from "../types";
+import { Badge, Button, Checkbox, IconButton, Menu, NumberInput, Segmented, TextInput } from "./ui";
 
 const KINDS: Record<FilterKind, { label: string; icon: ReactNode; hint?: string }> = {
   // The three file-name kinds share one row (see isFiles); "include" is its "only these" mode.
@@ -239,8 +261,237 @@ function RegexCheckPanel({
   );
 }
 
+const EFFECT: Record<
+  RuleResult["effect"],
+  { label: string; tone: "neutral" | "accent" | "ok" | "warn" | "bad"; icon: ReactNode }
+> = {
+  none: { label: "לא משפיע", tone: "neutral", icon: null },
+  skips: { label: "מדלג", tone: "warn", icon: <X size={12} /> },
+  keeps: { label: "תואם", tone: "ok", icon: <Check size={12} /> },
+  unknown: { label: "לא נבדק", tone: "neutral", icon: <CircleHelp size={12} /> },
+  invalid: { label: "לא שלם", tone: "bad", icon: <AlertTriangle size={12} /> },
+};
+
+/** The rule's part in the filter check, on its row. "No effect" stays quiet. */
+function EffectBadge({ result }: { result: RuleResult }) {
+  if (result.effect === "none") return null;
+  const e = EFFECT[result.effect];
+  return (
+    <span title={result.detail ?? undefined}>
+      <Badge tone={e.tone} icon={e.icon}>
+        {e.label}
+      </Badge>
+    </span>
+  );
+}
+
+const fmtSize = (b: number) =>
+  b >= 1024 ** 3
+    ? `${(b / 1024 ** 3).toFixed(1)} GB`
+    : b >= 1024 ** 2
+      ? `${(b / 1024 ** 2).toFixed(1)} MB`
+      : b >= 1024
+        ? `${Math.round(b / 1024)} KB`
+        : `${b} B`;
+
+/** Optional number field: empty = not given. */
+function OptionalNumber({
+  value,
+  onChange,
+  label,
+  unit,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  label: string;
+  unit: string;
+}) {
+  const id = useId();
+  return (
+    <span className="flex items-center gap-1.5">
+      <label htmlFor={id} className="text-muted">
+        {label}
+      </label>
+      <TextInput
+        id={id}
+        dir="ltr"
+        inputMode="decimal"
+        className="w-24 text-center"
+        value={value ?? ""}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          onChange(e.target.value.trim() === "" || !Number.isFinite(n) || n < 0 ? null : n);
+        }}
+      />
+      <span className="text-muted">{unit}</span>
+    </span>
+  );
+}
+
+/**
+ * "What happens to this file?": one path run through all the rules together (the task's and the
+ * global ones), with the engine's own matching. Each rule's part shows on its row and in the list here.
+ */
+function FilterCheckPanel({
+  rules,
+  globalRules,
+  sources,
+  probe,
+  setProbe,
+  check,
+  onClose,
+}: {
+  rules: FilterRule[];
+  globalRules: FilterRule[];
+  sources: string[];
+  probe: FilterProbe;
+  setProbe: (p: FilterProbe) => void;
+  check: FilterCheck | null;
+  onClose: () => void;
+}) {
+  const id = useId();
+  const any = (k: FilterKind) => rules.some((r) => r.kind === k) || globalRules.some((r) => r.kind === k);
+  // Size, date and attributes are asked only for a file that isn't on disk, and only when a rule looks at them.
+  const askValues = check?.kept != null && !check.onDisk && !check.folder;
+  const subject = check?.folder ? "התיקייה" : "הקובץ";
+  const pick = async (folder: boolean) => {
+    const p = folder
+      ? await api.pickFolder("בחירת תיקייה לבדיקה", sources[0])
+      : await api.pickFile("בחירת קובץ לבדיקה", "כל הקבצים", ["*"], sources[0]);
+    if (p) setProbe({ ...probe, path: folder ? `${p.replace(/\\+$/, "")}\\` : p });
+  };
+  const affecting = [
+    ...rules.map((r, i) => ({ rule: r, result: check?.rules[i], global: false })),
+    ...globalRules.map((r, i) => ({ rule: r, result: check?.globalRules[i], global: true })),
+  ].filter((x) => x.result && x.result.effect !== "none");
+  const quiet = rules.length + globalRules.length - affecting.length;
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-accent/30 bg-panel px-3 py-2.5 text-xs">
+      <div className="flex items-center gap-2">
+        <TestTube size={15} className="text-accent" />
+        <span className="flex-1 text-[13px] font-medium">בדיקת כל הכללים יחד</span>
+        <IconButton label="סגירת הבדיקה" onClick={onClose}>
+          <X size={15} />
+        </IconButton>
+      </div>
+      <p className="text-muted">
+        הקלידו נתיב של קובץ או תיקייה {sources.length > 0 ? "(מלא, או בתוך תיקיית המקור)" : "(מלא, או רק שם קובץ)"} ותראו אם הוא יגובה
+        ואיזה כלל מחליט. כל הכללים נבדקים יחד{globalRules.length > 0 ? ", כולל הכלליים" : ""}, כמו בגיבוי עצמו. קובץ שקיים בדיסק
+        נבדק עם הגודל, התאריך והתכונות שלו. לבדיקת תיקייה מסיימים את הנתיב ב-<bdi dir="ltr">\</bdi>.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor={id} className="sr-only">
+          נתיב לבדיקה
+        </label>
+        <TextInput
+          id={id}
+          dir="ltr"
+          autoFocus
+          className="min-w-48 flex-1 text-left font-mono"
+          placeholder={sources[0] ? `${sources[0].replace(/\\+$/, "")}\\...` : "Documents\\~$report.docx"}
+          value={probe.path}
+          onChange={(e) => setProbe({ ...probe, path: e.target.value })}
+        />
+        <Button size="sm" icon={<File size={14} />} onClick={() => pick(false)}>
+          קובץ...
+        </Button>
+        <Button size="sm" icon={<Folder size={14} />} onClick={() => pick(true)}>
+          תיקייה...
+        </Button>
+      </div>
+      {askValues && (any("largerThan") || any("olderThan") || any("hidden") || any("system")) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-muted">הקובץ לא נמצא בדיסק. פרטים לבדיקה:</span>
+          {any("largerThan") && (
+            <OptionalNumber label="גודל" unit="MB" value={probe.sizeMb} onChange={(sizeMb) => setProbe({ ...probe, sizeMb })} />
+          )}
+          {any("olderThan") && (
+            <OptionalNumber
+              label="שונה לפני"
+              unit="ימים"
+              value={probe.ageDays}
+              onChange={(v) => setProbe({ ...probe, ageDays: v === null ? null : Math.round(v) })}
+            />
+          )}
+          {any("hidden") && (
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <Checkbox checked={probe.hidden} onChange={(hidden) => setProbe({ ...probe, hidden })} />
+              מוסתר
+            </label>
+          )}
+          {any("system") && (
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <Checkbox checked={probe.system} onChange={(system) => setProbe({ ...probe, system })} />
+              קובץ מערכת
+            </label>
+          )}
+        </div>
+      )}
+      {check && check.kept !== null && (
+        <div className="flex flex-col gap-1.5 border-t border-line pt-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={check.kept ? "ok" : "warn"} icon={check.kept ? <Check size={12} /> : <X size={12} />}>
+              {check.kept ? `${subject} יגובה` : `${subject} לא יגובה`}
+            </Badge>
+            {check.reason && <span>{check.reason}</span>}
+          </div>
+          {check.onDisk && (
+            <div className="text-muted">
+              נבדק מול {subject} שבדיסק
+              {!check.folder && (
+                <>
+                  : <bdi dir="ltr">{fmtSize(check.onDisk.size)}</bdi>
+                  {check.onDisk.modified && `, שונה ב-${new Date(check.onDisk.modified).toLocaleDateString("he-IL")}`}
+                  {check.onDisk.hidden && ", מוסתר"}
+                  {check.onDisk.system && ", קובץ מערכת"}
+                </>
+              )}
+            </div>
+          )}
+          {affecting.length > 0 && (
+            <ul className="flex flex-col gap-1">
+              {affecting.map(({ rule, result, global }, i) => (
+                <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <EffectBadge result={result!} />
+                  <span>{describeFilter(rule)}</span>
+                  {global && <span className="text-muted">(כלל כללי)</span>}
+                  {result!.detail && <span className="text-muted">- {result!.detail}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {quiet > 0 && affecting.length > 0 && (
+            <div className="text-muted">
+              {quiet === 1 ? "כלל אחד נוסף לא משפיע" : `${quiet} כללים נוספים לא משפיעים`} על {subject} הזה.
+            </div>
+          )}
+          {rules.length + globalRules.length === 0 && <div className="text-muted">אין כללי סינון, אז כל הקבצים מגובים.</div>}
+        </div>
+      )}
+      {check?.notes.map((n, i) => (
+        <div key={i} className="flex items-start gap-1.5 text-muted">
+          <Info size={13} className="mt-0.5 shrink-0" />
+          <span>{n}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** One rule on one line; its explanation sits behind the info button so a long list stays compact. */
-function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: (r: FilterRule) => void; onRemove: () => void }) {
+function RuleRow({
+  rule: r,
+  onChange,
+  onRemove,
+  tested,
+}: {
+  rule: FilterRule;
+  onChange: (r: FilterRule) => void;
+  onRemove: () => void;
+  /** What this rule does to the path in the filter check (when the check is open). */
+  tested?: RuleResult;
+}) {
   // For a regex rule the explanation + live check open while its field is being edited, close when focus
   // leaves the row, and the info button brings them back. The try-out name outlives the panel.
   const [showHint, setShowHint] = useState(false);
@@ -312,8 +563,13 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
           )}
           {inline && hint && <span className="text-xs text-muted">{hint}</span>}
         </div>
+        {tested && <EffectBadge result={tested} />}
         {!inline && hint && (
-          <IconButton label={showHint ? "הסתרת ההסבר" : "הסבר על הכלל"} onClick={() => setShowHint(!showHint)} aria-expanded={showHint}>
+          <IconButton
+            label={showHint ? "הסתרת ההסבר" : "הסבר על הכלל"}
+            onClick={() => setShowHint(!showHint)}
+            aria-expanded={showHint}
+          >
             <Info size={15} />
           </IconButton>
         )}
@@ -328,15 +584,49 @@ function RuleRow({ rule: r, onChange, onRemove }: { rule: FilterRule; onChange: 
   );
 }
 
+const NO_PROBE: FilterProbe = { path: "", sizeMb: null, ageDays: null, hidden: false, system: false };
+
 export default function FilterRulesEditor({
   rules,
   onChange,
   emptyText = "אין כללי סינון - כל הקבצים מגובים.",
+  sources = [],
+  globalRules = [],
 }: {
   rules: FilterRule[];
   onChange: (r: FilterRule[]) => void;
   emptyText?: string;
+  /** The task's source folders: paths in the filter check are read under them. */
+  sources?: string[];
+  /** Rules that apply together with these (the global ones, in a task). */
+  globalRules?: FilterRule[];
 }) {
+  const [testing, setTesting] = useState(false);
+  const [probe, setProbe] = useState<FilterProbe>(NO_PROBE);
+  const [check, setCheck] = useState<FilterCheck | null>(null);
+  const key = JSON.stringify([rules, globalRules, sources, probe]);
+  useEffect(() => {
+    if (!testing || !probe.path.trim()) {
+      setCheck(null);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      api
+        .checkFilters(rules, globalRules, sources, probe)
+        .then((c) => live && setCheck(c))
+        .catch(() => live && setCheck(null));
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+    // `key` covers rules, globalRules, sources and probe (new arrays on every render).
+  }, [testing, key]);
+  // A rule removed or added shifts the results until the next check comes back.
+  const tested = (i: number) =>
+    check && check.kept !== null && check.rules.length === rules.length ? check.rules[i] : undefined;
+
   const update = (i: number, r: FilterRule) => onChange(rules.map((x, j) => (j === i ? r : x)));
   const remove = (i: number) => onChange(rules.filter((_, j) => j !== i));
   const add = (r: FilterRule[]) => onChange([...rules, ...r.filter((n) => !rules.some((x) => same(x, n)))]);
@@ -352,7 +642,7 @@ export default function FilterRulesEditor({
       ) : (
         <ul className="flex flex-col gap-2">
           {rules.map((r, i) => (
-            <RuleRow key={i} rule={r} onChange={(n) => update(i, n)} onRemove={() => remove(i)} />
+            <RuleRow key={i} rule={r} onChange={(n) => update(i, n)} onRemove={() => remove(i)} tested={tested(i)} />
           ))}
         </ul>
       )}
@@ -383,7 +673,23 @@ export default function FilterRulesEditor({
             {p.label}
           </button>
         ))}
+        {!testing && (
+          <Button size="sm" variant="ghost" icon={<TestTube size={15} />} onClick={() => setTesting(true)} className="ms-auto">
+            בדיקת הכללים על קובץ
+          </Button>
+        )}
       </div>
+      {testing && (
+        <FilterCheckPanel
+          rules={rules}
+          globalRules={globalRules}
+          sources={sources}
+          probe={probe}
+          setProbe={setProbe}
+          check={check}
+          onClose={() => setTesting(false)}
+        />
+      )}
     </div>
   );
 }

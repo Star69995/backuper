@@ -2,7 +2,7 @@
 
 use crate::backup;
 use crate::core::{Core, Job};
-use crate::model::{BackupMode, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
+use crate::model::{BackupMode, FilterRule, Notice, Progress, RunRecord, RunStatus, Schedule, Settings, SourceBackups, Task, TaskState, Trigger};
 use crate::schedule;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -301,6 +301,17 @@ pub fn preview_schedule(schedule: Schedule) -> Result<Vec<String>, String> {
 #[tauri::command]
 pub fn check_regex(pattern: String, sample: Option<String>) -> crate::model::RegexCheck {
     crate::regexcheck::check(&pattern, sample.as_deref())
+}
+
+/// The filter check: what all the rules together (task + global) do with one path, and each rule's part.
+#[tauri::command]
+pub fn check_filters(
+    rules: Vec<FilterRule>,
+    global_rules: Vec<FilterRule>,
+    sources: Vec<String>,
+    probe: crate::model::FilterProbe,
+) -> crate::model::FilterCheck {
+    crate::filtercheck::check(&rules, &global_rules, &sources, &probe)
 }
 
 #[tauri::command]

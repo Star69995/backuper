@@ -1042,7 +1042,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
       {editing && (
         <TaskEditor
           task={editing}
-          globalFilterCount={snap.settings.globalFilters.length}
+          globalFilters={snap.settings.globalFilters}
           groups={allGroups}
           onClose={() => setEditing(null)}
           onSaved={(saved, isNew) => {
