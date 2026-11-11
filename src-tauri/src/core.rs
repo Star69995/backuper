@@ -424,6 +424,9 @@ impl Core {
                 st.last_message = Some(record.message.clone());
                 // A paused run left a folder to continue in; a full stop deleted it.
                 st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(&task);
+                if let Some(b) = crate::model::LastBackup::of(&record) {
+                    st.last_backup = Some(b);
+                }
                 s.save_states();
                 s.add_history(record.clone());
                 s.settings.clone()

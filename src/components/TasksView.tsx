@@ -38,10 +38,11 @@ import {
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "../api";
-import { describeSchedule, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind, type TaskKind } from "../lib/format";
+import { describeSchedule, fmtBytes, fmtRelative, fmtSmart, KIND_LABEL, MODE_LABEL, nextRunOf, taskKind, type TaskKind } from "../lib/format";
 import { fitColumns, useColumnWidths } from "../lib/useColumnWidths";
+import { useDiskSpace } from "../lib/useDiskSpace";
 import { groupTasks, SORT_LABEL, type SortKey, sortTasks, useTaskSort } from "../lib/sortTasks";
-import type { BackupMode, RunRecord, RunStatus, Snapshot, Task } from "../types";
+import type { BackupMode, DiskSpace, LastBackup, RunRecord, RunStatus, Snapshot, Task } from "../types";
 import { newTask } from "../types";
 import BackupsDialog from "./BackupsDialog";
 import BulkEditDialog from "./BulkEditDialog";
@@ -258,6 +259,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     cols.setWidth(k, Math.max(floors[k], Math.min(w, room - others)));
   };
   const transfer = useTaskListTransfer(snap.tasks, refresh);
+  // Read again whenever a backup starts or ends (it changes the free space).
+  const space = useDiskSpace(
+    snap.tasks.map((t) => t.destination).filter(Boolean),
+    `${snap.current?.runId ?? ""}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
+  );
 
   const usedGroups = groupNames(snap.tasks);
   const allGroups = [...usedGroups, ...newGroups.filter((n) => !usedGroups.some((g) => sameGroup(g, n)))];
@@ -957,6 +963,10 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                             ) : (
                               <span className="text-muted">טרם רץ</span>
                             )}
+                            <div className="mt-1 flex flex-col text-xs text-muted">
+                              {st?.lastBackup && <BackupSize last={st.lastBackup} />}
+                              <FreeSpace space={space[t.destination]} last={st?.lastBackup} />
+                            </div>
                           </td>
                           <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-0.5">
@@ -1102,6 +1112,39 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
   function openPath(p: string) {
     api.openPath(p).catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את התיקייה", message: errorText(e) }));
   }
+}
+
+/** Size of the newest backup (it may be older than the last run, if that one failed). */
+function BackupSize({ last }: { last: LastBackup }) {
+  return (
+    <span
+      title={`גודל הגיבוי האחרון שנשמר (${MODE_LABEL[last.mode]}) - ${fmtSmart(last.at)}`}
+    >
+      גודל <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(last.bytes)}</bdi>
+    </span>
+  );
+}
+
+/** Free space on the destination drive; warns when the last full backup wouldn't fit again. */
+function FreeSpace({ space, last }: { space: DiskSpace | null | undefined; last: LastBackup | null | undefined }) {
+  if (space === undefined) return null;
+  if (space === null) return <span title="כונן היעד לא מחובר כרגע, או שאי אפשר לקרוא אותו">היעד לא מחובר</span>;
+  const low = last?.mode === "full" && space.free < last.bytes;
+  return (
+    <span
+      className={cx("flex items-center gap-1", low && "text-warn")}
+      title={
+        low
+          ? `בכונן היעד פנוי פחות מגודל הגיבוי המלא האחרון (${fmtBytes(last.bytes)}) - ייתכן שהגיבוי המלא הבא לא ייכנס. כדאי לפנות מקום או לשמור פחות גיבויים`
+          : `מקום פנוי בכונן היעד, מתוך ${fmtBytes(space.total)}`
+      }
+    >
+      {low && <AlertTriangle size={12} />}
+      <span>
+        פנוי <bdi dir="ltr" className="whitespace-nowrap">{fmtBytes(space.free)}</bdi>
+      </span>
+    </span>
+  );
 }
 
 function GroupTab({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {
