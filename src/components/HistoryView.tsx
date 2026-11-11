@@ -1,10 +1,11 @@
-import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, Search, Trash2 } from "lucide-react";
+import { CircleAlert, EyeOff, FileText, Folder, FolderOpen, History, Info, Play, RotateCcw, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
 import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
 import { useFeedback } from "./feedback";
+import { useResumeTask } from "./resumeTask";
 import { statusBadge } from "./TasksView";
 import { Badge, Button, cx, EmptyState, Modal, PathText, Select, Spinner, TextInput } from "./ui";
 
@@ -242,11 +243,14 @@ function SourceCard({
   index,
   onShowLog,
   skipper,
+  resumable,
 }: {
   src: SourceRun;
   index: number;
   onShowLog: (i: number) => void;
   skipper: Skipper | null;
+  /** The run was paused and can be continued ("מושהה" instead of "הופסק"). */
+  resumable: boolean;
 }) {
   const { toast } = useFeedback();
   return (
@@ -255,7 +259,7 @@ function SourceCard({
         <Folder size={16} className="shrink-0 text-accent" />
         <bdi className="font-semibold">{src.folderName}</bdi>
         {src.mode && <Badge tone={src.mode === "full" ? "accent" : "neutral"}>{MODE_LABEL[src.mode]}</Badge>}
-        {src.status && statusBadge(src.status)}
+        {src.status && statusBadge(src.status, resumable)}
         <span className="min-w-0 truncate text-xs text-muted">
           <PathText path={src.source} />
         </span>
@@ -317,9 +321,24 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
   const { toast, choose } = useFeedback();
   // The run's task as it is now (null = deleted since), for "skip this next time".
   const [task, setTask] = useState<Task | null>(null);
+  // This run is the task's last one, it was paused, and its folder is still there: it can be continued from here.
+  const [resumable, setResumable] = useState(false);
   useEffect(() => {
-    api.snapshot().then((s) => setTask(s.tasks.find((t) => t.id === r.taskId) ?? null));
-  }, [r.taskId]);
+    api.snapshot().then((s) => {
+      setTask(s.tasks.find((t) => t.id === r.taskId) ?? null);
+      const st = s.states[r.taskId];
+      const busy = s.current?.taskId === r.taskId || s.queue.some((j) => j.taskId === r.taskId);
+      setResumable(
+        r.status === "cancelled" &&
+          !!st?.resumable &&
+          st.lastStatus === "cancelled" &&
+          !!st.lastRunAt &&
+          new Date(st.lastRunAt).getTime() === new Date(r.finishedAt).getTime() &&
+          !busy,
+      );
+    });
+  }, [r.taskId, r.status, r.finishedAt]);
+  const { resume, restart } = useResumeTask();
 
   const skip = async (path: string, source: string) => {
     const dir = path.endsWith("\\");
@@ -404,15 +423,36 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
       size={log !== null ? "xl" : "lg"}
       title={
         <span className="flex items-center gap-2">
-          {r.taskName} {statusBadge(r.status)}
+          {r.taskName} {statusBadge(r.status, resumable)}
         </span>
       }
       subtitle={`${fmtDateTime(r.startedAt)} - ${MODE_LABEL[r.mode]}, ${TRIGGER_LABEL[r.trigger]}`}
       onClose={onClose}
       footer={
-        <Button variant="primary" onClick={onClose}>
-          סגור
-        </Button>
+        resumable ? (
+          <>
+            <Button
+              variant="primary"
+              icon={<Play size={15} />}
+              onClick={() => resume(r.taskId).then((ok) => ok && onClose())}
+            >
+              המשך מאותה נקודה
+            </Button>
+            <Button
+              icon={<RotateCcw size={15} />}
+              onClick={() => restart(r.taskId, r.taskName, r.mode).then((ok) => ok && onClose())}
+            >
+              התחל מחדש
+            </Button>
+            <Button variant="ghost" onClick={onClose}>
+              סגור
+            </Button>
+          </>
+        ) : (
+          <Button variant="primary" onClick={onClose}>
+            סגור
+          </Button>
+        )
       }
     >
       <div className="flex flex-col gap-4">
@@ -436,7 +476,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
           {stat("סיום", fmtDateTime(r.finishedAt))}
         </div>
         {r.sources.map((src, i) => (
-          <SourceCard key={i} src={src} index={i} onShowLog={showLog} skipper={skipper} />
+          <SourceCard key={i} src={src} index={i} onShowLog={showLog} skipper={skipper} resumable={resumable} />
         ))}
         {log !== null && (
           <div className="flex flex-col gap-2">

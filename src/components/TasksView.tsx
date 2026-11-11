@@ -50,6 +50,7 @@ import { CobianPendingDialog, CobianTakeoverDialog } from "./CobianDialogs";
 import { GENERAL_GROUP, groupNames, GroupNameDialog, groupOf, sameGroup } from "./groups";
 import { RunDetails } from "./HistoryView";
 import { useFeedback } from "./feedback";
+import { useResumeTask } from "./resumeTask";
 import { useStopTask } from "./stopTask";
 import { useTaskListTransfer } from "./ImportTasksDialog";
 import PausedCard from "./PausedCard";
@@ -310,22 +311,8 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
   };
 
-  /** After a stop: the same run again, which carries on in the folder it left. */
-  const resume = async (id: string) => {
-    const queued = await api.resumeTask(id);
-    toast({ tone: "info", title: queued ? "הגיבוי ימשיך מאותה נקודה" : "המשימה כבר רצה או ממתינה בתור" });
-  };
-
-  /** Gives up on continuing a paused backup: a new one from the start, in a new folder. */
-  const restart = async (task: Task, mode: BackupMode | null) => {
-    const ok = await confirm({
-      title: `להתחיל את "${task.name}" מחדש?`,
-      message:
-        "הגיבוי יתחיל מההתחלה בתיקייה חדשה, במקום להמשיך את המושהה. הגיבוי החלקי הישן יימחק בהמשך, אחרי שגיבוי חדש יסתיים.",
-      confirmLabel: "התחל מחדש",
-    });
-    if (ok) await runNow([task.id], mode, true);
-  };
+  const { resume, restart: restartTask } = useResumeTask();
+  const restart = (task: Task, mode: BackupMode | null) => restartTask(task.id, task.name, mode);
 
   // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
   // The question comes up when one is switched on, or when someone runs it by hand.

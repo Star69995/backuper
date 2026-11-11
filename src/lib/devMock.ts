@@ -21,6 +21,8 @@ import { newTask } from "../types";
 
 const mockCopyStart = Date.now() - 60_000;
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
+/** When task 5 was paused: its state and its last run record must agree exactly (that is how the run details know it can be continued). */
+const PAUSED_AT = iso(-25);
 const src = (path: string, folderName: string) => ({ path, folderName });
 
 /** The next `n` times a schedule fires (or, with `back`, the previous ones), so mock times match the schedules shown. */
@@ -126,7 +128,7 @@ export function installDevMock() {
     "5": {
       nextRun: null,
       nextFullRun: null,
-      lastRunAt: iso(-25),
+      lastRunAt: PAUSED_AT,
       lastStatus: "cancelled",
       lastMessage: "הגיבוי הושהה. אפשר להמשיך מאותה נקודה",
       resumable: true,
@@ -257,7 +259,7 @@ export function installDevMock() {
         trigger: "manual",
         mode: "full",
         startedAt: iso(at - 30),
-        finishedAt: iso(at),
+        finishedAt: i === 0 ? PAUSED_AT : iso(at),
         status: "cancelled",
         message: "הגיבוי הושהה. אפשר להמשיך מאותה נקודה",
         filesCopied: files,
