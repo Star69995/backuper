@@ -12,11 +12,12 @@ import {
   HardDrive,
   Layers,
   RefreshCw,
+  Search,
   Settings2,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errorText } from "../api";
 import {
   DRIVE_ACTION_LABEL,
@@ -38,7 +39,7 @@ import FilterRulesEditor from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { Section, type SectionInfo, SectionNav, useScrollSpy } from "./sections";
-import { Button, cx, Field, IconButton, Modal, NumberInput, Segmented, TextInput, Toggle } from "./ui";
+import { Button, cx, EmptyState, Field, IconButton, Modal, NumberInput, SearchBox, Segmented, TextInput, Toggle } from "./ui";
 
 type SectionId = "general" | "sources" | "destination" | "kind" | "retention" | "schedule" | "filters" | "advanced";
 
@@ -289,6 +290,21 @@ export function DriveConnectField({ task, onChange }: { task: Task; onChange: (v
 }
 
 
+/** What the editor's search looks at in a section: its text plus what is typed or picked in its fields (not their toggles). */
+function searchText(section: HTMLElement | null | undefined) {
+  if (!section) return "";
+  const values = [...section.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select")]
+    .map((el) =>
+      el instanceof HTMLSelectElement
+        ? (el.selectedOptions[0]?.text ?? "")
+        : el instanceof HTMLInputElement && ["checkbox", "radio", "button", "submit"].includes(el.type)
+          ? ""
+          : el.value,
+    )
+    .join("\n");
+  return `${section.textContent ?? ""}\n${values}`.toLowerCase();
+}
+
 export default function TaskEditor({
   task,
   globalFilters,
@@ -384,8 +400,24 @@ export default function TaskEditor({
       icon: SlidersHorizontal,
     },
   ];
-  const spy = useScrollSpy(sections.map((s) => s.id));
-  const sec = (id: SectionId) => ({ info: sections.find((s) => s.id === id)!, sectionRef: spy.register(id) });
+  // Search: sections that don't contain the text are hidden (they stay mounted, so their text can be searched).
+  const [query, setQuery] = useState("");
+  const els = useRef<Partial<Record<SectionId, HTMLElement | null>>>({});
+  const q = query.trim().toLowerCase();
+  const visible = sections.filter((s) => !q || searchText(els.current[s.id]).includes(q));
+  const spy = useScrollSpy(visible.map((s) => s.id));
+  const active = visible.some((s) => s.id === spy.active) ? spy.active : visible[0]?.id;
+  const sec = (id: SectionId) => ({
+    info: sections.find((s) => s.id === id)!,
+    hidden: !visible.some((s) => s.id === id),
+    sectionRef: (el: HTMLElement | null) => {
+      els.current[id] = el;
+      spy.register(id)(el);
+    },
+  });
+  useEffect(() => {
+    if (spy.body.current) spy.body.current.scrollTop = 0;
+  }, [q, spy.body]);
 
   const save = async () => {
     setSaving(true);
@@ -407,6 +439,22 @@ export default function TaskEditor({
       bodyRef={spy.body}
       title={isNew ? "משימת גיבוי חדשה" : `עריכת משימה: ${task.name}`}
       onClose={onClose}
+      toolbar={
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          placeholder="חיפוש בהגדרות המשימה..."
+          aria-label="חיפוש בהגדרות המשימה"
+          className="w-full"
+          onKeyDown={(e) => {
+            // Escape clears the search first; the dialog closes on the next one.
+            if (e.key === "Escape" && query) {
+              e.stopPropagation();
+              setQuery("");
+            }
+          }}
+        />
+      }
       footer={
         <>
           {error && (
@@ -423,8 +471,13 @@ export default function TaskEditor({
       }
     >
       <div className="md:flex md:items-start md:gap-6">
-        <SectionNav label="מקטעי המשימה" sections={sections} active={spy.active} onSelect={spy.jump} />
+        <SectionNav label="מקטעי המשימה" sections={visible} active={active ?? "general"} onSelect={spy.jump} />
         <div className="flex min-w-0 flex-1 flex-col gap-5">
+          {visible.length === 0 && (
+            <EmptyState icon={<Search size={26} />} title="לא נמצא דבר">
+              נסו מילה אחרת, או נקו את החיפוש כדי לראות את כל ההגדרות.
+            </EmptyState>
+          )}
           <Section {...sec("general")}>
             <div className="flex flex-wrap items-end gap-4">
               <Field label="שם המשימה" className="min-w-52 flex-1">

@@ -36,12 +36,13 @@ pub fn names(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// "C:\\dir\\file" or "\\\\server\\share\\file": a full path that names a file, not a folder.
-fn is_full_file_path(p: &str) -> bool {
+/// "C:\\dir\\file", "\\\\server\\share\\file" or "dir\\file" (relative to the source): a path that names a file, not a folder.
+fn is_file_path(p: &str) -> bool {
     let b = p.as_bytes();
     let drive = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
     let unc = p.starts_with("\\\\") && p[2..].contains('\\');
-    (drive || unc) && !p.ends_with('\\') && !p.contains(['*', '?', '/'])
+    let relative = !p.starts_with("\\\\") && !p.contains(':') && p.trim_start_matches('\\').contains('\\');
+    (drive || unc || relative) && !p.ends_with('\\') && !p.contains(['*', '?', '/'])
 }
 
 pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
@@ -85,8 +86,10 @@ pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
             FilterRule::Folder { value } if value.trim().is_empty() => {
                 return Err("כלל סינון: יש להזין שם או נתיב של תיקייה".into())
             }
-            FilterRule::File { value } if !is_full_file_path(value.trim()) => {
-                return Err(format!("כלל סינון: יש להזין נתיב מלא של קובץ, למשל C:\\pagefile.sys ({value})"))
+            FilterRule::File { value } if !is_file_path(value.trim()) => {
+                return Err(format!(
+                    "כלל סינון: יש להזין נתיב של קובץ - מלא (C:\\pagefile.sys) או יחסי לתיקיית המקור (Docs\\a.txt) ({value})"
+                ))
             }
             FilterRule::LargerThan { mb: 0 } => return Err("כלל סינון: גודל הקובץ חייב להיות לפחות 1MB".into()),
             FilterRule::OlderThan { days: 0 } => return Err("כלל סינון: מספר הימים חייב להיות לפחות 1".into()),

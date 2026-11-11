@@ -1,4 +1,4 @@
-import { FileText, Pause, RotateCcw } from "lucide-react";
+import { FileText, Pause, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { fmtBytes, fmtNumber, fmtSmart, MODE_LABEL } from "../lib/format";
@@ -36,6 +36,7 @@ export default function PausedCard({
   onResume,
   onRestart,
   onDetails,
+  onDismiss,
 }: {
   /** Resumable tasks that are not running or queued. */
   tasks: Task[];
@@ -43,6 +44,7 @@ export default function PausedCard({
   onResume: (id: string) => void;
   onRestart: (task: Task, mode: BackupMode | null) => void;
   onDetails: (id: string) => void;
+  onDismiss: (task: Task) => void;
 }) {
   const [done, setDone] = useState<Record<string, Done | null>>({});
   // Re-read when a task gets paused again (its last run changes).
@@ -110,6 +112,9 @@ export default function PausedCard({
                 </Button>
                 <Button size="sm" variant="ghost" icon={<FileText size={14} />} onClick={() => onDetails(t.id)}>
                   פרטים
+                </Button>
+                <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={() => onDismiss(t)}>
+                  ביטול
                 </Button>
               </div>
             </li>

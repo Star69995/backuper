@@ -6,6 +6,7 @@ mod commands;
 mod core;
 mod drives;
 mod engine;
+mod filterlist;
 mod filters;
 mod manifest;
 mod model;
@@ -148,6 +149,7 @@ pub fn run() {
             commands::reorder_tasks,
             commands::run_tasks,
             commands::resume_task,
+            commands::dismiss_paused,
             commands::cancel_task,
             commands::skip_totals_scan,
             commands::get_history,
@@ -166,6 +168,8 @@ pub fn run() {
             commands::set_autostart,
             commands::import_tasks,
             commands::export_tasks,
+            commands::export_filters,
+            commands::import_filters,
             commands::list_task_snapshots,
             commands::dismiss_notice,
             commands::answer_drive_prompts,

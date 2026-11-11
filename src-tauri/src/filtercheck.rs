@@ -191,6 +191,7 @@ pub fn check(rules: &[FilterRule], global: &[FilterRule], sources: &[String], pr
     }
     let item = &parts[parts.len() - 1];
     out.folder = item.is_dir();
+    out.full_path = (absolute || !base.is_empty()).then(|| full.clone());
     let is_folder = out.folder;
     out.on_disk = on_disk.map(|d| OnDisk {
         size: d.size,
@@ -276,6 +277,16 @@ pub fn check(rules: &[FilterRule], global: &[FilterRule], sources: &[String], pr
         out.notes
             .push("בתיקייה נבדקים רק כללי התיקיות. כללים על קבצים חלים על כל קובץ בתוכה בנפרד.".into());
     }
+    // A name that isn't on disk and wasn't marked as a folder could be either: answer for a folder too.
+    if out.on_disk.is_none() && !folder_hint {
+        let as_folder = FilterProbe {
+            path: format!("{typed}\\"),
+            ..probe.clone()
+        };
+        let mut f = check(rules, global, &sources, &as_folder);
+        f.notes.clear();
+        out.as_folder = Some(Box::new(f));
+    }
     out
 }
 
@@ -328,6 +339,41 @@ mod tests {
         assert_eq!((c.kept, c.rules[3].effect), (Some(false), RuleEffect::Skips));
         let c = check(&rules, &[], &src, &probe(r"build2\"));
         assert!(c.folder && c.kept == Some(false) && c.rules[3].detail.is_none());
+    }
+
+    #[test]
+    fn a_name_not_on_disk_is_also_read_as_a_folder() {
+        let rules = [R::Folder { value: "Dropbox".into() }];
+        let src = vec![r"Z:\nowhere\src".to_string()];
+        let c = check(&rules, &[], &src, &probe("Dropbox"));
+        assert_eq!(c.kept, Some(true));
+        let f = c.as_folder.expect("read as a folder too");
+        assert!(f.folder && f.kept == Some(false) && f.as_folder.is_none());
+        assert_eq!(f.full_path.as_deref(), Some(r"Z:\nowhere\src\Dropbox"));
+        // Typed as a folder, there is only one reading.
+        assert!(check(&rules, &[], &src, &probe(r"Dropbox\")).as_folder.is_none());
+    }
+
+    #[test]
+    fn relative_paths_in_rules_are_read_under_the_source() {
+        let rules = [
+            R::Folder { value: r"web\cache".into() },
+            R::File { value: r"docs\a.txt".into() },
+        ];
+        assert!(filters::validate(&rules).is_ok());
+        let src = vec![r"Z:\nowhere\src".to_string()];
+        let c = check(&rules, &[], &src, &probe(r"Z:\nowhere\src\web\cache\x.js"));
+        assert_eq!((c.kept, c.rules[0].effect), (Some(false), RuleEffect::Skips));
+        let c = check(&rules, &[], &src, &probe(r"docs\a.txt"));
+        assert_eq!((c.kept, c.rules[1].effect), (Some(false), RuleEffect::Skips));
+        let c = check(&rules, &[], &src, &probe(r"other\web\cache\x.js"));
+        assert_eq!(c.kept, Some(true));
+        // A leading * keeps meaning "at any depth".
+        let rules = [R::Folder { value: r"*\web\cache".into() }];
+        let c = check(&rules, &[], &src, &probe(r"other\web\cache\x.js"));
+        assert_eq!(c.kept, Some(false));
+        let c = check(&rules, &[], &src, &probe(r"web\cache\x.js"));
+        assert_eq!(c.kept, Some(false));
     }
 
     #[test]

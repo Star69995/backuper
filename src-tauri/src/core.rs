@@ -257,6 +257,30 @@ impl Core {
         self.changed();
     }
 
+    /// Gives up on a paused backup so it leaves the "paused" list: with `delete` its partial folders
+    /// are removed too (the ones that are unsafe to delete stay, and the task stays paused). Does
+    /// nothing while the task runs or waits in the queue.
+    pub fn dismiss_paused(&self, task_id: &str, delete: bool) -> Result<(), String> {
+        let busy = self.queue.lock().unwrap().iter().any(|j| j.task_id == task_id)
+            || self.current.lock().unwrap().as_ref().is_some_and(|p| p.task_id == task_id);
+        if busy {
+            return Err("המשימה רצה או ממתינה בתור".into());
+        }
+        let task = self.store.lock().unwrap().tasks.iter().find(|t| t.id == task_id).cloned();
+        let Some(task) = task else { return Ok(()) };
+        if delete && backup::discard_partials(&task) > 0 {
+            return Err("חלק מההעתקה החלקית לא נמחק: זה הגיבוי המלא היחיד שיש, או שהתיקייה בשימוש. אפשר להסיר את ההשהיה בלי למחוק".into());
+        }
+        let mut s = self.store.lock().unwrap();
+        if let Some(st) = s.states.get_mut(task_id) {
+            st.resumable = false;
+        }
+        s.save_states();
+        drop(s);
+        self.changed();
+        Ok(())
+    }
+
     /// Stops the scan beside a running full copy that finds how much there is to copy: the copy
     /// carries on with counters only (and the estimate from the last backup, if it had one).
     pub fn skip_totals_scan(&self) {
@@ -368,7 +392,8 @@ impl Core {
                 cancel: &self.cancel,
                 discard: &self.discard,
                 skip_scan: &self.skip_scan,
-                fresh: job.fresh || matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
+                fresh: job.fresh,
+                scheduled: matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
             };
             let mut pending_size = 0u64;

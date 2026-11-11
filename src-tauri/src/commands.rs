@@ -206,6 +206,12 @@ pub fn cancel_task(core: CoreState, id: String, discard: bool) {
     core.cancel(&id, discard);
 }
 
+/// Removes a paused backup from the paused list (`delete`: its partial folders go too).
+#[tauri::command]
+pub fn dismiss_paused(core: CoreState, id: String, delete: bool) -> Result<(), String> {
+    core.dismiss_paused(&id, delete)
+}
+
 #[tauri::command]
 pub fn skip_totals_scan(core: CoreState) {
     core.skip_totals_scan();
@@ -549,6 +555,19 @@ pub fn export_tasks(core: CoreState, path: String, ids: Option<Vec<String>>) -> 
     };
     crate::tasklist::write_file(std::path::Path::new(&path), &tasks).map_err(|e| format!("השמירה נכשלה: {e}"))?;
     Ok(tasks.len())
+}
+
+/// The rules of the filter editor (a task's or the global ones) as a file.
+#[tauri::command]
+pub fn export_filters(path: String, rules: Vec<crate::model::FilterRule>) -> Result<(), String> {
+    crate::filterlist::write_file(std::path::Path::new(&path), &rules).map_err(|e| format!("השמירה נכשלה: {e}"))
+}
+
+/// Reads a filter list file: the valid rules, and how many entries were left out.
+#[tauri::command]
+pub fn import_filters(path: String) -> Result<crate::filterlist::FilterImport, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("הקריאה נכשלה: {e}"))?;
+    crate::filterlist::parse(&bytes)
 }
 
 /// Snapshots of the task list, newest first: the automatic ones, or those in a folder the

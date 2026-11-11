@@ -34,6 +34,8 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
   const out: FilterCheck = {
     kept: null,
     folder: false,
+    fullPath: null,
+    asFolder: null,
     reason: null,
     onDisk: null,
     notes: [],
@@ -44,6 +46,7 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
   if (!path) return out;
   out.folder = path.endsWith("\\");
   path = path.replace(/\\+$/, "");
+  out.fullPath = /^([a-z]:\\|\\\\)/i.test(path) ? path : sources[0] ? `${sources[0].replace(/\\+$/, "")}\\${path}` : null;
   const base = sources.find((s) => path.toLowerCase().startsWith(s.toLowerCase().replace(/\\+$/, "") + "\\"));
   const rel = base ? path.slice(base.replace(/\\+$/, "").length + 1) : path.replace(/^[a-z]:\\/i, "");
   const parts = rel.split("\\").filter(Boolean);
@@ -133,6 +136,8 @@ function mockFilterCheck(rules: FilterRule[], global: FilterRule[], sources: str
   if (!out.kept) out.reason = out.folder ? "כלל סינון מדלג על התיקייה, יחד עם כל מה שבתוכה." : "כלל סינון מדלג על הקובץ.";
   if (!base && sources.length)
     out.notes.push("הנתיב לא נמצא בתוך אף אחת מתיקיות המקור של המשימה, אז הוא נבדק כאילו מגבים את הכונן כולו.");
+  // Nothing is on disk here, so a name without a trailing "\" could be a folder as well.
+  if (!out.folder) out.asFolder = { ...mockFilterCheck(rules, global, sources, { ...probe, path: `${probe.path.trim()}\\` }), notes: [] };
   return out;
 }
 const iso = (minutesFromNow: number) => new Date(Date.now() + minutesFromNow * 60_000).toISOString();
@@ -609,6 +614,17 @@ export function installDevMock() {
         if (String(a.path).endsWith(".lst")) return { source: "cobian", tasks: cobianImport(), simple: null, replaces: [] };
         if (String(a.path).endsWith("config.json")) return simpleImport((a.split as ImportSplit | undefined) ?? "one");
         return snapshotImport(tasks);
+      case "export_filters":
+        return null;
+      case "import_filters":
+        return {
+          rules: [
+            { kind: "extension", value: "tmp, log, bak" },
+            { kind: "folder", value: "cache" },
+            { kind: "folder", value: "node_modules" },
+          ],
+          skipped: 1,
+        };
       case "export_tasks":
         return a.ids ? (a.ids as string[]).length : tasks.length;
       case "dismiss_notice":
@@ -678,6 +694,9 @@ export function installDevMock() {
         if (tasks.find((t) => t.id === a.id)?.cobianPending) return false;
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return true;
+      case "dismiss_paused":
+        states[a.id as string] = { ...states[a.id as string], resumable: false };
+        return null;
       case "plugin:app|version":
         return "0.2.0 (dev)";
       case "plugin:event|listen":

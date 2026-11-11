@@ -160,11 +160,51 @@ pub fn list_backups(dest: &str, folder_name: &str) -> Vec<BackupFolder> {
     out
 }
 
+/// The `.partial` folder of `kind` to continue. With several (a run that started over, or a new one
+/// begun before this was fixed) the one holding the most data, so the most work is kept; sizes are
+/// only read then, as one walk per candidate. The newest wins a tie.
+fn fullest_partial(backups: &[BackupFolder], kind: BackupMode) -> Option<&BackupFolder> {
+    let mut candidates = backups.iter().filter(|b| b.partial && b.kind == kind);
+    let first = candidates.next()?;
+    let rest: Vec<&BackupFolder> = candidates.collect();
+    if rest.is_empty() {
+        return Some(first);
+    }
+    let size = |b: &BackupFolder| manifest::scan(Path::new(&b.path)).0.iter().map(|f| f.size).sum::<u64>();
+    let mut best = (size(first), first);
+    for b in rest {
+        let s = size(b);
+        if s > best.0 {
+            best = (s, b);
+        }
+    }
+    Some(best.1)
+}
+
 /// Whether any of the task's sources has a folder left over from a paused or failed run.
 pub fn has_partial(task: &Task) -> bool {
     task.sources
         .iter()
         .any(|s| list_backups(&task.destination, &s.folder_name).iter().any(|b| b.partial))
+}
+
+/// Gives up on a paused backup: deletes the task's `.partial` folders. A partial full is left alone
+/// when no complete full sits next to it in that source (it may be the previous full, updated in
+/// place, i.e. the only backup there is). Returns how many folders were left, so the caller knows
+/// whether anything is still there to continue.
+pub fn discard_partials(task: &Task) -> usize {
+    let mut left = 0;
+    for s in &task.sources {
+        let backups = list_backups(&task.destination, &s.folder_name);
+        let has_full = backups.iter().any(|b| !b.partial && b.kind == BackupMode::Full);
+        for b in backups.iter().filter(|b| b.partial) {
+            let safe = b.kind == BackupMode::Incremental || has_full;
+            if !safe || fs::remove_dir_all(&b.path).is_err() {
+                left += 1;
+            }
+        }
+    }
+    left
 }
 
 /// Every source's backups on disk, each with its size: from its index when it has one, else one
@@ -522,6 +562,7 @@ fn apply_stats(run: &mut SourceRun, stats: CopyStats) {
     run.files_failed = stats.files_failed;
     run.errors = stats.errors;
     run.exit_code = stats.exit_code;
+    run.debug = stats.debug;
 }
 
 pub struct RunContext<'a> {
@@ -532,8 +573,11 @@ pub struct RunContext<'a> {
     pub cancel: &'a AtomicBool,
     /// With `cancel`: stop for good (delete the half-done folder) instead of pausing.
     pub discard: &'a AtomicBool,
-    /// Don't continue a leftover `.partial` folder: start a new one.
+    /// Don't continue a leftover `.partial` folder: start a new one ("start over").
     pub fresh: bool,
+    /// A scheduled or catch-up run: starts a new cycle, so it leaves a `.partial` folder alone - unless
+    /// there is no complete full backup yet, when that folder is all the progress there is.
+    pub scheduled: bool,
     /// Set by the user: stop (and don't start) the scan that finds a full copy's totals.
     pub skip_scan: &'a AtomicBool,
     /// `Settings.exact_progress`: always run the list-only pass before a full copy.
@@ -706,7 +750,8 @@ pub fn backup_source(
     // A folder left by a stopped or failed run of the same kind: carry on in it instead of starting
     // over (not for a scheduled run, which starts the new cycle). It keeps its name until the run
     // completes, and only then gets the new date.
-    let resume = backups.iter().find(|b| !ctx.fresh && b.partial && b.kind == mode);
+    let new_cycle = ctx.fresh || (ctx.scheduled && backups.iter().any(|b| !b.partial && b.kind == BackupMode::Full));
+    let resume = if new_cycle { None } else { fullest_partial(&backups, mode) };
     let work = match resume {
         Some(b) => PathBuf::from(&b.path),
         None => with_partial(&final_path),
@@ -770,6 +815,28 @@ pub fn backup_source(
                         run,
                         format!("לא ניתן ליצור את תיקיית הגיבוי: {e}. ודאו שכונן היעד מחובר, שיש בו מקום ושיש הרשאה לכתוב אליו."),
                     );
+                }
+            }
+            // A folder that already holds files (the previous full, or a resumed copy) may hold
+            // items the rules skip now; robocopy's mirror leaves those alone, so remove them here.
+            if (reused || resume.is_some()) && *ctx.filters != Filters::default() {
+                on_event(EngineEvent::Phase("pruning"));
+                match native::prune_filtered(&source, &work, ctx.filters, ctx.cancel) {
+                    Ok(Some(p)) => {
+                        if p.files > 0 {
+                            notes.push(format!("נמחקו {} קבצים שלא נכללים עוד בסינון (לפי כללי הסינון הנוכחיים)", p.files));
+                            run.freed_bytes += p.bytes;
+                        }
+                        if p.failed > 0 {
+                            notes.push(format!("{} פריטים שסוננו החוצה לא נמחקו מהגיבוי (בשימוש או ללא הרשאה)", p.failed));
+                        }
+                    }
+                    Ok(None) => {
+                        run.status = Some(RunStatus::Cancelled);
+                        run.message = stopped_message(&work, discard_stopped(ctx, &work, discard_safe));
+                        return run;
+                    }
+                    Err(e) => notes.push(format!("לא ניתן לנקות מהגיבוי פריטים שסוננו החוצה: {e}")),
                 }
             }
             on_event(EngineEvent::Phase("scanning"));
@@ -895,6 +962,17 @@ pub fn backup_source(
         result.message
     };
     apply_stats(&mut run, result.stats);
+    run.debug.insert(
+        0,
+        format!(
+            "Backuper {}, {mode:?}; source {} ({}); destination {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            source.display(),
+            native::volume_info(&source),
+            work.display(),
+            native::volume_info(&work),
+        ),
+    );
     if work.exists() {
         run.target_folder = Some(work.to_string_lossy().to_string());
     }
@@ -1032,6 +1110,7 @@ mod tests {
         cancel: AtomicBool,
         discard: AtomicBool,
         fresh: AtomicBool,
+        scheduled: AtomicBool,
         skip_scan: AtomicBool,
         filters: Filters,
     }
@@ -1048,6 +1127,7 @@ mod tests {
                 cancel: AtomicBool::new(false),
                 discard: AtomicBool::new(false),
                 fresh: AtomicBool::new(false),
+                scheduled: AtomicBool::new(false),
                 skip_scan: AtomicBool::new(false),
                 filters,
             }
@@ -1066,6 +1146,7 @@ mod tests {
                 cancel: &self.cancel,
                 discard: &self.discard,
                 fresh: self.fresh.load(Ordering::SeqCst),
+                scheduled: self.scheduled.load(Ordering::SeqCst),
                 skip_scan: &self.skip_scan,
                 exact_progress: false,
             };
@@ -1559,6 +1640,75 @@ mod tests {
         assert_eq!(index.len(), 2, "the reused folder gets a fresh index");
     }
 
+    /// A fast full makes the reused folder match the source and the current rules: what was deleted
+    /// from the source or is now filtered out goes too.
+    #[test]
+    fn fast_full_removes_deleted_and_newly_filtered_items() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        for d in ["gone", "cache", "keep"] {
+            fs::create_dir_all(src.join(d)).unwrap();
+            fs::write(src.join(d).join("f.txt"), "x").unwrap();
+        }
+        fs::write(src.join("junk.tmp"), "t").unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = Task {
+            reuse_previous: true,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        fs::remove_dir_all(src.join("gone")).unwrap();
+        let with_rules = Env {
+            root: env.root.clone(),
+            cancel: AtomicBool::new(false),
+            discard: AtomicBool::new(false),
+            fresh: AtomicBool::new(false),
+            scheduled: AtomicBool::new(false),
+            skip_scan: AtomicBool::new(false),
+            filters: crate::filters::compile(&[
+                crate::model::FilterRule::Folder { value: "cache".into() },
+                crate::model::FilterRule::Extension { value: "tmp".into() },
+            ]),
+        };
+        let r = with_rules.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        let b = dst.join("Src 2026-10-02 03-00 מלא");
+        assert!(b.join("keep").join("f.txt").exists() && b.join("a.txt").exists());
+        assert!(!b.join("gone").exists(), "deleted from the source");
+        assert!(!b.join("cache").exists(), "folder now filtered out");
+        assert!(!b.join("junk.tmp").exists(), "file now filtered out");
+    }
+
+    /// Continuing a partial full applies the rules as they are now: what they skip is removed from it.
+    #[test]
+    fn resumed_full_removes_newly_filtered_items() {
+        let env = Env::new();
+        let (src, dst) = partial_setup(&env, "Src 2026-10-01 03-00 מלא.partial", &["a.txt", "b.txt"]);
+        fs::create_dir_all(src.join("cache")).unwrap();
+        fs::write(src.join("cache").join("f.txt"), "x").unwrap();
+        let partial = dst.join("Src 2026-10-01 03-00 מלא.partial");
+        fs::create_dir_all(partial.join("cache")).unwrap();
+        fs::write(partial.join("cache").join("f.txt"), "x").unwrap();
+        let with_rule = Env {
+            root: env.root.clone(),
+            cancel: AtomicBool::new(false),
+            discard: AtomicBool::new(false),
+            fresh: AtomicBool::new(false),
+            scheduled: AtomicBool::new(false),
+            skip_scan: AtomicBool::new(false),
+            filters: crate::filters::compile(&[
+                crate::model::FilterRule::Folder { value: "cache".into() },
+                crate::model::FilterRule::Pattern { value: "b.txt".into() },
+            ]),
+        };
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = with_rule.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        let b = dst.join("Src 2026-10-02 03-00 מלא");
+        assert!(b.join("a.txt").exists() && b.join("c.txt").exists());
+        assert!(!b.join("cache").exists() && !b.join("b.txt").exists(), "{r:?}");
+    }
+
     #[test]
     fn incrementals_use_the_backup_index() {
         let env = Env::new();
@@ -1957,6 +2107,65 @@ mod tests {
         assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03-00 מלא"], "the old partial is cleaned up by the new full");
     }
 
+    /// Builds a source with `a.txt`..`c.txt` and a partial full holding the first `copied` of them.
+    fn partial_setup(env: &Env, partial_name: &str, copied: &[&str]) -> (PathBuf, PathBuf) {
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        let partial = dst.join(partial_name);
+        fs::create_dir_all(&partial).unwrap();
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(src.join(f), f).unwrap();
+        }
+        for f in copied {
+            fs::copy(src.join(f), partial.join(f)).unwrap();
+        }
+        (src, dst)
+    }
+
+    /// With no complete full yet, a scheduled run (or catch-up) continues the partial folder: it is
+    /// all the progress there is, and a new folder would copy everything again.
+    #[test]
+    fn scheduled_run_continues_a_partial_full_when_no_full_is_complete() {
+        let env = Env::new();
+        let (src, dst) = partial_setup(&env, "Src 2026-10-01 03-00 מלא.partial", &["a.txt", "b.txt"]);
+        env.scheduled.store(true, Ordering::SeqCst);
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = env.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(r[0].files_copied, 1, "only the missing file is copied: {r:?}");
+        assert!(r[0].message.contains("המשיך מגיבוי"), "{}", r[0].message);
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03-00 מלא"]);
+    }
+
+    /// Once a complete full exists, a scheduled full starts a new cycle and leaves the partial alone.
+    #[test]
+    fn scheduled_run_starts_over_when_a_full_is_complete() {
+        let env = Env::new();
+        let (src, dst) = partial_setup(&env, "Src 2026-10-02 03-00 מלא.partial", &["a.txt"]);
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        env.scheduled.store(true, Ordering::SeqCst);
+        let r = env.run(&t, BackupMode::Full, "2026-10-03 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(r[0].files_copied, 3, "everything is copied again: {r:?}");
+        assert!(!r[0].message.contains("המשיך מגיבוי"), "{}", r[0].message);
+    }
+
+    /// Of several partial folders the one with the most data is continued, not the newest.
+    #[test]
+    fn the_fullest_partial_folder_is_continued() {
+        let env = Env::new();
+        let (src, dst) = partial_setup(&env, "Src 2026-10-01 03-00 מלא.partial", &["a.txt", "b.txt"]);
+        let newer = dst.join("Src 2026-10-02 03-00 מלא.partial");
+        fs::create_dir_all(&newer).unwrap();
+        fs::copy(src.join("a.txt"), newer.join("a.txt")).unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        let r = env.run(&t, BackupMode::Full, "2026-10-03 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert_eq!(r[0].files_copied, 1, "continued the older, fuller folder: {r:?}");
+        assert!(r[0].message.contains("2026-10-01 03-00"), "{}", r[0].message);
+    }
+
     /// A partial folder of the other kind isn't touched by a run (it's cleaned up with the next full).
     #[test]
     fn partial_of_the_other_kind_is_not_resumed() {
@@ -1992,6 +2201,7 @@ mod tests {
             cancel: AtomicBool::new(false),
             discard: AtomicBool::new(false),
             fresh: AtomicBool::new(false),
+            scheduled: AtomicBool::new(false),
             skip_scan: AtomicBool::new(false),
             filters: crate::filters::compile(&[crate::model::FilterRule::Include { value: "*.lrcat".into() }]),
         };

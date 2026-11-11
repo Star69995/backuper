@@ -15,6 +15,7 @@ import type {
   RegexCheck,
   RestorePlan,
   FilterCheck,
+  FilterImport,
   FilterProbe,
   FilterRule,
   RunRecord,
@@ -39,6 +40,8 @@ export const api = {
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
+  /** Takes a paused backup off the paused list; `del` also deletes its partial folders. Rejects with a message if it can't. */
+  dismissPaused: (id: string, del: boolean) => invoke<void>("dismiss_paused", { id, delete: del }),
   /** Gives up on the scan that works out how much a running full backup has to copy. */
   skipTotalsScan: () => invoke<void>("skip_totals_scan"),
   history: () => invoke<RunRecord[]>("get_history"),
@@ -62,6 +65,9 @@ export const api = {
   importTasks: (path: string, split?: ImportSplit) => invoke<ImportPreview>("import_tasks", { path, split }),
   /** All tasks when `ids` is null. Returns how many were saved. */
   exportTasks: (path: string, ids: string[] | null = null) => invoke<number>("export_tasks", { path, ids }),
+  /** The rules of a filter editor as a file / the valid rules of such a file. */
+  exportFilters: (path: string, rules: FilterRule[]) => invoke<void>("export_filters", { path, rules }),
+  importFilters: (path: string) => invoke<FilterImport>("import_filters", { path }),
   /** The automatic snapshots, or those in `dir` (a folder the user picked). */
   listTaskSnapshots: (dir: string | null = null) => invoke<TaskSnapshot[]>("list_task_snapshots", { dir }),
   /** Cobian Backup / Reflector task lists on this computer, and the folder to open a file dialog in. */

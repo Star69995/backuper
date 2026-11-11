@@ -29,6 +29,12 @@ export type FilterRule =
 
 export type FilterKind = FilterRule["kind"];
 
+/** What reading a filter list file gave: the valid rules, and how many entries were left out. */
+export interface FilterImport {
+  rules: FilterRule[];
+  skipped: number;
+}
+
 /** Live reading of a regex filter: why it is invalid, what it says piece by piece, and a try-out on a sample name. */
 export interface RegexCheck {
   error: string | null;
@@ -61,6 +67,10 @@ export interface FilterCheck {
   /** null = nothing to check (see notes). */
   kept: boolean | null;
   folder: boolean;
+  /** The checked path in full (a relative one under the task's first source); null with no source to read it under. */
+  fullPath: string | null;
+  /** The same path as a folder, for a name that isn't on disk and wasn't typed with a trailing `\`. */
+  asFolder: FilterCheck | null;
   reason: string | null;
   /** The real file the check used, when the path exists. */
   onDisk: { size: number; modified: string | null; hidden: boolean; system: boolean } | null;
@@ -153,7 +163,7 @@ export interface Progress {
   taskId: string;
   taskName: string;
   mode: BackupMode;
-  phase: "scanning" | "deleting" | "copying";
+  phase: "scanning" | "deleting" | "pruning" | "copying";
   startedAt: string;
   sourceIndex: number;
   sourceCount: number;
@@ -243,6 +253,8 @@ export interface FileError {
   path: string;
   code: number | null;
   message: string;
+  /** What the file looked like when it failed (attributes, size, destination...); only in the copied error text. */
+  debug?: string;
 }
 
 export interface SourceRun {
@@ -263,6 +275,8 @@ export interface SourceRun {
   errors: FileError[];
   exitCode: number | null;
   logFile: string | null;
+  /** How the source was copied (engine command line, volumes...); only in the copied error text. */
+  debug?: string[];
 }
 
 export interface RunRecord {

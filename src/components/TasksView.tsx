@@ -32,7 +32,6 @@ import {
   Power,
   PowerOff,
   RotateCcw,
-  Search,
   Pause,
   Square,
   Trash2,
@@ -83,9 +82,9 @@ import {
   PathLink,
   PathText,
   RunIcon,
+  SearchBox,
   Select,
   Spinner,
-  TextInput,
   Toggle,
 } from "./ui";
 
@@ -401,7 +400,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
   };
 
-  const { resume, restart: restartTask } = useResumeTask();
+  const { resume, restart: restartTask, dismiss } = useResumeTask();
   const restart = (task: Task, mode: BackupMode | null) => restartTask(task.id, task.name, mode);
 
   // Tasks imported from Cobian wait for the decision about Cobian's backups before anything runs.
@@ -636,15 +635,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
             </IconButton>
           )}
           {snap.tasks.length > 0 && (
-            <div className="relative">
-              <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
-              <TextInput
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="חיפוש..."
-                className="w-44 ps-9 sm:w-56"
-              />
-            </div>
+            <SearchBox value={query} onChange={setQuery} placeholder="חיפוש..." className="w-44 sm:w-56" />
           )}
           <Menu
             trigger={(open) => (
@@ -742,6 +733,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
         onResume={resume}
         onRestart={restart}
         onDetails={showLastRun}
+        onDismiss={(t) => dismiss(t.id, t.name)}
       />
 
       {sel.length > 0 && (

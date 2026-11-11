@@ -1,4 +1,4 @@
-import { type LucideProps, Play, SkipForward, X } from "lucide-react";
+import { type LucideProps, Play, Search, SkipForward, X } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -116,6 +116,26 @@ export const inputCls =
 
 export function TextInput({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cx(inputCls, withWidth(className))} {...rest} />;
+}
+
+/** Text field with a magnifier on the start side; `className` sizes the field itself. */
+export function SearchBox({
+  value,
+  onChange,
+  className,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange"> & { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="relative">
+      <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
+      <TextInput
+        {...rest}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={cx("ps-9", className)}
+      />
+    </div>
+  );
 }
 
 export function NumberInput({
@@ -380,6 +400,7 @@ export function Modal({
   size = "md",
   dismissable = true,
   bodyRef,
+  toolbar,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -388,6 +409,8 @@ export function Modal({
   footer?: ReactNode;
   size?: "sm" | "md" | "lg" | "xl";
   dismissable?: boolean;
+  /** A row under the title that stays put while the body scrolls (e.g. a search box). */
+  toolbar?: ReactNode;
   /** The scrolling body, for content that tracks its own scroll position. */
   bodyRef?: Ref<HTMLDivElement>;
 }) {
@@ -426,6 +449,7 @@ export function Modal({
             <X size={18} />
           </IconButton>
         </div>
+        {toolbar && <div className="border-b border-line px-5 py-2">{toolbar}</div>}
         <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {children}
         </div>

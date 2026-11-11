@@ -303,6 +303,10 @@ pub struct FileError {
     pub path: String,
     pub code: Option<u32>,
     pub message: String,
+    /// What the file looked like when it failed (attributes, reparse tag, size, destination...), for
+    /// debugging: shown only in the copied error text. Empty = nothing recorded.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub debug: String,
 }
 
 impl FileError {
@@ -316,6 +320,7 @@ impl FileError {
             path: path.to_string(),
             code,
             message: message.to_string(),
+            debug: String::new(),
         }
     }
 }
@@ -358,6 +363,9 @@ pub struct SourceRun {
     pub errors: Vec<FileError>,
     pub exit_code: Option<i32>,
     pub log_file: Option<String>,
+    /// How the source was copied (engine command line, exit code, volumes, files that were saved
+    /// by a second try...), for debugging: shown only in the copied error text.
+    pub debug: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -471,7 +479,7 @@ pub struct Progress {
     pub task_id: String,
     pub task_name: String,
     pub mode: BackupMode,
-    /// "scanning" | "deleting" | "copying"
+    /// "scanning" | "deleting" | "pruning" | "copying"
     pub phase: String,
     pub started_at: DateTime<Local>,
     /// 1-based index of the source being backed up, out of source_count.
@@ -628,6 +636,12 @@ pub struct FilterCheck {
     /// None = nothing to check (no path, or not a usable one: see `notes`).
     pub kept: Option<bool>,
     pub folder: bool,
+    /// The checked path as a full path (a relative one is read under the task's first source); what a
+    /// "skip this" rule added from the check should hold. None when there is no source to read it under.
+    pub full_path: Option<String>,
+    /// The same path read as a folder, when it isn't on disk and wasn't typed with a trailing `\`
+    /// (so it could be a file or a folder). Its own `as_folder` is always None.
+    pub as_folder: Option<Box<FilterCheck>>,
     /// Hebrew: why it is left out (None when kept).
     pub reason: Option<String>,
     pub on_disk: Option<OnDisk>,

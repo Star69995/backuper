@@ -16,10 +16,13 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
     return () => clearInterval(t);
   }, []);
 
-  const scanning = p.phase === "scanning" || p.phase === "deleting";
-  const phaseText = { scanning: "סורק את הקבצים...", deleting: "מוחק גיבויים קודמים לפני ההעתקה...", copying: "מעתיק קבצים" }[
-    p.phase
-  ];
+  const scanning = p.phase !== "copying";
+  const phaseText = {
+    scanning: "סורק את הקבצים...",
+    deleting: "מוחק גיבויים קודמים לפני ההעתקה...",
+    pruning: "מנקה מהגיבוי קבצים שכללי הסינון מדלגים עליהם...",
+    copying: "מעתיק קבצים",
+  }[p.phase];
   // No totals while copying = the pre-scan was skipped and nothing could estimate the work: counters only.
   // An estimate from the previous backup can fall short (the source grew): "X of Y" and a percentage would read wrong.
   const overshot = p.bytesDone > p.bytesTotal || p.filesDone > p.filesTotal;
@@ -81,7 +84,13 @@ export default function RunningCard({ progress: p, queue, tasks }: { progress: P
         <ProgressBar value={pct} />
         <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted">
           {scanning ? (
-            <span>{p.phase === "deleting" ? "מפנה מקום ביעד" : "מחשב את כמות השינויים"}</span>
+            <span>
+              {p.phase === "deleting"
+                ? "מפנה מקום ביעד"
+                : p.phase === "pruning"
+                  ? "הכללים שונו מאז ההעתקה הקודמת בתיקייה"
+                  : "מחשב את כמות השינויים"}
+            </span>
           ) : unknownTotal ? (
             <span>
               הועתקו {fmtNumber(p.filesDone)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi>

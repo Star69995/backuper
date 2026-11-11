@@ -2,9 +2,9 @@ import { api } from "../api";
 import type { BackupMode } from "../types";
 import { useFeedback } from "./feedback";
 
-/** Continue / start over for a paused backup (the paused card, the task row and menu, the run details). Both return true once queued. */
+/** Continue / start over / cancel for a paused backup (the paused card, the task row and menu, the run details). Each returns true once done. */
 export function useResumeTask() {
-  const { toast, confirm } = useFeedback();
+  const { toast, confirm, choose } = useFeedback();
 
   /** The paused run again, carrying on in the folder it left. */
   const resume = async (taskId: string) => {
@@ -27,5 +27,32 @@ export function useResumeTask() {
     return n > 0;
   };
 
-  return { resume, restart };
+  /** Gives up on the paused backup for good: it leaves the paused list, with or without deleting its partial folder. */
+  const dismiss = async (taskId: string, taskName: string) => {
+    const answer = await choose({
+      title: `לבטל את הגיבוי המושהה "${taskName}"?`,
+      message: (
+        <>
+          אחרי הביטול לא יהיה אפשר להמשיך אותו מאותה נקודה, והוא ייעלם מהרשימה.
+          <br />
+          אם תמחקו, ההעתקה החלקית נמחקת מהיעד (הגיבויים השלמים לא נפגעים). אם תשמרו, התיקייה נשארת ביעד והגיבוי הבא ימחק אותה אחרי שיסתיים.
+        </>
+      ),
+      options: [
+        { value: "keep", label: "ביטול ושמירת התיקייה" },
+        { value: "delete", label: "ביטול ומחיקה", danger: true },
+      ],
+    });
+    if (!answer) return false;
+    try {
+      await api.dismissPaused(taskId, answer === "delete");
+      toast({ tone: "info", title: "הגיבוי המושהה בוטל" });
+      return true;
+    } catch (e) {
+      toast({ tone: "bad", title: String(e) });
+      return false;
+    }
+  };
+
+  return { resume, restart, dismiss };
 }

@@ -187,6 +187,10 @@ struct Rules {
     exclude_dir_names: Vec<Pattern>,
     /// /XD entries with a backslash: full paths (robocopy never matches them as relative paths).
     exclude_dir_paths: Vec<Pattern>,
+    /// The entries of `exclude_dir_paths` / `exclude_file_paths` with a wildcard: robocopy rejects those on its
+    /// command line, so `list_files` notes what they match (`Listing::wild_dirs` / `wild_files`).
+    exclude_dir_wild: Vec<Pattern>,
+    exclude_file_wild: Vec<Pattern>,
     /// The source as robocopy prints it, for matching full paths.
     base: String,
     /// /MAX: larger files are skipped.
@@ -207,8 +211,16 @@ pub fn compile_regex(p: &str) -> Result<Regex, String> {
         .map_err(|e| e.to_string())
 }
 
+/// A folder / file entry with a wildcard and a backslash (`*\src-tauri\target`): robocopy's /XD and /XF reject
+/// it ("Invalid Parameter"), so `resolve_regex` swaps it for the full paths it matches.
+fn is_wild_path(s: &str) -> bool {
+    let s = s.trim();
+    s.contains('\\') && s.contains(['*', '?'])
+}
+
 impl Rules {
     fn new(source: &Path, f: &Filters) -> Self {
+        let f = &f.for_source(source);
         let patterns = |v: &[String]| -> Vec<Pattern> {
             v.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(Pattern::new).collect()
         };
@@ -231,6 +243,8 @@ impl Rules {
             exclude_dir_regex: f.exclude_dir_regex.iter().filter_map(|p| compile_regex(p).ok()).collect(),
             exclude_dir_names: patterns(&dir_names),
             exclude_dir_paths: patterns(&dir_paths),
+            exclude_dir_wild: patterns(&dir_paths.iter().filter(|p| is_wild_path(p)).cloned().collect::<Vec<_>>()),
+            exclude_file_wild: patterns(&file_paths.iter().filter(|p| is_wild_path(p)).cloned().collect::<Vec<_>>()),
             base: source.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_string(),
             max_size: f.max_size,
             min_modified: f.max_age_days.map(|d| now.saturating_sub(d as u64 * 86_400 * TICKS_PER_SEC)),
@@ -269,6 +283,16 @@ impl Rules {
             let full: Vec<u16> = format!("{}\\{rel}", self.base).encode_utf16().collect();
             self.exclude_file_paths.iter().any(|p| p.matches(&full))
         }
+    }
+
+    /// The full path of a folder / file when a wildcard path rule matches it (see `exclude_dir_wild`).
+    fn wild_match(&self, patterns: &[Pattern], rel: &str) -> Option<String> {
+        if patterns.is_empty() {
+            return None;
+        }
+        let full = format!("{}\\{rel}", self.base);
+        let w: Vec<u16> = full.encode_utf16().collect();
+        patterns.iter().any(|p| p.matches(&w)).then_some(full)
     }
 
     fn keep_file(&self, e: &Entry) -> bool {
@@ -378,8 +402,13 @@ const TOO_MANY: &str = "יותר מדי שמות שונים תואמים לבי�
 /// plain names it understands. Folder regexes become folder names to skip (a regex matches the
 /// name only, so every folder with a matching name is skipped anyway). File regexes become either
 /// "skip these names" or "copy only these names", whichever list is shorter. Ok(None) = cancelled.
+/// Folder / file rules with a wildcard and a backslash (`*\src-tauri\target`), which robocopy rejects, go the
+/// same way: replaced by the full paths they match.
 pub fn resolve_regex(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result<Option<Filters>, String> {
-    if filters.include_regex.is_empty() && filters.exclude_regex.is_empty() && filters.exclude_dir_regex.is_empty() {
+    // robocopy gets the source's relative folder / file paths in full.
+    let filters = &filters.for_source(root);
+    let wild = filters.exclude_dirs.iter().chain(&filters.exclude_files).any(|s| is_wild_path(s));
+    if !wild && filters.include_regex.is_empty() && filters.exclude_regex.is_empty() && filters.exclude_dir_regex.is_empty() {
         return Ok(Some(filters.clone()));
     }
     let mut out = filters.clone();
@@ -388,11 +417,16 @@ pub fn resolve_regex(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Res
     // Skips the folders matching a folder regex and notes their names.
     let Some(listing) = list_files(root, &out, cancel)? else { return Ok(None) };
     out.exclude_dir_regex.clear();
-    let dirs_len = listing.regex_dirs.iter().map(|n| n.len() + 3).sum::<usize>();
+    out.exclude_dirs.retain(|s| !is_wild_path(s));
+    out.exclude_files.retain(|s| !is_wild_path(s));
+    let dirs_len = listing.regex_dirs.iter().chain(&listing.wild_dirs).map(|n| n.len() + 3).sum::<usize>()
+        + listing.wild_files.iter().map(|n| n.len() + 3).sum::<usize>();
     if dirs_len > MAX_NAMES_LEN {
         return Err(TOO_MANY.into());
     }
     out.exclude_dirs.extend(listing.regex_dirs);
+    out.exclude_dirs.extend(listing.wild_dirs);
+    out.exclude_files.extend(listing.wild_files);
     if filters.include_regex.is_empty() && filters.exclude_regex.is_empty() {
         return Ok(Some(out));
     }
@@ -446,6 +480,9 @@ pub struct Listing {
     pub failed_dirs: u64,
     /// Names of the folders skipped by a folder regex (for `resolve_regex`).
     pub regex_dirs: BTreeSet<String>,
+    /// Full paths of the folders / files skipped by a rule with a wildcard and a backslash (for `resolve_regex`).
+    pub wild_dirs: BTreeSet<String>,
+    pub wild_files: BTreeSet<String>,
 }
 
 /// Every file under `root` that passes `filters`, as robocopy's own listing would have it
@@ -480,6 +517,7 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
                         path: format!("{}\\{rel}", rules.base),
                         code: e.raw_os_error().map(|c| c as u32),
                         message: e.to_string(),
+                        debug: String::new(),
                     });
                 }
                 continue;
@@ -493,6 +531,7 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
             let child = if rel.is_empty() { name } else { format!("{rel}\\{name}") };
             if e.attributes & ATTR_DIRECTORY != 0 {
                 if rules.skip_dir(&e, &child) {
+                    out.wild_dirs.extend(rules.wild_match(&rules.exclude_dir_wild, &child));
                     continue;
                 }
                 match rules.regex_skips_dir(&e) {
@@ -507,6 +546,109 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
                     size: e.size,
                     modified: e.modified,
                 });
+            } else {
+                out.wild_files.extend(rules.wild_match(&rules.exclude_file_wild, &child));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+/// What `prune_filtered` removed.
+#[derive(Default, Debug)]
+pub struct Pruned {
+    pub files: u64,
+    pub bytes: u64,
+    /// Items that should have gone but couldn't be removed (in use, no permission).
+    pub failed: u64,
+}
+
+/// Files and bytes under `dir`, to report before it is removed.
+fn tree_size(dir: &Path) -> (u64, u64) {
+    let (mut files, mut bytes) = (0, 0);
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(d) = pending.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                pending.push(e.path());
+            } else {
+                files += 1;
+                bytes += m.len();
+            }
+        }
+    }
+    (files, bytes)
+}
+
+/// Makes a backup folder that already holds files (the previous full, updated in place, or a
+/// resumed copy) match `filters` as they are now: the folders and files in `target` that a backup of
+/// `source` would skip are removed. robocopy's mirror never purges what its filters exclude, so
+/// without this a rule added since the folder was written would leave its items there. The rules see
+/// each item as at the same relative path under `source` (so path rules work), with the size, time and
+/// attributes the copy kept. Ok(None) = cancelled.
+pub fn prune_filtered(source: &Path, target: &Path, filters: &Filters, cancel: &AtomicBool) -> Result<Option<Pruned>, String> {
+    let rules = Rules::new(source, filters);
+    let root_w = verbatim(target).map_err(|e| e.to_string())?;
+    let mut out = Pruned::default();
+    let mut pending = vec![String::new()];
+    while let Some(rel) = pending.pop() {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut dir = root_w.clone();
+        if !rel.is_empty() {
+            dir.push(b'\\' as u16);
+            dir.extend(rel.encode_utf16());
+        }
+        let entries = match read_dir(&dir, rules.short_names) {
+            Ok(v) => v,
+            Err(e) if rel.is_empty() && e.raw_os_error() != Some(2) => return Err(e.to_string()),
+            // Gone, or not readable: nothing to prune there (the copy reports real problems).
+            Err(_) => continue,
+        };
+        for e in entries {
+            if e.is_link() {
+                continue;
+            }
+            let name = String::from_utf16_lossy(&e.name);
+            let child = if rel.is_empty() { name.clone() } else { format!("{rel}\\{name}") };
+            let path = target.join(&child);
+            if e.attributes & ATTR_DIRECTORY != 0 {
+                if rules.skip_dir(&e, &child) || rules.regex_skips_dir(&e).is_some() {
+                    let (files, bytes) = tree_size(&path);
+                    match fs::remove_dir_all(&path) {
+                        Ok(()) => {
+                            out.files += files;
+                            out.bytes += bytes;
+                        }
+                        Err(_) => out.failed += 1,
+                    }
+                } else {
+                    pending.push(child);
+                }
+            } else if !(rel.is_empty() && name.eq_ignore_ascii_case(crate::manifest::FILE_NAME))
+                && (!rules.keep_file(&e) || rules.skip_file_path(&child))
+            {
+                let mut gone = fs::remove_file(&path);
+                if gone.is_err() {
+                    // A read-only file can't be deleted until the attribute is cleared.
+                    if let Ok(m) = fs::metadata(&path) {
+                        let mut p = m.permissions();
+                        if p.readonly() {
+                            p.set_readonly(false);
+                            let _ = fs::set_permissions(&path, p);
+                            gone = fs::remove_file(&path);
+                        }
+                    }
+                }
+                match gone {
+                    Ok(()) => {
+                        out.files += 1;
+                        out.bytes += e.size;
+                    }
+                    Err(_) => out.failed += 1,
+                }
             }
         }
     }
@@ -522,6 +664,220 @@ fn write_log(path: &Path, lines: &[String]) {
         }
     }
     let _ = fs::write(path, bytes);
+}
+
+/// Win32 errors that robocopy / CopyFileEx give on a file that a plain read-and-write copy can
+/// still save: 87 (invalid parameter - seen on OneDrive files, where the attributes or the cloud
+/// state don't fit the destination) and the cloud-file errors (the read downloads the file first).
+pub fn stream_retry(code: Option<u32>) -> bool {
+    matches!(code, Some(87 | 362..=366 | 380..=396 | 1920))
+}
+
+/// Copies `from` by reading it and writing a new file (no CopyFileEx, so no attributes or cloud
+/// state are handed over; reading a cloud placeholder downloads it). Keeps the modified time (the
+/// incremental diff depends on it) and the plain attributes. A half-written copy is removed.
+pub fn copy_stream(from: &Path, to: &Path) -> io::Result<u64> {
+    let mut src = fs::File::open(from)?;
+    let meta = src.metadata()?;
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // A read-only old copy (a resumed folder) can't be overwritten.
+    if let Ok(m) = fs::metadata(to) {
+        let mut p = m.permissions();
+        if p.readonly() {
+            p.set_readonly(false);
+            let _ = fs::set_permissions(to, p);
+        }
+    }
+    let mut dst = fs::File::create(to)?;
+    let copied = io::copy(&mut src, &mut dst).and_then(|n| {
+        if let Ok(m) = meta.modified() {
+            dst.set_modified(m)?;
+        }
+        Ok(n)
+    });
+    drop(dst);
+    match copied {
+        Ok(n) => {
+            use std::os::windows::fs::MetadataExt;
+            // Hidden, system, read-only, archive: the ones that matter for a copy.
+            crate::tasklist::set_attributes(to, meta.file_attributes() & 0x27);
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(to);
+            Err(e)
+        }
+    }
+}
+
+/// `fs::copy`, and when Windows refuses with an error `stream_retry` knows, the copy by streaming.
+fn copy_file(from: &Path, to: &Path, debug: &mut Vec<String>) -> io::Result<u64> {
+    match fs::copy(from, to) {
+        Err(e) if stream_retry(e.raw_os_error().map(|c| c as u32)) => {
+            let n = copy_stream(from, to)?;
+            debug.push(format!("הועתק בקריאה וכתיבה אחרי שגיאה {}: {}", e.raw_os_error().unwrap_or(0), from.display()));
+            Ok(n)
+        }
+        other => other,
+    }
+}
+
+const ATTRIBUTE_NAMES: [(u32, &str); 15] = [
+    (0x1, "READONLY"),
+    (0x2, "HIDDEN"),
+    (0x4, "SYSTEM"),
+    (0x20, "ARCHIVE"),
+    (0x100, "TEMPORARY"),
+    (0x200, "SPARSE"),
+    (0x400, "REPARSE_POINT"),
+    (0x800, "COMPRESSED"),
+    (0x1000, "OFFLINE"),
+    (0x4000, "ENCRYPTED"),
+    (0x10000, "VIRTUAL"),
+    (0x40000, "RECALL_ON_OPEN"),
+    (0x80000, "PINNED"),
+    (0x100000, "UNPINNED"),
+    (0x400000, "RECALL_ON_DATA_ACCESS"),
+];
+
+fn filetime_text(t: u64) -> String {
+    t.checked_sub(UNIX_EPOCH_TICKS)
+        .and_then(|d| chrono::DateTime::<chrono::Utc>::from_timestamp((d / TICKS_PER_SEC) as i64, 0))
+        .map_or_else(|| format!("filetime {t}"), |d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+}
+
+/// What a path looks like on disk, on one line, for debugging a copy error.
+pub fn describe(path: &Path) -> String {
+    let Some(i) = find(path) else {
+        return "not found".into();
+    };
+    let names: Vec<&str> = ATTRIBUTE_NAMES.iter().filter(|(bit, _)| i.attributes & bit != 0).map(|(_, n)| *n).collect();
+    let mut s = format!("attributes 0x{:X} [{}]", i.attributes, names.join(" "));
+    if i.attributes & ATTR_REPARSE_POINT != 0 {
+        s.push_str(&format!(", reparse tag 0x{:08X}", i.reparse_tag));
+    }
+    s.push_str(&format!(", size {}, modified {}", i.size, filetime_text(i.modified)));
+    s
+}
+
+/// A source file and the file it should have become, for `FileError.debug`.
+fn describe_pair(from: &Path, to: &Path) -> String {
+    format!(
+        "source: {}; destination: {}; path length {}",
+        describe(from),
+        describe(to),
+        from.to_string_lossy().chars().count()
+    )
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetVolumeInformationW(
+        root: *const u16,
+        name: *mut u16,
+        name_len: u32,
+        serial: *mut u32,
+        max_component: *mut u32,
+        flags: *mut u32,
+        fs_name: *mut u16,
+        fs_len: u32,
+    ) -> i32;
+    fn GetDriveTypeW(root: *const u16) -> u32;
+}
+
+/// The drive of `path` as "D: NTFS, fixed disk" (for the debug text of a run).
+pub fn volume_info(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let root = match s.as_bytes() {
+        [d, b':', ..] if d.is_ascii_alphabetic() => format!("{}:\\", *d as char),
+        _ => return "network path".into(),
+    };
+    let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+    let mut fs_name = [0u16; 32];
+    let ok = unsafe {
+        GetVolumeInformationW(wide.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), fs_name.as_mut_ptr(), 32)
+    };
+    let kind = match unsafe { GetDriveTypeW(wide.as_ptr()) } {
+        2 => "removable",
+        3 => "fixed disk",
+        4 => "network drive",
+        5 => "optical",
+        6 => "ram disk",
+        _ => "unknown type",
+    };
+    let fs = if ok != 0 { String::from_utf16_lossy(&until_nul(&fs_name)) } else { "not readable".into() };
+    format!("{} {fs}, {kind}", &root[..2])
+}
+
+/// Lowercased, without a trailing backslash: for comparing paths as text.
+fn norm_path(p: &Path) -> String {
+    p.to_string_lossy().trim_end_matches('\\').to_lowercase()
+}
+
+/// A mirror's file errors, once robocopy is done: robocopy logs an ERROR line for every failed
+/// try, also for a file that then went through on its retry (/R), so the list has more entries than
+/// the summary's FAILED count. Each entry is checked against the destination: a file that is there
+/// with the source's size and time was copied after all and is dropped. The others get a second
+/// chance by streaming (see `stream_retry`); whatever still fails keeps its error, with debug
+/// info. Returns how many files were saved by streaming: robocopy counted those as failed, the
+/// ones that went through on its own retry it never did.
+pub fn settle_errors(
+    source: &Path,
+    target: &Path,
+    stats: &mut CopyStats,
+    cancel: &AtomicBool,
+    on_event: &mut dyn FnMut(EngineEvent),
+) -> u64 {
+    let prefix = format!("{}\\", norm_path(source));
+    let mut streamed = 0;
+    let mut bytes = 0;
+    let errors = std::mem::take(&mut stats.errors);
+    for mut e in errors {
+        let from = Path::new(&e.path);
+        let rel = e
+            .path
+            .to_lowercase()
+            .starts_with(&prefix)
+            .then(|| e.path.get(prefix.len()..))
+            .flatten()
+            .map(str::to_string);
+        let (Some(rel), Some(src)) = (rel, find(from).filter(|i| !i.is_dir())) else {
+            // A folder, a file that's gone, or not under the source: nothing to settle.
+            e.debug = describe(from);
+            stats.errors.push(e);
+            continue;
+        };
+        let to = target.join(&rel);
+        let there = find(&to).filter(|d| !d.is_dir() && d.size == src.size && d.modified.abs_diff(src.modified) <= 2 * TICKS_PER_SEC);
+        if there.is_some() {
+            stats.debug.push(format!("error {} on a try, but the file is in the destination: {}", e.code.unwrap_or(0), e.path));
+            continue;
+        }
+        if stream_retry(e.code) && !cancel.load(Ordering::SeqCst) {
+            on_event(EngineEvent::File { path: e.path.clone(), size: src.size });
+            match copy_stream(from, &to) {
+                Ok(n) => {
+                    streamed += 1;
+                    bytes += n;
+                    stats.debug.push(format!("copied by reading and writing after error {}: {}", e.code.unwrap_or(0), e.path));
+                    continue;
+                }
+                Err(err) => {
+                    e.debug = format!("second try by reading and writing failed: {err}; {}", describe_pair(from, &to));
+                }
+            }
+        }
+        if e.debug.is_empty() {
+            e.debug = describe_pair(from, &to);
+        }
+        stats.errors.push(e);
+    }
+    stats.files_copied += streamed;
+    stats.bytes_copied += bytes;
+    stats.files_failed = stats.files_failed.saturating_sub(streamed);
+    streamed
 }
 
 pub fn copy_files(
@@ -562,11 +918,11 @@ pub fn copy_files(
             path: from.to_string_lossy().to_string(),
             size: f.size,
         });
-        let copy = || -> std::io::Result<u64> {
+        let mut copy = || -> std::io::Result<u64> {
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&from, &to)
+            copy_file(&from, &to, &mut stats.debug)
         };
         // One retry: files are often locked only for a moment. A file that's gone stays gone, and a
         // full disk doesn't free up by waiting.
@@ -591,6 +947,7 @@ pub fn copy_files(
                         path: from.to_string_lossy().to_string(),
                         code: e.raw_os_error().map(|c| c as u32),
                         message: e.to_string(),
+                        debug: describe_pair(&from, &to),
                     });
                 }
                 // Every further file would fail too: stop here. The cut-off file is removed so the
@@ -701,7 +1058,7 @@ mod tests {
                 source: src.clone(),
                 target: target.clone(),
                 copy_empty_dirs: false,
-                filters: f.clone(),
+                filters: f.for_source(&src),
                 log_file: tree.0.join(format!("{i}.log")),
                 totals: crate::engine::TotalsSource::Scan,
                 late_totals: None,
@@ -711,6 +1068,38 @@ mod tests {
             let listed = names(list_files(&src, &f, &cancel).unwrap().unwrap().files);
             assert_eq!(listed, copied, "case {i}: {f:?}");
         }
+    }
+
+    /// robocopy rejects `*\a\b` in /XD and /XF ("Invalid Parameter", exit 16, nothing copied): `resolve_regex`
+    /// swaps such rules for the full paths they match, and the mirror skips exactly those.
+    #[test]
+    fn wildcard_path_rules_reach_robocopy_as_full_paths() {
+        let tree = Tree(std::env::temp_dir().join(format!("backuper-wild-{}", uuid::Uuid::new_v4())));
+        let src = tree.0.join("src");
+        for n in [r"p1\target\t.txt", r"p2\x\target\t.txt", r"p2\keep.txt", r"p2\x\drop.log", r"top.txt"] {
+            file(&src.join(n), 0);
+        }
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let f = Filters { exclude_dirs: v(&[r"*\target"]), exclude_files: v(&[r"*\x\drop.log"]), ..Default::default() };
+        let cancel = AtomicBool::new(false);
+        let resolved = resolve_regex(&src, &f, &cancel).unwrap().unwrap();
+        assert!(!resolved.exclude_dirs.iter().chain(&resolved.exclude_files).any(|s| is_wild_path(s)));
+        let target = tree.0.join("full");
+        let job = CopyJob {
+            source: src.clone(),
+            target: target.clone(),
+            copy_empty_dirs: false,
+            filters: resolved,
+            log_file: tree.0.join("wild.log"),
+            totals: crate::engine::TotalsSource::Scan,
+            late_totals: None,
+        };
+        let r = Robocopy.mirror(&job, &cancel, &mut |_| {});
+        assert!(r.stats.exit_code.map_or(true, |c| c < 8), "{}", r.message);
+        let copied = names(list_files(&target, &Filters::default(), &cancel).unwrap().unwrap().files);
+        let want: BTreeSet<String> = [r"p2\keep.txt", "top.txt"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(copied, want);
+        assert_eq!(copied, names(list_files(&src, &f, &cancel).unwrap().unwrap().files));
     }
 
     #[test]
@@ -724,5 +1113,48 @@ mod tests {
         assert_eq!(l.files[0].size, 1);
         assert_eq!(l.files[0].modified, m.as_nanos() as u64 / 100 + UNIX_EPOCH_TICKS);
         assert!(list_files(&tree.0.join("missing"), &Filters::default(), &AtomicBool::new(false)).is_err());
+    }
+
+    #[test]
+    fn stream_copy_keeps_content_and_modified_time() {
+        let tree = Tree(std::env::temp_dir().join(format!("backuper-stream-{}", uuid::Uuid::new_v4())));
+        let (from, to) = (tree.0.join("src").join("a.txt"), tree.0.join("dst").join("sub").join("a.txt"));
+        file(&from, 30);
+        assert_eq!(copy_stream(&from, &to).unwrap(), 1);
+        assert_eq!(fs::read(&to).unwrap(), b"x");
+        assert_eq!(fs::metadata(&to).unwrap().modified().unwrap(), fs::metadata(&from).unwrap().modified().unwrap());
+        // Over an old read-only copy.
+        let mut perms = fs::metadata(&to).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&to, perms).unwrap();
+        assert!(copy_stream(&from, &to).is_ok());
+    }
+
+    #[test]
+    fn errors_of_files_that_made_it_are_dropped_and_87_is_saved_by_streaming() {
+        let tree = Tree(std::env::temp_dir().join(format!("backuper-settle-{}", uuid::Uuid::new_v4())));
+        let (src, dst) = (tree.0.join("src"), tree.0.join("dst"));
+        for n in ["retried.txt", "invalid.txt", "locked.txt"] {
+            file(&src.join(n), 5);
+        }
+        // robocopy's retry got this one through.
+        copy_stream(&src.join("retried.txt"), &dst.join("retried.txt")).unwrap();
+        let error = |name: &str, code: u32| FileError {
+            path: src.join(name).to_string_lossy().to_string(),
+            code: Some(code),
+            ..Default::default()
+        };
+        let mut stats = CopyStats {
+            files_failed: 2,
+            errors: vec![error("retried.txt", 87), error("invalid.txt", 87), error("locked.txt", 32)],
+            ..Default::default()
+        };
+        let streamed = settle_errors(&src, &dst, &mut stats, &AtomicBool::new(false), &mut |_| {});
+        assert_eq!(streamed, 1);
+        assert_eq!((stats.files_copied, stats.files_failed), (1, 1));
+        assert!(dst.join("invalid.txt").exists());
+        assert_eq!(stats.errors.len(), 1);
+        assert!(stats.errors[0].path.ends_with("locked.txt"));
+        assert!(stats.errors[0].debug.contains("attributes"), "{}", stats.errors[0].debug);
     }
 }
