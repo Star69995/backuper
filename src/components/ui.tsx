@@ -607,7 +607,7 @@ export function EmptyState({ icon, title, children }: { icon: ReactNode; title: 
 
 /**
  * Paths are LTR content inside the RTL layout. Each segment is isolated so a Hebrew
- * folder name with a date ("מסמכים 2026-09-01 03;00") keeps its own order.
+ * folder name with a date ("מסמכים 2026-09-01 03h00") keeps its own order.
  */
 export function PathText({ path, className, title = path }: { path: string; className?: string; title?: string }) {
   const parts = path.split(/(\\)/);
