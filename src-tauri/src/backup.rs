@@ -343,6 +343,71 @@ pub fn delete_backup(task: &Task, folder_name: &str, name: &str, failed: &dyn Fn
     }
 }
 
+/// What `rename_previous` did for one source.
+#[derive(Debug, Default)]
+pub struct Renamed {
+    /// Previous names that still have folders, or couldn't be checked (destination not reachable).
+    pub left: Vec<String>,
+    pub count: usize,
+    /// Folders that couldn't be renamed: what happened and what to do.
+    pub problems: Vec<String>,
+}
+
+/// Renames the source's dated folders that still carry one of its `previous_names` to its
+/// current folder name ("Docs 2026-10-01 03-00 מלא" -> "Documents 2026-10-01 03-00 מלא",
+/// `.partial` ones too), keeping each folder's index valid. Rename only, nothing is deleted.
+pub fn rename_previous(dest: &str, src: &Source) -> Renamed {
+    let mut out = Renamed::default();
+    if src.previous_names.is_empty() {
+        return out;
+    }
+    let dest_path = Path::new(dest.trim());
+    // Not connected (or unreadable): nothing can be said about what's there yet.
+    if fs::read_dir(dest_path).is_err() {
+        out.left = src.previous_names.clone();
+        return out;
+    }
+    let new_prefix = sanitize_folder_name(&src.folder_name);
+    for old in &src.previous_names {
+        let old_prefix = sanitize_folder_name(old);
+        if old_prefix == new_prefix || old_prefix.is_empty() {
+            continue;
+        }
+        let mut stuck = false;
+        for b in list_backups(dest, &old_prefix) {
+            let Some(rest) = b.name.strip_prefix(&old_prefix) else { continue };
+            let new_name = format!("{new_prefix}{rest}");
+            let to = dest_path.join(&new_name);
+            // A change in letter case only is the same folder on Windows.
+            if new_name.to_lowercase() != b.name.to_lowercase() && to.exists() {
+                out.problems.push(format!(
+                    "לא ניתן לשנות את שם תיקיית הגיבוי \"{}\" ל-\"{new_name}\" כי כבר קיימת תיקייה בשם הזה. אפשר להעביר או למחוק אחת מהן ידנית",
+                    b.name
+                ));
+                stuck = true;
+                continue;
+            }
+            match rename_retry(Path::new(&b.path), &to) {
+                Ok(()) => {
+                    manifest::renamed(&to, &b.name);
+                    out.count += 1;
+                }
+                Err(e) => {
+                    out.problems.push(format!(
+                        "לא ניתן לשנות את שם תיקיית הגיבוי \"{}\" ({e}). סגרו חלונות ותוכנות שפתוחים בתיקייה הזו - השם ישונה שוב בגיבוי הבא",
+                        b.name
+                    ));
+                    stuck = true;
+                }
+            }
+        }
+        if stuck {
+            out.left.push(old.clone());
+        }
+    }
+    out
+}
+
 /// A dated folder's name: "<prefix> 2026-10-01 03h00 מלא" (with seconds: "... 03h00m15s מלא").
 pub fn dated_folder_name(prefix: &str, at: NaiveDateTime, kind: BackupMode, seconds: bool) -> String {
     let tag = if kind == BackupMode::Full { FULL_TAG } else { INCREMENTAL_TAG };
@@ -1218,6 +1283,7 @@ mod tests {
                 .map(|s| Source {
                     path: s.to_string(),
                     folder_name: default_folder_name(s),
+                    ..Default::default()
                 })
                 .collect(),
             destination: dst.into(),
@@ -2180,6 +2246,53 @@ mod tests {
         assert_eq!(fs::read_to_string(full.join(manifest::FILE_NAME)).unwrap(), "user data");
         let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
         assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+    }
+
+    /// A renamed source's backups take the new name (index included), and the chain goes on from them.
+    #[test]
+    fn renamed_source_keeps_its_chain() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let mut t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        fs::create_dir_all(dst.join("Src 2026-10-01 04h00 אינקרמנטלי.partial")).unwrap();
+        fs::create_dir_all(dst.join("Other 2026-10-01 03h00 מלא")).unwrap();
+
+        t.sources[0].folder_name = "Docs".into();
+        t.sources[0].previous_names = vec!["Src".into()];
+        // Destination not there: nothing is known yet, the name stays.
+        let away = rename_previous(env.root.join("nope").to_str().unwrap(), &t.sources[0]);
+        assert_eq!(away.left, vec!["Src".to_string()]);
+
+        let r = rename_previous(dst.to_str().unwrap(), &t.sources[0]);
+        assert!(r.left.is_empty() && r.problems.is_empty(), "{r:?}");
+        assert_eq!(r.count, 2);
+        let full = dst.join("Docs 2026-10-01 03h00 מלא");
+        assert!(manifest::read(&full).is_some(), "index follows the new name");
+        assert!(dst.join("Docs 2026-10-01 04h00 אינקרמנטלי.partial").is_dir());
+        assert!(dst.join("Other 2026-10-01 03h00 מלא").is_dir(), "other folders are left alone");
+
+        t.sources[0].previous_names.clear();
+        fs::write(src.join("b.txt"), "b").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].mode, Some(BackupMode::Incremental), "{r:?}");
+        assert_eq!(r[0].files_copied, 1, "{r:?}");
+    }
+
+    /// A folder already holding the new name is not overwritten; the old name stays known.
+    #[test]
+    fn rename_never_overwrites() {
+        let env = Env::new();
+        let dst = env.root.join("dst");
+        fs::create_dir_all(dst.join("Old 2026-10-01 03-00 מלא")).unwrap();
+        fs::create_dir_all(dst.join("New 2026-10-01 03-00 מלא")).unwrap();
+        let src = Source { path: "C:\\x".into(), folder_name: "New".into(), previous_names: vec!["Old".into()] };
+        let r = rename_previous(dst.to_str().unwrap(), &src);
+        assert_eq!(r.left, vec!["Old".to_string()]);
+        assert_eq!(r.problems.len(), 1);
+        assert!(dst.join("Old 2026-10-01 03-00 מלא").is_dir());
     }
 
     /// Stopping an incremental midway keeps its folder; the next run finishes it instead of starting over.

@@ -696,6 +696,7 @@ mod tests {
                 .map(|p| Source {
                     path: p.to_string(),
                     folder_name: backup::default_folder_name(p),
+                    ..Default::default()
                 })
                 .collect(),
             mode,

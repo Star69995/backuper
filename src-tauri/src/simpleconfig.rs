@@ -100,7 +100,7 @@ pub fn parse(bytes: &[u8], split: Split) -> Result<Option<Parsed>, String> {
             listed += 1;
             if !seen.contains(&norm(&path)) {
                 seen.push(norm(&path));
-                sources.push(Source { path, folder_name: String::new() });
+                sources.push(Source { path, ..Default::default() });
             }
         }
         if !sources.is_empty() {

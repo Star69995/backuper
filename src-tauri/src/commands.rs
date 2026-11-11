@@ -84,22 +84,69 @@ fn prepare(mut t: Task) -> Result<Task, String> {
     Ok(t)
 }
 
+/// A source whose folder name changed keeps its earlier names until the backups in the destination
+/// are renamed (`Source::previous_names`). The saved task is the truth for those; what the UI sends
+/// is used only for a new task (an import may carry them). Changing the destination drops them:
+/// the old backups stay where they were.
+fn carry_previous_names(old: Option<&Task>, t: &mut Task) {
+    let same_dest = old.is_some_and(|o| backup::normalize(&o.destination) == backup::normalize(&t.destination));
+    for src in &mut t.sources {
+        let mut names = match old {
+            None => std::mem::take(&mut src.previous_names),
+            Some(_) if !same_dest => Vec::new(),
+            Some(o) => match o.sources.iter().find(|p| backup::normalize(&p.path) == backup::normalize(&src.path)) {
+                Some(prev) => {
+                    let mut v = prev.previous_names.clone();
+                    if prev.folder_name != src.folder_name {
+                        v.push(prev.folder_name.clone());
+                    }
+                    v
+                }
+                None => Vec::new(),
+            },
+        };
+        let mut seen = std::collections::HashSet::new();
+        names = names
+            .into_iter()
+            .map(|n| backup::sanitize_folder_name(&n))
+            .filter(|n| !n.is_empty() && *n != src.folder_name && seen.insert(n.clone()))
+            .collect();
+        src.previous_names = names;
+    }
+}
+
 /// Two sources writing the same dated folders into the same destination would delete each other's backups.
+/// A source's previous folder names count too: their folders are still its backups until renamed.
 /// `incoming` replaces the existing tasks with the same id.
 fn check_folder_conflicts(existing: &[Task], incoming: &[Task]) -> Result<(), String> {
     let mut all: Vec<&Task> = existing.iter().filter(|t| !incoming.iter().any(|p| p.id == t.id)).collect();
     all.extend(incoming.iter());
     let key = |t: &Task, f: &str| format!("{}\\{}", t.destination.trim_end_matches('\\'), f).to_lowercase();
-    let mut seen: HashMap<String, &str> = HashMap::new();
+    // key -> (task id, task name, source index, is a previous name)
+    let mut seen: HashMap<String, (&str, &str, usize, bool)> = HashMap::new();
     for t in &all {
-        for src in &t.sources {
-            if let Some(other) = seen.insert(key(t, &src.folder_name), &t.name) {
-                if other != t.name {
+        for (i, src) in t.sources.iter().enumerate() {
+            let names = std::iter::once((&src.folder_name, false)).chain(src.previous_names.iter().map(|n| (n, true)));
+            for (name, previous) in names {
+                let k = key(t, name);
+                let Some(&(oid, oname, oi, oprev)) = seen.get(&k) else {
+                    seen.insert(k, (&t.id, &t.name, i, previous));
+                    continue;
+                };
+                // The same source (a change in letter case only), or two sources of one task (validate_task).
+                if oid == t.id && (oi == i || (!previous && !oprev)) {
+                    continue;
+                }
+                if previous || oprev {
+                    let owner = if previous { &t.name } else { oname };
                     return Err(format!(
-                        "למשימות \"{other}\" ו-\"{}\" יש תיקיית מקור עם אותו שם תיקיית גיבוי ({}) באותו יעד - יש לשנות אחד מהם",
-                        t.name, src.folder_name
+                        "תיקיות הגיבוי בשם \"{name}\" ביעד הזה עדיין שייכות למשימה \"{owner}\" - זה השם הקודם שלהן, והן יקבלו את השם החדש כשכונן היעד יהיה מחובר. יש לבחור שם אחר, או לחבר את כונן היעד ולנסות שוב בעוד רגע"
                     ));
                 }
+                return Err(format!(
+                    "למשימות \"{oname}\" ו-\"{}\" יש תיקיית מקור עם אותו שם תיקיית גיבוי ({name}) באותו יעד - יש לשנות אחד מהם",
+                    t.name
+                ));
             }
         }
     }
@@ -109,9 +156,12 @@ fn check_folder_conflicts(existing: &[Task], incoming: &[Task]) -> Result<(), St
 /// Creates or updates tasks (used by the editor, bulk edit, undo and import). All-or-nothing.
 #[tauri::command]
 pub fn save_tasks(core: CoreState, tasks: Vec<Task>) -> Result<Vec<Task>, String> {
-    let prepared = tasks.into_iter().map(prepare).collect::<Result<Vec<_>, _>>()?;
+    let mut prepared = tasks.into_iter().map(prepare).collect::<Result<Vec<_>, _>>()?;
     {
         let mut s = core.store.lock().unwrap();
+        for t in &mut prepared {
+            carry_previous_names(s.tasks.iter().find(|x| x.id == t.id), t);
+        }
         check_folder_conflicts(&s.tasks, &prepared)?;
         for t in &prepared {
             match s.tasks.iter().position(|x| x.id == t.id) {
@@ -134,6 +184,16 @@ pub fn save_tasks(core: CoreState, tasks: Vec<Task>) -> Result<Vec<Task>, String
     }
     core.refresh_next_runs();
     core.changed();
+    // Backups of a renamed source get the new name right away when the destination is there.
+    let renamed: Vec<String> = prepared
+        .iter()
+        .filter(|t| t.sources.iter().any(|s| !s.previous_names.is_empty()))
+        .map(|t| t.id.clone())
+        .collect();
+    if !renamed.is_empty() {
+        let core = core.inner().clone();
+        std::thread::spawn(move || core.rename_backups_when_idle(Some(&renamed)));
+    }
     Ok(prepared)
 }
 
@@ -802,4 +862,55 @@ pub async fn restore_cobian_names(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Source;
+
+    fn task(id: &str, dest: &str, names: &[&str]) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            destination: dest.into(),
+            sources: names
+                .iter()
+                .map(|n| Source { path: format!("C:\\{n}"), folder_name: n.to_string(), ..Default::default() })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn renamed_source_remembers_its_old_name() {
+        let old = task("a", "E:\\B", &["Docs"]);
+        let mut t = old.clone();
+        t.sources[0].folder_name = "Documents".into();
+        carry_previous_names(Some(&old), &mut t);
+        assert_eq!(t.sources[0].previous_names, vec!["Docs".to_string()]);
+
+        // Renamed back before the drive was connected: nothing left to rename.
+        let mut back = t.clone();
+        back.sources[0].folder_name = "Docs".into();
+        carry_previous_names(Some(&t), &mut back);
+        assert_eq!(back.sources[0].previous_names, vec!["Documents".to_string()]);
+
+        // Another destination: the old backups stay where they were.
+        let mut moved = t.clone();
+        moved.destination = "F:\\B".into();
+        carry_previous_names(Some(&t), &mut moved);
+        assert!(moved.sources[0].previous_names.is_empty());
+    }
+
+    #[test]
+    fn previous_names_are_taken() {
+        let mut a = task("a", "E:\\B", &["Documents"]);
+        a.sources[0].previous_names = vec!["Docs".into()];
+        assert!(check_folder_conflicts(&[a.clone()], &[task("b", "E:\\B", &["Docs"])]).is_err());
+        assert!(check_folder_conflicts(&[a.clone()], &[task("b", "F:\\B", &["Docs"])]).is_ok());
+        // A change in letter case of the same source.
+        let mut c = task("c", "E:\\B", &["docs"]);
+        c.sources[0].previous_names = vec!["Docs".into()];
+        assert!(check_folder_conflicts(&[], &[c]).is_ok());
+    }
 }

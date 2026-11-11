@@ -66,6 +66,10 @@ pub fn write(folder: &Path, files: &[ListedFile]) {
 }
 
 pub fn read(folder: &Path) -> Option<Vec<ListedFile>> {
+    read_named(folder, &folder_name(folder))
+}
+
+fn read_named(folder: &Path, name: &str) -> Option<Vec<ListedFile>> {
     let text = fs::read_to_string(folder.join(FILE_NAME)).ok()?;
     let text = text.strip_suffix(&format!("\r\n{END}\r\n"))?;
     let mut lines = text.split("\r\n");
@@ -74,7 +78,7 @@ pub fn read(folder: &Path) -> Option<Vec<ListedFile>> {
         return None;
     }
     let count: usize = header.next()?.parse().ok()?;
-    if header.next()? != folder_name(folder) {
+    if header.next()? != name {
         return None;
     }
     let files = lines
@@ -103,7 +107,6 @@ pub fn load_or_build(folder: &Path) -> Vec<ListedFile> {
     files
 }
 
-/// Before a folder is reused for a new full backup (its index would be stale).
 /// The folder was renamed from `old_name`: its index (header holds the name) follows it.
 pub fn renamed(folder: &Path, old_name: &str) {
     let path = folder.join(FILE_NAME);
@@ -124,6 +127,7 @@ pub fn renamed(folder: &Path, old_name: &str) {
     set_attributes(&path, HIDDEN);
 }
 
+/// Before a folder is reused for a new full backup (its index would be stale).
 pub fn remove(folder: &Path) {
     let path = folder.join(FILE_NAME);
     if is_index_file(&path) {

@@ -272,6 +272,7 @@ fn convert(t: Sec) -> Imported {
             Some(1) => task.sources.push(Source {
                 path: path.to_string(),
                 folder_name: String::new(),
+                ..Default::default()
             }),
             Some(0) => w.push(format!("מקור שהוא קובץ בודד לא נתמך ולא יובא: {}", ltr(path))),
             _ => w.push(format!("מקור שאינו תיקייה מקומית (FTP וכו') לא נתמך ולא יובא: {}", ltr(path))),

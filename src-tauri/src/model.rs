@@ -123,6 +123,11 @@ pub struct Source {
     pub path: String,
     /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03h00 מלא").
     pub folder_name: String,
+    /// Earlier folder names whose dated folders in the destination haven't been renamed to
+    /// `folder_name` yet (the drive wasn't connected, or a folder was in use). Cleared name by name
+    /// once no folder by that name is left (`backup::rename_previous`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub previous_names: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -213,6 +218,7 @@ impl Task {
             self.sources.push(Source {
                 path: std::mem::take(&mut self.source),
                 folder_name: std::mem::take(&mut self.folder_name),
+                ..Default::default()
             });
         }
     }

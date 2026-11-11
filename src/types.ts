@@ -87,6 +87,8 @@ export interface Source {
   path: string;
   /** Prefix of this source's dated folders. */
   folderName: string;
+  /** Earlier folder names whose backups in the destination still wait to be renamed (drive not connected). */
+  previousNames?: string[];
 }
 
 /** count = newest keepCount fulls, days = enough to restore the last keepDays days, all = never delete. */
