@@ -2,7 +2,6 @@
 
 use crate::core::Core;
 use crate::model::RunStatus;
-use crate::updater::Updates;
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -21,31 +20,28 @@ pub struct TrayItems {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Badge {
     None = 0,
-    /// Green dot: a new version is available or downloaded.
-    Update = 1,
     /// Orange "!": a task's last run finished with warnings.
-    Warning = 2,
+    Warning = 1,
     /// Red "!": a task's last run failed.
-    Error = 3,
+    Error = 2,
 }
 
 impl Badge {
     fn from_u8(n: u8) -> Badge {
         match n {
-            1 => Badge::Update,
-            2 => Badge::Warning,
-            3 => Badge::Error,
+            1 => Badge::Warning,
+            2 => Badge::Error,
             _ => Badge::None,
         }
     }
 }
 
-/// The app icon with a colored dot (and a white "!" for errors and warnings) in its bottom-right corner.
+/// The app icon with a colored dot with a white "!" in its bottom-right corner.
 fn badge_icon(base: &Image<'_>, badge: Badge) -> Image<'static> {
     let color = match badge {
         Badge::Error => [220, 38, 38],
         Badge::Warning => [234, 138, 0],
-        _ => [22, 163, 74],
+        _ => [234, 138, 0],
     };
     let (w, h) = (base.width() as i32, base.height() as i32);
     let mut px = base.rgba().to_vec();
@@ -82,7 +78,7 @@ fn badge_icon(base: &Image<'_>, badge: Badge) -> Image<'static> {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
             let in_bar = (fx - cx).abs() <= half && fy >= bar.0 && fy <= bar.1;
             let in_dot = ((fx - cx).powi(2) + (fy - dot.0).powi(2)).sqrt() <= dot.1;
-            if badge != Badge::Update && (in_bar || in_dot) {
+            if in_bar || in_dot {
                 put(x, y, [255, 255, 255], 1.0);
             }
         }
@@ -174,11 +170,6 @@ pub fn refresh(app: &AppHandle) {
         };
         (s.settings.scheduler_paused, count(RunStatus::Failed), count(RunStatus::Warning))
     };
-    let update = app
-        .try_state::<Arc<Updates>>()
-        .map(|u| u.status())
-        .filter(|u| u.state == "available" || u.state == "ready")
-        .and_then(|u| u.version.or(Some(String::new())));
     let running = core.current.lock().unwrap().as_ref().map(|p| p.task_name.clone());
     let mut tip = match (running, paused) {
         (Some(name), _) => format!("Backuper - מגבה: {name}"),
@@ -195,19 +186,10 @@ pub fn refresh(app: &AppHandle) {
         1 => tip.push_str("\nאזהרה בגיבוי אחד"),
         n => tip.push_str(&format!("\nאזהרה ב-{n} גיבויים")),
     }
-    if let Some(v) = &update {
-        if v.is_empty() {
-            tip.push_str("\nיש גרסה חדשה");
-        } else {
-            tip.push_str(&format!("\nיש גרסה חדשה: {v}"));
-        }
-    }
     let badge = if failed > 0 {
         Badge::Error
     } else if warned > 0 {
         Badge::Warning
-    } else if update.is_some() {
-        Badge::Update
     } else {
         Badge::None
     };
