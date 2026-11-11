@@ -560,31 +560,22 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     if (ok) moveToGroup(list, "");
   };
 
-  /** "Move to group" entries: every other group, the general list, and a new group. `long` = for a menu with other actions. */
-  const moveItems = (list: Task[], long = false): MenuItem[] => [
-    ...allGroups
-      .filter((g) => !list.every((t) => sameGroup(groupOf(t), g)))
-      .map((g) => ({
-        label: long ? `העברה לקבוצה: ${g}` : g,
-        icon: <FolderInput size={14} />,
-        onClick: () => moveToGroup(list, g),
-      })),
-    ...(list.some((t) => groupOf(t))
-      ? [
-          {
-            label: long ? `העברה ל${GENERAL_GROUP} (ללא קבוצה)` : `${GENERAL_GROUP} (ללא קבוצה)`,
-            icon: <FolderInput size={14} />,
-            onClick: () => moveToGroup(list, ""),
-          },
-        ]
-      : []),
-    ...(long ? [] : ["separator" as const]),
-    {
-      label: long ? "העברה לקבוצה חדשה..." : "קבוצה חדשה...",
-      icon: <FolderPlus size={14} />,
-      onClick: () => setGroupDialog({ kind: "new", moving: list }),
-    },
-  ];
+  /** "Move to group" entries: every other group, the general list, and a new group. */
+  const moveItems = (list: Task[]): MenuItem[] => {
+    const groups: MenuItem[] = [
+      ...allGroups
+        .filter((g) => !list.every((t) => sameGroup(groupOf(t), g)))
+        .map((g) => ({ label: g, icon: <FolderInput size={14} />, onClick: () => moveToGroup(list, g) })),
+      ...(list.some((t) => groupOf(t))
+        ? [{ label: `${GENERAL_GROUP} (ללא קבוצה)`, icon: <FolderInput size={14} />, onClick: () => moveToGroup(list, "") }]
+        : []),
+    ];
+    return [
+      ...groups,
+      ...(groups.length ? ["separator" as const] : []),
+      { label: "קבוצה חדשה...", icon: <FolderPlus size={14} />, onClick: () => setGroupDialog({ kind: "new", moving: list }) },
+    ];
+  };
 
   const queuedIds = new Set(snap.queue.map((j) => j.taskId));
   const runningId = snap.current?.taskId;
@@ -1176,7 +1167,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                     : []),
                                   { label: "עריכה", icon: <Pencil size={14} />, onClick: () => setEditing(t) },
                                   { label: "שכפול", icon: <Copy size={14} />, onClick: () => duplicate(t) },
-                                  ...moveItems([t], true),
+                                  { label: "העברה לקבוצה...", icon: <FolderInput size={14} />, items: moveItems([t]) },
                                   {
                                     label: t.enabled ? "השבתה" : "הפעלה",
                                     icon: t.enabled ? <PowerOff size={14} /> : <Power size={14} />,
@@ -1199,11 +1190,23 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                     icon: <FolderOpen size={14} />,
                                     onClick: () => openPath(t.destination),
                                   },
-                                  ...t.sources.map((s) => ({
-                                    label: t.sources.length === 1 ? "פתיחת תיקיית המקור" : `פתיחת מקור: ${s.folderName}`,
-                                    icon: <FolderOpen size={14} />,
-                                    onClick: () => openPath(s.path),
-                                  })),
+                                  ...(t.sources.length > 2
+                                    ? [
+                                        {
+                                          label: "פתיחת תיקיית מקור...",
+                                          icon: <FolderOpen size={14} />,
+                                          items: t.sources.map((s) => ({
+                                            label: s.folderName,
+                                            icon: <FolderOpen size={14} />,
+                                            onClick: () => openPath(s.path),
+                                          })),
+                                        },
+                                      ]
+                                    : t.sources.map((s) => ({
+                                        label: t.sources.length === 1 ? "פתיחת תיקיית המקור" : `פתיחת מקור: ${s.folderName}`,
+                                        icon: <FolderOpen size={14} />,
+                                        onClick: () => openPath(s.path),
+                                      }))),
                                   "separator",
                                   { label: "מחיקה", icon: <Trash2 size={14} />, danger: true, onClick: () => remove([t]) },
                                 ]}
