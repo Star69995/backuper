@@ -481,6 +481,8 @@ export function installDevMock() {
       totalsScan: false,
       copyStartedAt: new Date(mockCopyStart).toISOString(),
       expectedRate: 14_000_000,
+      laterBytes: 3_400_000_000,
+      earlierBytes: 1_250_000_000,
       currentFile: "C:\\Users\\User\\Pictures\\2025\\טיול צפון\\IMG_4821.jpg",
     },
   });
@@ -694,6 +696,9 @@ export function installDevMock() {
         if (tasks.find((t) => t.id === a.id)?.cobianPending) return false;
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return true;
+      case "set_full_next":
+        states[a.id as string] = { ...states[a.id as string], fullNext: a.on as boolean };
+        return null;
       case "dismiss_paused":
         states[a.id as string] = { ...states[a.id as string], resumable: false };
         return null;

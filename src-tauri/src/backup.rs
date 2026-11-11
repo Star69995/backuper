@@ -503,10 +503,11 @@ fn reuses_previous_full(task: &Task) -> bool {
 /// The space the task's next full backup needs on the destination, to compare with what is free
 /// (`None` = no full backup is expected, or nothing to compare with). A full backup needs about
 /// what the previous full weighed, less what delete-before removes first. Sizes come from the
-/// index files only, never a walk (this is polled by the UI).
-pub fn full_space(task: &Task, now: DateTime<Local>) -> Option<FullSpace> {
-    // Incremental-only tasks make a full backup just when a source has none yet.
-    let only_incremental = task.mode == BackupMode::Incremental && task.full_schedule.is_none();
+/// index files only, never a walk (this is polled by the UI). `full_next` = the user asked for the
+/// next run to be a full one (`TaskState.full_next`).
+pub fn full_space(task: &Task, now: DateTime<Local>, full_next: bool) -> Option<FullSpace> {
+    // Incremental-only tasks make a full backup just when a source has none yet (or when asked for one).
+    let only_incremental = task.mode == BackupMode::Incremental && task.full_schedule.is_none() && !full_next;
     let (mut needed, mut freed) = (0u64, 0u64);
     for s in &task.sources {
         let all = list_backups(&task.destination, &s.folder_name);
@@ -787,6 +788,28 @@ pub fn typical_rate(history: &[RunRecord], task_id: &str) -> Option<u64> {
             let secs = (r.finished_at - r.started_at).num_seconds();
             (r.bytes_copied >= MIN_BYTES && secs >= 10).then(|| r.bytes_copied / secs as u64)
         })
+}
+
+/// Bytes each source of a task is expected to copy in a run of this mode: what its last good run
+/// of the same mode copied (None = no such run, nothing to go by). Lets the time estimate cover
+/// the sources still to come, not only the current one.
+pub fn source_estimates(history: &[RunRecord], task: &Task, mode: BackupMode) -> Vec<Option<u64>> {
+    let key = |p: &str| p.trim_end_matches('\\').to_lowercase();
+    task.sources
+        .iter()
+        .map(|src| {
+            history
+                .iter()
+                .filter(|r| r.task_id == task.id)
+                .flat_map(|r| r.sources.iter())
+                .find(|s| {
+                    key(&s.source) == key(&src.path)
+                        && s.mode == Some(mode)
+                        && matches!(s.status, Some(RunStatus::Success | RunStatus::Warning))
+                })
+                .map(|s| s.bytes_copied)
+        })
+        .collect()
 }
 
 /// Backs up one source of a task into its own chain of dated folders.
@@ -1613,23 +1636,25 @@ mod tests {
         };
         let now = Local::now();
         // Nothing to compare with before the first full backup.
-        assert_eq!(full_space(&base, now), None);
+        assert_eq!(full_space(&base, now, false), None);
         env.run(&base, BackupMode::Full, "2026-10-01 03:00");
         env.run(&base, BackupMode::Full, "2026-10-02 03:00");
-        assert_eq!(full_space(&base, now), Some(FullSpace { needed: 1000, freed: 0 }));
+        assert_eq!(full_space(&base, now, false), Some(FullSpace { needed: 1000, freed: 0 }));
 
         // Delete-before with keep 2: the new full counts as one, so the older of the two goes first.
         let before = Task { delete_before: true, ..base.clone() };
-        assert_eq!(full_space(&before, now), Some(FullSpace { needed: 1000, freed: 1000 }));
+        assert_eq!(full_space(&before, now, false), Some(FullSpace { needed: 1000, freed: 1000 }));
         // Updating the previous full in place needs no new room.
         let reuse = Task { reuse_previous: true, keep_count: 1, ..base.clone() };
-        assert_eq!(full_space(&reuse, now), None);
+        assert_eq!(full_space(&reuse, now, false), None);
         // An incremental-only task makes no full backup while one exists.
         let inc = Task { mode: BackupMode::Incremental, ..base.clone() };
-        assert_eq!(full_space(&inc, now), None);
+        assert_eq!(full_space(&inc, now, false), None);
+        // ...unless the user asked for the next run to be a full one.
+        assert_eq!(full_space(&inc, now, true), Some(FullSpace { needed: 1000, freed: 0 }));
         // ...unless it also has a full schedule (combined mode).
         let combined = Task { full_schedule: Some(crate::model::Schedule::Daily { time: "03:00".into() }), ..inc };
-        assert_eq!(full_space(&combined, now), Some(FullSpace { needed: 1000, freed: 0 }));
+        assert_eq!(full_space(&combined, now, false), Some(FullSpace { needed: 1000, freed: 0 }));
     }
 
     /// Without the exact-progress setting no list-only pass runs before the copy: the totals come
@@ -1782,6 +1807,50 @@ mod tests {
         ];
         assert_eq!(typical_rate(&history, "1"), Some(10 * mb as u64));
         assert_eq!(typical_rate(&history, "3"), None);
+    }
+
+    #[test]
+    fn source_estimates_come_from_the_last_good_run_of_the_mode() {
+        let src = |path: &str, mode, status, bytes| SourceRun {
+            source: path.into(),
+            mode: Some(mode),
+            status: Some(status),
+            bytes_copied: bytes,
+            ..Default::default()
+        };
+        let run = |sources| RunRecord {
+            id: String::new(),
+            task_id: "1".into(),
+            task_name: String::new(),
+            trigger: crate::model::Trigger::Manual,
+            mode: BackupMode::Full,
+            started_at: Local::now(),
+            finished_at: Local::now(),
+            status: RunStatus::Success,
+            message: String::new(),
+            files_copied: 0,
+            bytes_copied: 0,
+            backup_bytes: 0,
+            freed_bytes: 0,
+            files_deleted: 0,
+            files_failed: 0,
+            sources,
+        };
+        // Newest first.
+        let history = [
+            run(vec![src("C:\\A", BackupMode::Incremental, RunStatus::Success, 5)]),
+            run(vec![src("C:\\A", BackupMode::Full, RunStatus::Failed, 7)]),
+            run(vec![
+                src("c:\\a\\", BackupMode::Full, RunStatus::Success, 100),
+                src("C:\\B", BackupMode::Full, RunStatus::Warning, 200),
+            ]),
+        ];
+        let t = Task {
+            id: "1".into(),
+            ..task(&["C:\\A", "C:\\B", "C:\\C"], "E:\\Backup")
+        };
+        assert_eq!(source_estimates(&history, &t, BackupMode::Full), [Some(100), Some(200), None]);
+        assert_eq!(source_estimates(&history, &t, BackupMode::Incremental), [Some(5), None, None]);
     }
 
     #[test]
