@@ -282,6 +282,42 @@ pub async fn folder_size(path: String) -> Result<u64, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Free and total bytes of the drive a path is on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpace {
+    free: u64,
+    total: u64,
+}
+
+/// The drive of `path`, asked through the nearest folder that exists (a destination may not
+/// have been created yet). None = no such drive (disconnected) or it can't be read.
+fn disk_space_of(path: &str) -> Option<DiskSpace> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, avail: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+    std::path::Path::new(path).ancestors().find_map(|dir| {
+        if dir.as_os_str().is_empty() {
+            return None;
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let (mut free, mut total, mut total_free) = (0u64, 0u64, 0u64);
+        // `free` = what this user can use (quotas), which is what a backup can fill.
+        (unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) } != 0)
+            .then_some(DiskSpace { free, total })
+    })
+}
+
+/// Free space on the drives of `paths` (task destinations), in the same order.
+#[tauri::command]
+pub async fn disk_space(paths: Vec<String>) -> Result<Vec<Option<DiskSpace>>, String> {
+    tauri::async_runtime::spawn_blocking(move || paths.iter().map(|p| disk_space_of(p)).collect())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
     std::process::Command::new("explorer.exe")

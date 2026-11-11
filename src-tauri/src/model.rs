@@ -219,6 +219,34 @@ pub struct TaskState {
     pub last_message: Option<String>,
     /// The last run was paused and its folder is still there: the next run continues in it.
     pub resumable: bool,
+    /// The newest backup that was written (a failed or stopped run doesn't replace it).
+    pub last_backup: Option<LastBackup>,
+}
+
+/// Size of a task's newest backup, shown in the task list.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastBackup {
+    pub at: DateTime<Local>,
+    /// Size of the backup folders it wrote (all sources).
+    pub bytes: u64,
+    /// Full if any source made a full backup.
+    pub mode: BackupMode,
+}
+
+impl LastBackup {
+    /// The backup a run left behind, if it wrote one.
+    pub fn of(r: &RunRecord) -> Option<Self> {
+        if r.backup_bytes == 0 || !matches!(r.status, RunStatus::Success | RunStatus::Warning) {
+            return None;
+        }
+        let full = r.mode == BackupMode::Full || r.sources.iter().any(|s| s.mode == Some(BackupMode::Full));
+        Some(Self {
+            at: r.finished_at,
+            bytes: r.backup_bytes,
+            mode: if full { BackupMode::Full } else { BackupMode::Incremental },
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

@@ -103,6 +103,7 @@ export function installDevMock() {
       lastRunAt: last(tasks[0].schedule),
       lastStatus: "success",
       lastMessage: "3 תיקיות, 3 הצליחו. הועתקו 132 קבצים",
+      lastBackup: { at: last(tasks[0].schedule)!, bytes: 9_600_000, mode: "incremental" },
     },
     "2": {
       nextRun: next(tasks[1].schedule),
@@ -110,8 +111,10 @@ export function installDevMock() {
       lastRunAt: last(tasks[1].schedule),
       lastStatus: "warning",
       lastMessage: "נמצאו פריטים לא תואמים",
+      lastBackup: { at: last(tasks[1].schedule)!, bytes: 12_345_678_901, mode: "full" },
     },
-    "3": { nextRun: iso(47), nextFullRun: null, lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין" },
+    "3": { nextRun: iso(47), nextFullRun: null, lastRunAt: iso(-73), lastStatus: "failed", lastMessage: "היעד לא זמין",
+      lastBackup: { at: iso(-60 * 24 * 8), bytes: 61_000_000_000, mode: "full" } },
     "4": { nextRun: null, nextFullRun: null, lastRunAt: null, lastStatus: null, lastMessage: null },
   };
   let settings: Settings = {
@@ -319,6 +322,11 @@ export function installDevMock() {
         return history;
       case "list_backups":
         return backupsOf(tasks.find((t) => t.id === a.taskId) ?? tasks[0]);
+      case "disk_space":
+        // E: roomy, F: (task 3's mirror drive) not connected, anything else nearly full.
+        return (a.paths as string[]).map((p) =>
+          /^e:/i.test(p) ? { free: 412_000_000_000, total: 1_000_000_000_000 } : /^f:/i.test(p) ? null : { free: 18_500_000_000, total: 500_000_000_000 },
+        );
       case "folder_size":
         return String(a.path).endsWith("מלא") ? 12_345_678_901 : 48_200_000;
       case "read_log":

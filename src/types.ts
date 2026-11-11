@@ -89,6 +89,21 @@ export interface TaskState {
   lastMessage: string | null;
   /** The last run was paused and its folder is still there: the next run continues in it. */
   resumable?: boolean;
+  /** The newest backup that was written (a failed or stopped run doesn't replace it). */
+  lastBackup?: LastBackup | null;
+}
+
+/** Size of a task's newest backup (all its sources). Full if any source made a full one. */
+export interface LastBackup {
+  at: string;
+  bytes: number;
+  mode: BackupMode;
+}
+
+/** Free and total bytes of a drive. */
+export interface DiskSpace {
+  free: number;
+  total: number;
 }
 
 export interface Progress {
