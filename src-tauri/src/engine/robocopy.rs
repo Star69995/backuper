@@ -62,6 +62,8 @@ fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
     for f in [
         "/COPY:DAT",
         "/DCOPY:DAT",
+        // The copies never keep the read-only attribute: a backup must stay deletable.
+        "/A-:R",
         "/R:2",
         "/W:3",
         "/XJ",

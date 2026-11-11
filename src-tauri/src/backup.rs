@@ -199,7 +199,7 @@ pub fn discard_partials(task: &Task) -> usize {
         let has_full = backups.iter().any(|b| !b.partial && b.kind == BackupMode::Full);
         for b in backups.iter().filter(|b| b.partial) {
             let safe = b.kind == BackupMode::Incremental || has_full;
-            if !safe || fs::remove_dir_all(&b.path).is_err() {
+            if !safe || native::remove_tree(Path::new(&b.path)).is_err() {
                 left += 1;
             }
         }
@@ -240,7 +240,7 @@ pub fn delete_backup(task: &Task, folder_name: &str, name: &str) -> Result<(), S
         .into_iter()
         .find(|b| b.name == name)
         .ok_or("תיקיית הגיבוי לא נמצאה")?;
-    fs::remove_dir_all(&found.path).map_err(|e| format!("מחיקה נכשלה: {e}"))
+    native::remove_tree(Path::new(&found.path)).map_err(|e| format!("מחיקה נכשלה: {e}"))
 }
 
 /// A dated folder's name: "<prefix> 2026-10-01 03-00 מלא" (with seconds: "... 03-00-15 מלא").
@@ -390,7 +390,7 @@ fn prune(dest: &str, prefix: &str, keep: Keep, protect: Option<&str>, delete_emp
     for b in prune_victims(&all, keep, delete_empty) {
         let empty = b.kind == BackupMode::Incremental && !has_files(Path::new(&b.path));
         let size = if empty { 0 } else { backup_size(Path::new(&b.path)) };
-        match fs::remove_dir_all(&b.path) {
+        match native::remove_tree(Path::new(&b.path)) {
             Ok(()) if empty => removed_empty += 1,
             Ok(()) => {
                 deleted += 1;
@@ -530,7 +530,7 @@ fn discard_stopped(ctx: &RunContext, work: &Path, safe: bool) -> bool {
         return false;
     }
     if work.exists() {
-        let _ = fs::remove_dir_all(work);
+        let _ = native::remove_tree(work);
     }
     !work.exists()
 }
