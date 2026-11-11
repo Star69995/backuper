@@ -206,13 +206,13 @@ pub fn cancel_task(core: CoreState, id: String, discard: bool) {
     core.cancel(&id, discard);
 }
 
-/// Removes a paused backup from the paused list (`delete`: its partial folders go too).
 /// Makes the task's next automatic run a full backup (once), or takes that back.
 #[tauri::command]
 pub fn set_full_next(core: CoreState, id: String, on: bool) {
     core.set_full_next(&id, on);
 }
 
+/// Removes a paused backup from the paused list (`delete`: its partial folders go too).
 #[tauri::command]
 pub fn dismiss_paused(core: CoreState, id: String, delete: bool) -> Result<(), String> {
     core.dismiss_paused(&id, delete)

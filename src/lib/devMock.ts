@@ -481,6 +481,8 @@ export function installDevMock() {
       totalsScan: false,
       copyStartedAt: new Date(mockCopyStart).toISOString(),
       expectedRate: 14_000_000,
+      laterBytes: 3_400_000_000,
+      earlierBytes: 1_250_000_000,
       currentFile: "C:\\Users\\User\\Pictures\\2025\\טיול צפון\\IMG_4821.jpg",
     },
   });

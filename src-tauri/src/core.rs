@@ -337,7 +337,7 @@ impl Core {
     fn worker_loop(&self) {
         loop {
             let job = self.next_job();
-            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next) = {
+            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next, estimates) = {
                 let s = self.store.lock().unwrap();
                 (
                     s.task(&job.task_id).cloned(),
@@ -347,11 +347,18 @@ impl Core {
                     s.settings.background_totals,
                     backup::typical_rate(&s.history, &job.task_id),
                     s.states.get(&job.task_id).is_some_and(|st| st.full_next),
+                    s.task(&job.task_id)
+                        .map(|t| {
+                            let full_next = s.states.get(&job.task_id).is_some_and(|st| st.full_next);
+                            backup::source_estimates(&s.history, t, requested_mode(&job, t, full_next))
+                        })
+                        .unwrap_or_default(),
                 )
             };
             let Some(task) = task else { continue };
             let run_id = uuid::Uuid::new_v4().to_string();
             let requested = requested_mode(&job, &task, full_next);
+            let later_bytes = |i: usize| estimates.iter().skip(i + 1).copied().sum::<Option<u64>>();
             let started_at = Local::now();
             if task.cobian_takeover {
                 if let Err(message) = self.take_over_cobian(&task) {
@@ -395,6 +402,8 @@ impl Core {
                 totals_scan: false,
                 copy_started_at: None,
                 expected_rate,
+                later_bytes: later_bytes(0),
+                earlier_bytes: 0,
                 current_file: String::new(),
             };
             self.cancel.store(false, Ordering::SeqCst);
@@ -435,6 +444,9 @@ impl Core {
                         EngineEvent::SourceStarted => {
                             progress.source_index = i + 1;
                             progress.source_path = task.sources[i].path.clone();
+                            progress.later_bytes = later_bytes(i);
+                            // The last file of the previous source counts only now.
+                            progress.earlier_bytes += done_before + pending_size;
                             progress.phase = "scanning".into();
                             (
                                 progress.files_done,
