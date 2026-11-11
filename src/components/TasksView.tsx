@@ -9,6 +9,7 @@ import {
   ArrowUpZA,
   CheckCircle2,
   ChevronDown,
+  CalendarClock,
   CircleSlash,
   Clock,
   Copy,
@@ -296,7 +297,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     snap.tasks.filter((t) => t.destination).map((t) => t.id),
     `${snap.current?.runId ?? ""}|${snap.tasks
       .map((t) => [t.id, t.destination, t.mode, !!t.fullSchedule, t.keepMode, t.keepCount, t.keepDays, t.deleteBefore, t.reusePrevious, t.deleteEmptyIncrementals, t.sources.length].join(":"))
-      .join()}|${Object.values(snap.states).map((s) => s.lastRunAt ?? "").join()}`,
+      .join()}|${Object.values(snap.states).map((s) => `${s.lastRunAt ?? ""}:${!!s.fullNext}`).join()}`,
   );
 
   const usedGroups = groupNames(snap.tasks);
@@ -398,6 +399,29 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
     const n = await api.runTasks(ids, mode, fresh);
     if (n === 0) toast({ tone: "info", title: "המשימה כבר רצה או ממתינה בתור" });
     else toast({ tone: "info", title: n === 1 ? "הגיבוי נוסף לתור" : `${n} גיבויים נוספו לתור` });
+  };
+
+  /** The next automatic run of an incremental task becomes a full backup, once (or that is taken back). */
+  const setFullNext = async (t: Task, on: boolean) => {
+    try {
+      await api.setFullNext(t.id, on);
+    } catch (e) {
+      toast({ tone: "bad", title: "השינוי לא נשמר", message: errorText(e) });
+      return;
+    }
+    refresh();
+    if (!on) {
+      toast({ tone: "info", title: "ההרצה הבאה תהיה לפי סוג המשימה" });
+      return;
+    }
+    const automatic = t.enabled && (t.schedule.kind !== "manual" || t.onDriveConnect !== "off");
+    toast({
+      tone: "info",
+      title: "ההרצה המתוזמנת הבאה תהיה גיבוי מלא",
+      message: automatic
+        ? "אחריה המשימה חוזרת לגיבויים אינקרמנטליים"
+        : "המשימה לא תרוץ מעצמה כרגע (היא מושבתת או בלי תזמון). הגיבוי המלא יחכה להרצה האוטומטית הבאה",
+    });
   };
 
   const { resume, restart: restartTask, dismiss } = useResumeTask();
@@ -1051,7 +1075,7 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                 <div>{fmtSmart(next.at)}</div>
                                 <div className="text-xs text-muted">
                                   {fmtRelative(next.at)}
-                                  {t.fullSchedule && ` (${MODE_LABEL[next.mode]})`}
+                                  {(t.fullSchedule || st?.fullNext) && ` (${MODE_LABEL[next.mode]})`}
                                 </div>
                               </div>
                             )}
@@ -1168,6 +1192,15 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   { label: "עריכה", icon: <Pencil size={14} />, onClick: () => setEditing(t) },
                                   { label: "שכפול", icon: <Copy size={14} />, onClick: () => duplicate(t) },
                                   { label: "העברה לקבוצה...", icon: <FolderInput size={14} />, items: moveItems([t]) },
+                                  ...(t.mode === "incremental"
+                                    ? ([
+                                        {
+                                          label: st?.fullNext ? "ביטול הגיבוי המלא בהרצה הבאה" : "גיבוי מלא בהרצה המתוזמנת הבאה",
+                                          icon: st?.fullNext ? <X size={14} /> : <CalendarClock size={14} />,
+                                          onClick: () => setFullNext(t, !st?.fullNext),
+                                        },
+                                      ] satisfies MenuItem[])
+                                    : []),
                                   {
                                     label: t.enabled ? "השבתה" : "הפעלה",
                                     icon: t.enabled ? <PowerOff size={14} /> : <Power size={14} />,

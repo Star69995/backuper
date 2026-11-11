@@ -55,6 +55,16 @@ fn refresh_slot(next: &mut Option<chrono::DateTime<Local>>, sched: Option<&Sched
     }
 }
 
+/// The mode a job runs in: what it asked for, else a full one when the user asked for the next
+/// automatic run to be full, else the task's own mode.
+fn requested_mode(job: &Job, task: &Task, full_next: bool) -> BackupMode {
+    match job.mode {
+        Some(m) => m,
+        None if full_next && job.trigger != Trigger::Manual => BackupMode::Full,
+        None => task.mode,
+    }
+}
+
 /// One record for the whole run; status is the worst of its sources.
 fn summarize(
     id: String,
@@ -281,6 +291,19 @@ impl Core {
         Ok(())
     }
 
+    /// Makes the task's next automatic run (scheduled, catch-up, drive connected) a full backup,
+    /// once; `on = false` takes the request back.
+    pub fn set_full_next(&self, task_id: &str, on: bool) {
+        let mut s = self.store.lock().unwrap();
+        if !s.tasks.iter().any(|t| t.id == task_id) {
+            return;
+        }
+        s.states.entry(task_id.to_string()).or_default().full_next = on;
+        s.save_states();
+        drop(s);
+        self.changed();
+    }
+
     /// Stops the scan beside a running full copy that finds how much there is to copy: the copy
     /// carries on with counters only (and the estimate from the last backup, if it had one).
     pub fn skip_totals_scan(&self) {
@@ -314,7 +337,7 @@ impl Core {
     fn worker_loop(&self) {
         loop {
             let job = self.next_job();
-            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, estimates) = {
+            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next, estimates) = {
                 let s = self.store.lock().unwrap();
                 (
                     s.task(&job.task_id).cloned(),
@@ -323,14 +346,18 @@ impl Core {
                     s.settings.exact_progress,
                     s.settings.background_totals,
                     backup::typical_rate(&s.history, &job.task_id),
+                    s.states.get(&job.task_id).is_some_and(|st| st.full_next),
                     s.task(&job.task_id)
-                        .map(|t| backup::source_estimates(&s.history, t, job.mode.unwrap_or(t.mode)))
+                        .map(|t| {
+                            let full_next = s.states.get(&job.task_id).is_some_and(|st| st.full_next);
+                            backup::source_estimates(&s.history, t, requested_mode(&job, t, full_next))
+                        })
                         .unwrap_or_default(),
                 )
             };
             let Some(task) = task else { continue };
             let run_id = uuid::Uuid::new_v4().to_string();
-            let requested = job.mode.unwrap_or(task.mode);
+            let requested = requested_mode(&job, &task, full_next);
             let later_bytes = |i: usize| estimates.iter().skip(i + 1).copied().sum::<Option<u64>>();
             let started_at = Local::now();
             if task.cobian_takeover {
@@ -494,6 +521,10 @@ impl Core {
             // A paused run left a folder to continue in; a full stop deleted it.
             st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(task);
             if let Some(b) = crate::model::LastBackup::of(&record) {
+                // The full backup the user asked for is done.
+                if b.mode == BackupMode::Full {
+                    st.full_next = false;
+                }
                 st.last_backup = Some(b);
             }
             s.save_states();
@@ -702,6 +733,22 @@ mod tests {
         let mut next = Some(at(3, 0));
         assert_eq!(take_due(&mut next, &daily, at(9, 0), false), Slot::Skipped);
         assert!(next.unwrap() > at(9, 0));
+    }
+
+    #[test]
+    fn full_next_turns_automatic_runs_full() {
+        let task = Task { mode: BackupMode::Incremental, ..Default::default() };
+        let job = |trigger, mode| Job { task_id: String::new(), mode, trigger, fresh: false };
+        assert_eq!(requested_mode(&job(Trigger::Scheduled, None), &task, false), BackupMode::Incremental);
+        for t in [Trigger::Scheduled, Trigger::CatchUp, Trigger::DriveConnected] {
+            assert_eq!(requested_mode(&job(t, None), &task, true), BackupMode::Full);
+        }
+        // A manual run does what the user picked there.
+        assert_eq!(requested_mode(&job(Trigger::Manual, None), &task, true), BackupMode::Incremental);
+        assert_eq!(
+            requested_mode(&job(Trigger::Scheduled, Some(BackupMode::Incremental)), &task, true),
+            BackupMode::Incremental
+        );
     }
 
     #[test]

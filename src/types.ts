@@ -135,6 +135,8 @@ export interface TaskState {
   resumable?: boolean;
   /** The newest backup that was written (a failed or stopped run doesn't replace it). */
   lastBackup?: LastBackup | null;
+  /** The next automatic run (scheduled, catch-up, drive connected) is a full backup, once. */
+  fullNext?: boolean;
 }
 
 /** Size of a task's newest backup (all its sources). Full if any source made a full one. */
