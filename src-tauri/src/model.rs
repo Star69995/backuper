@@ -121,7 +121,7 @@ pub enum KeepMode {
 #[serde(rename_all = "camelCase", default)]
 pub struct Source {
     pub path: String,
-    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03-00 מלא").
+    /// Prefix of this source's dated folders ("<folderName> 2026-10-01 03h00 מלא").
     pub folder_name: String,
 }
 
@@ -247,6 +247,9 @@ pub struct TaskState {
     pub resumable: bool,
     /// The newest backup that was written (a failed or stopped run doesn't replace it).
     pub last_backup: Option<LastBackup>,
+    /// The user asked for the next automatic run (scheduled, catch-up, drive connected) to be a
+    /// full backup instead of the task's own mode. Cleared once a full backup completes.
+    pub full_next: bool,
 }
 
 /// Size of a task's newest backup, shown in the task list.
@@ -499,6 +502,11 @@ pub struct Progress {
     pub copy_started_at: Option<DateTime<Local>>,
     /// Bytes per second of this task's last real copy, for an estimate before this run has a speed.
     pub expected_rate: Option<u64>,
+    /// Bytes the sources after the current one are expected to copy, from their last runs
+    /// (None = one of them has no earlier run to go by; 0 = this is the last source).
+    pub later_bytes: Option<u64>,
+    /// Bytes the sources before the current one copied in this run.
+    pub earlier_bytes: u64,
     pub current_file: String,
 }
 

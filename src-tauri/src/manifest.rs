@@ -104,6 +104,26 @@ pub fn load_or_build(folder: &Path) -> Vec<ListedFile> {
 }
 
 /// Before a folder is reused for a new full backup (its index would be stale).
+/// The folder was renamed from `old_name`: its index (header holds the name) follows it.
+pub fn renamed(folder: &Path, old_name: &str) {
+    let path = folder.join(FILE_NAME);
+    let Ok(text) = fs::read_to_string(&path) else { return };
+    let Some((header, rest)) = text.split_once("\r\n") else {
+        return;
+    };
+    let mut parts = header.splitn(3, '\t');
+    let (Some(MAGIC), Some(count), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+        return;
+    };
+    if name != old_name {
+        return;
+    }
+    set_attributes(&path, NORMAL);
+    let new = format!("{MAGIC}\t{count}\t{}\r\n{rest}", folder_name(folder));
+    let _ = fs::write(&path, new);
+    set_attributes(&path, HIDDEN);
+}
+
 pub fn remove(folder: &Path) {
     let path = folder.join(FILE_NAME);
     if is_index_file(&path) {
