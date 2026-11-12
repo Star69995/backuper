@@ -12,7 +12,16 @@ import { useResumeTask } from "./resumeTask";
 import { statusBadge } from "./TasksView";
 import { AutoGrowInput, Badge, Button, cx, EmptyState, IconButton, Modal, PathText, RunIcon, Select, Spinner, TextInput } from "./ui";
 
-export default function HistoryView({ snap }: { snap: Snapshot }) {
+export default function HistoryView({
+  snap,
+  openRun = null,
+  onOpened,
+}: {
+  snap: Snapshot;
+  /** A run to show the details of (its Windows notification was clicked). */
+  openRun?: string | null;
+  onOpened?: () => void;
+}) {
   const { toast, confirm } = useFeedback();
   const [history, setHistory] = useState<RunRecord[] | null>(null);
   const [taskFilter, setTaskFilter] = useState("");
@@ -23,6 +32,13 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
   useEffect(() => {
     api.history().then(setHistory);
   }, [snap]);
+
+  useEffect(() => {
+    if (!openRun || !history) return;
+    const run = history.find((r) => r.id === openRun);
+    if (run) setDetails(run);
+    onOpened?.();
+  }, [openRun, history]);
 
   const taskNames = useMemo(() => {
     const m = new Map<string, string>();

@@ -10,7 +10,7 @@ import {
   taskKind,
 } from "../lib/format";
 import { useUnsaved } from "../lib/unsaved";
-import type { DriveAction, FilterRule, Schedule, Task } from "../types";
+import { type DriveAction, type FilterRule, type Schedule, settleRetention, type Task } from "../types";
 import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
@@ -133,7 +133,8 @@ export default function BulkEditDialog({
           const extra = values.filters.filter((f) => !t.filters.some((x) => same(x, f)));
           n.filters = [...t.filters, ...extra];
         }
-        return n;
+        // As the save does: no quick full backup with more than one full kept, no delete-before with it.
+        return settleRetention(n);
       }),
     [tasks, active, values, filterMode],
   );

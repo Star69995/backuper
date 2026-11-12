@@ -254,6 +254,8 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-winrt-notification",
  "uuid",
+ "windows",
+ "winreg",
 ]
 
 [[package]]

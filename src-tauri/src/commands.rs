@@ -17,6 +17,8 @@ type UpdatesState<'a> = State<'a, Arc<crate::updater::Updates>>;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// A Windows notification was clicked: where the window should go (until `dismiss_navigate`).
+    navigate: Option<crate::model::Navigate>,
     tasks: Vec<Task>,
     states: HashMap<String, TaskState>,
     current: Option<Progress>,
@@ -37,6 +39,7 @@ pub struct Snapshot {
 pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandle) -> Snapshot {
     let s = core.store.lock().unwrap();
     Snapshot {
+        navigate: core.navigate(),
         tasks: s.tasks.clone(),
         states: s.states.clone(),
         current: core.current.lock().unwrap().clone(),
@@ -61,6 +64,7 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
 
 fn prepare(mut t: Task) -> Result<Task, String> {
     t.migrate();
+    t.settle_retention();
     // A full schedule only makes sense next to incremental runs (combined mode).
     if t.mode == BackupMode::Full {
         t.full_schedule = None;
@@ -702,7 +706,7 @@ pub fn list_task_snapshots(core: CoreState, dir: Option<String>) -> Vec<crate::t
 #[tauri::command]
 pub fn test_sound(app: tauri::AppHandle, sound: String) {
     let body = if sound.is_empty() { "ללא צליל" } else { "כך תישמע ההתראה" };
-    crate::core::toast(&app, "בדיקת צליל - Backuper", body, &sound);
+    crate::core::toast(&app, "בדיקת צליל - Backuper", body, &sound, crate::core::ToastTarget::Window);
 }
 
 #[tauri::command]
@@ -727,6 +731,12 @@ pub async fn install_update(updates: UpdatesState<'_>) -> Result<(), String> {
 #[tauri::command]
 pub fn set_unsaved(updates: UpdatesState, what: Vec<String>) {
     updates.inner().set_unsaved(what);
+}
+
+/// The window went where the clicked notification pointed.
+#[tauri::command]
+pub fn dismiss_navigate(core: CoreState) {
+    core.dismiss_navigate();
 }
 
 /// The update dialog was closed (the notification's request is answered).

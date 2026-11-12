@@ -255,6 +255,29 @@ impl Task {
             });
         }
     }
+
+    /// A quick full backup updates the previous full in place, so it needs exactly one full kept.
+    pub fn keeps_one_full(&self) -> bool {
+        self.keep_mode == KeepMode::Count && self.keep_count == 1
+    }
+
+    /// Settings that can't go together (`settleRetention` in `src/types.ts`): no quick full backup
+    /// when more than one full is kept, and no delete-before with it - it copies only the
+    /// differences into the previous full, so there is no second copy to make room for.
+    pub fn settle_retention(&mut self) {
+        self.reuse_previous &= self.keeps_one_full();
+        self.delete_before &= !self.reuse_previous;
+    }
+}
+
+/// Where the window should go: a Windows notification was clicked (`Snapshot.navigate`).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Navigate {
+    /// `tasks` | `history` | `settings`.
+    pub view: String,
+    /// `history`: the run whose details to open.
+    pub run_id: Option<String>,
 }
 
 /// One Cobian backup folder that a takeover renamed (`cobian-renames.json`), so its name can be put back.
@@ -618,6 +641,19 @@ pub struct FullSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_full_needs_one_full_kept_and_rules_out_delete_before() {
+        let settled = |keep_count, keep_mode| {
+            let mut t = Task { reuse_previous: true, delete_before: true, keep_count, keep_mode, ..Task::default() };
+            t.settle_retention();
+            (t.reuse_previous, t.delete_before)
+        };
+        assert_eq!(settled(1, KeepMode::Count), (true, false), "a quick full has nothing to delete first");
+        assert_eq!(settled(2, KeepMode::Count), (false, true), "no quick full with more than one full kept");
+        assert_eq!(settled(1, KeepMode::Days), (false, true));
+        assert_eq!(settled(1, KeepMode::All), (false, true));
+    }
 
     #[test]
     fn settings_from_older_versions_get_the_defaults() {

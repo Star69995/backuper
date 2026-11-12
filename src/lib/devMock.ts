@@ -507,6 +507,9 @@ export function installDevMock() {
       ]
     : [];
   // Open with the "task list recovered" notice (?notice in the URL).
+  // ?navigate=<run id>: as after a click on a "backup finished" notification.
+  const navigateTo = new URLSearchParams(location.search).get("navigate");
+  let navigate: Snapshot["navigate"] = navigateTo === null ? null : { view: "history", runId: navigateTo || null };
   let notice: Notice | null = new URLSearchParams(location.search).has("notice")
     ? {
         title: "רשימת המשימות שוחזרה מגיבוי",
@@ -523,6 +526,7 @@ export function installDevMock() {
     settings,
     autostart: true,
     drivePrompts,
+    navigate,
     deleteProblems: [...deleteProblems],
     notice,
     update,
@@ -731,6 +735,9 @@ export function installDevMock() {
         update.installWaiting = true;
         return null;
       case "set_unsaved":
+        return null;
+      case "dismiss_navigate":
+        navigate = null;
         return null;
       case "dismiss_update_prompt":
         update.prompt = false;

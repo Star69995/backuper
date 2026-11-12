@@ -103,6 +103,8 @@ export const api = {
   setUnsaved: (what: string[]) => invoke<void>("set_unsaved", { what }),
   /** The update dialog was closed. */
   dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
+  /** The window went where a clicked notification pointed. */
+  dismissNavigate: () => invoke<void>("dismiss_navigate"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;
