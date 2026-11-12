@@ -306,6 +306,7 @@ impl Core {
     fn report_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error, blocking: bool) {
         let problem = DeleteProblem {
             blocking,
+            wait_until: None,
             task_id: task.id.clone(),
             task_name: task.name.clone(),
             path: path.to_string_lossy().to_string(),
@@ -326,11 +327,31 @@ impl Core {
     }
 
     /// Holds the running backup of `task_id` while a blocking report of it is open: the user deletes
-    /// it, or skips the delete (`dismiss_delete_problems`), or cancels the run.
-    fn await_delete_problems(&self, task_id: &str) {
+    /// it, or skips the delete (`dismiss_delete_problems`), or cancels the run. With `wait` (an
+    /// unattended run) it gives up after that long; returns true when it did.
+    fn await_delete_problems(&self, task_id: &str, wait: Option<Duration>) -> bool {
+        let deadline = wait.map(|w| Instant::now() + w);
+        if let Some(w) = wait {
+            let until = Local::now() + chrono::Duration::from_std(w).unwrap_or_default();
+            let mut list = self.delete_problems.lock().unwrap();
+            let mut any = false;
+            for p in list.iter_mut().filter(|p| p.blocking && p.task_id == task_id) {
+                p.wait_until = Some(until);
+                any = true;
+            }
+            drop(list);
+            if any {
+                self.changed();
+            }
+        }
+        let mut timed_out = false;
         loop {
             let waiting = self.delete_problems.lock().unwrap().iter().any(|p| p.blocking && p.task_id == task_id);
             if !waiting || self.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                timed_out = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -340,12 +361,14 @@ impl Core {
         let mut changed = false;
         for p in list.iter_mut().filter(|p| p.blocking && p.task_id == task_id) {
             p.blocking = false;
+            p.wait_until = None;
             changed = true;
         }
         drop(list);
         if changed {
             self.changed();
         }
+        timed_out
     }
 
     /// The user closed the question without deleting (a waiting backup goes on without the delete).
@@ -695,7 +718,7 @@ impl Core {
                 scheduled: matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp),
                 exact_progress,
                 delete_failed: &|p, e, blocking| self.report_problem(&task, p, e, blocking),
-                await_deletes: &|| self.await_delete_problems(&task.id),
+                await_deletes: &|wait| self.await_delete_problems(&task.id, wait),
             };
             // The bytes of the files finished so far, and the size of the one in progress (counted when it ends).
             let mut done_before = 0u64;

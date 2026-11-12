@@ -510,6 +510,8 @@ pub struct DeleteProblem {
     pub at: DateTime<Local>,
     /// The running backup waits for the user's answer before it copies (a delete-before failed).
     pub blocking: bool,
+    /// An unattended (scheduled) run waits only until then, and then goes on without the delete.
+    pub wait_until: Option<DateTime<Local>>,
 }
 
 impl DeleteProblem {
