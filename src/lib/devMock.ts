@@ -420,6 +420,8 @@ export function installDevMock() {
       sources: [src],
     });
   }
+  // Task 2's last status is its newest run (as in the app), so opening that run's details marks its warnings seen.
+  states["2"].lastRunAt = history.find((h) => h.taskId === "2")?.finishedAt ?? states["2"].lastRunAt;
   // Task 5 was paused twice: the card adds both parts up.
   history.unshift(
     ...[-25, -60].map((at, i): RunRecord => {
@@ -793,6 +795,9 @@ export function installDevMock() {
         return true;
       case "set_full_next":
         states[a.id as string] = { ...states[a.id as string], fullNext: a.on as boolean };
+        return null;
+      case "mark_status_seen":
+        states[a.id as string] = { ...states[a.id as string], statusSeen: true };
         return null;
       case "dismiss_paused":
         states[a.id as string] = { ...states[a.id as string], resumable: false };

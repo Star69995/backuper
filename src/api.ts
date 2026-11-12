@@ -47,6 +47,8 @@ export const api = {
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
   /** Makes the task's next automatic run a full backup (once), or takes that back. */
   setFullNext: (id: string, on: boolean) => invoke<void>("set_full_next", { id, on }),
+  /** The details of the task's last run were opened: its warnings stop marking the tray icon. */
+  markStatusSeen: (id: string) => invoke<void>("mark_status_seen", { id }),
   /** Takes a paused backup off the paused list; `del` also deletes its partial folders. Rejects with a message if it can't. */
   dismissPaused: (id: string, del: boolean) => invoke<void>("dismiss_paused", { id, delete: del }),
   /** Gives up on the scan that works out how much a running full backup has to copy. */

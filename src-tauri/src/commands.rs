@@ -279,6 +279,12 @@ pub fn set_full_next(core: CoreState, id: String, on: bool) {
     core.set_full_next(&id, on);
 }
 
+/// The details of the task's last run were opened (its warnings stop marking the tray icon).
+#[tauri::command]
+pub fn mark_status_seen(core: CoreState, id: String) {
+    core.mark_status_seen(&id);
+}
+
 /// Removes a paused backup from the paused list (`delete`: its partial folders go too).
 #[tauri::command]
 pub fn dismiss_paused(core: CoreState, id: String, delete: bool) -> Result<(), String> {

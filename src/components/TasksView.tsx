@@ -90,7 +90,8 @@ import {
 } from "./ui";
 
 /** `resumable` (only matters for a stopped run): paused with a folder to continue in, or stopped for good. */
-export const statusBadge = (s: RunStatus, resumable = false) =>
+/** `seen`: the run's details were opened, so its warnings are known and show muted. */
+export const statusBadge = (s: RunStatus, resumable = false, seen = false) =>
   ({
     success: (
       <Badge tone="ok" icon={<CheckCircle2 size={12} />}>
@@ -98,7 +99,7 @@ export const statusBadge = (s: RunStatus, resumable = false) =>
       </Badge>
     ),
     warning: (
-      <Badge tone="warn" icon={<AlertTriangle size={12} />}>
+      <Badge tone={seen ? "neutral" : "warn"} icon={<AlertTriangle size={12} />}>
         אזהרות
       </Badge>
     ),
@@ -1104,9 +1105,11 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
                                   showLastRun(t.id);
                                 }}
                                 className="-m-1 flex flex-col items-start gap-1 rounded-lg p-1 text-start hover:bg-hover"
-                                title={`${st.lastMessage ?? ""}\nלחיצה לפרטי הריצה וליומן המלא`}
+                                title={`${st.lastMessage ?? ""}${
+                                  st.lastStatus === "warning" && st.statusSeen ? "\nהאזהרות כבר נבדקו" : ""
+                                }\nלחיצה לפרטי הריצה וליומן המלא`}
                               >
-                                {statusBadge(st.lastStatus, st.resumable)}
+                                {statusBadge(st.lastStatus, st.resumable, st.statusSeen)}
                                 <span className="text-xs text-muted">{fmtSmart(st.lastRunAt)}</span>
                               </button>
                             ) : (

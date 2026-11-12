@@ -305,6 +305,9 @@ pub struct TaskState {
     pub last_run_at: Option<DateTime<Local>>,
     pub last_status: Option<RunStatus>,
     pub last_message: Option<String>,
+    /// The user has opened the details of the last run since it finished: its warnings no longer
+    /// put a dot on the tray icon and show muted in the task list. Reset by every new run.
+    pub status_seen: bool,
     /// The last run was paused and its folder is still there: the next run continues in it.
     pub resumable: bool,
     /// The newest backup that was written (a failed or stopped run doesn't replace it).

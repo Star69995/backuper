@@ -175,6 +175,7 @@ pub fn run() {
             commands::resume_task,
             commands::dismiss_paused,
             commands::set_full_next,
+            commands::mark_status_seen,
             commands::cancel_task,
             commands::skip_totals_scan,
             commands::get_history,

@@ -641,14 +641,10 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       setGlobalRules(s.settings.globalFilters);
       const st = s.states[r.taskId];
       const busy = s.current?.taskId === r.taskId || s.queue.some((j) => j.taskId === r.taskId);
-      setResumable(
-        r.status === "cancelled" &&
-          !!st?.resumable &&
-          st.lastStatus === "cancelled" &&
-          !!st.lastRunAt &&
-          new Date(st.lastRunAt).getTime() === new Date(r.finishedAt).getTime() &&
-          !busy,
-      );
+      const isLast = !!st?.lastRunAt && new Date(st.lastRunAt).getTime() === new Date(r.finishedAt).getTime();
+      setResumable(r.status === "cancelled" && !!st?.resumable && st.lastStatus === "cancelled" && isLast && !busy);
+      // Its warnings have now been seen: the tray icon and the task list stop flagging them.
+      if (isLast && !st.statusSeen) api.markStatusSeen(r.taskId).catch(() => {});
     });
   }, [r.taskId, r.status, r.finishedAt]);
   const { resume, restart } = useResumeTask();

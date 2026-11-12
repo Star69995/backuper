@@ -505,6 +505,19 @@ impl Core {
         self.changed();
     }
 
+    /// The user opened the details of the task's last run: its warnings are known, so the tray
+    /// icon drops its dot for it (until the next run).
+    pub fn mark_status_seen(&self, task_id: &str) {
+        let mut s = self.store.lock().unwrap();
+        match s.states.get_mut(task_id) {
+            Some(st) if !st.status_seen => st.status_seen = true,
+            _ => return,
+        }
+        s.save_states();
+        drop(s);
+        self.changed();
+    }
+
     /// Stops the scan beside a running full copy that finds how much there is to copy: the copy
     /// carries on with counters only (and the estimate from the last backup, if it had one).
     pub fn skip_totals_scan(&self) {
@@ -799,6 +812,7 @@ impl Core {
             st.last_run_at = Some(record.finished_at);
             st.last_status = Some(record.status);
             st.last_message = Some(record.message.clone());
+            st.status_seen = false;
             // A paused run left a folder to continue in; a full stop deleted it.
             st.resumable = record.status == RunStatus::Cancelled && backup::has_partial(task);
             if let Some(b) = crate::model::LastBackup::of(&record) {

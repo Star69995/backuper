@@ -159,13 +159,15 @@ pub fn refresh(app: &AppHandle) {
     };
     let (paused, failed, warned) = {
         let s = core.store.lock().unwrap();
-        // The latest run of each enabled task; the next run replaces it.
+        // The latest run of each enabled task; the next run replaces it. Warnings whose run
+        // details were opened are done with; a failure stays until a run succeeds (nothing was backed up).
         let count = |status| {
             s.tasks
                 .iter()
                 .filter(|t| t.enabled)
                 .filter_map(|t| s.states.get(&t.id))
                 .filter(|st| st.last_status == Some(status))
+                .filter(|st| status == RunStatus::Failed || !st.status_seen)
                 .count()
         };
         (s.settings.scheduler_paused, count(RunStatus::Failed), count(RunStatus::Warning))

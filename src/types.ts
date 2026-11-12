@@ -139,6 +139,8 @@ export interface TaskState {
   lastRunAt: string | null;
   lastStatus: RunStatus | null;
   lastMessage: string | null;
+  /** The details of the last run were opened since it finished: its warnings show muted and leave the tray icon. */
+  statusSeen?: boolean;
   /** The last run was paused and its folder is still there: the next run continues in it. */
   resumable?: boolean;
   /** The newest backup that was written (a failed or stopped run doesn't replace it). */
