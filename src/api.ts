@@ -39,6 +39,8 @@ export const api = {
   /** Answers the drive-connected question: `run` get queued, all of `ids` stop waiting. */
   /** Deletes again backup folders that couldn't be deleted; `elevated` = as admin (Windows asks first). Resolves to the ones still there. */
   retryDelete: (paths: string[], elevated: boolean) => invoke<string[]>("retry_delete", { paths, elevated }),
+  /** Copies a run source's files that were open in another program from a shadow copy into its backup folder (Windows asks for admin permission). Resolves to the updated run. */
+  backupOpenFiles: (runId: string, sourceIndex: number) => invoke<RunRecord>("backup_open_files", { runId, sourceIndex }),
   dismissDeleteProblems: (paths: string[]) => invoke<void>("dismiss_delete_problems", { paths }),
   answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */

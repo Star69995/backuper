@@ -122,6 +122,8 @@ export interface Task {
   reusePrevious: boolean;
   deleteEmptyIncrementals: boolean;
   copyEmptyDirs: boolean;
+  /** Files another program holds open (Outlook mail, databases) are copied from a Volume Shadow Copy of the drive (needs admin permission). */
+  vssOpenFiles: boolean;
   catchUp: boolean;
   onDriveConnect: DriveAction;
   filters: FilterRule[];
@@ -171,7 +173,7 @@ export interface Progress {
   taskId: string;
   taskName: string;
   mode: BackupMode;
-  phase: "scanning" | "deleting" | "pruning" | "copying";
+  phase: "scanning" | "deleting" | "pruning" | "vss" | "copying";
   startedAt: string;
   sourceIndex: number;
   sourceCount: number;
@@ -481,6 +483,7 @@ export const newTask = (): Task => ({
   reusePrevious: false,
   deleteEmptyIncrementals: true,
   copyEmptyDirs: false,
+  vssOpenFiles: true,
   catchUp: true,
   onDriveConnect: "off",
   // New tasks skip files nobody needs in a backup (hidden, system, temp, Windows leftovers, cache folders);

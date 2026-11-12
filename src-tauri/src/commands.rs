@@ -372,6 +372,16 @@ pub async fn retry_delete(core: CoreState<'_>, paths: Vec<String>, elevated: boo
         .map_err(|e| e.to_string())?
 }
 
+/// Backs up the files of a run that another program held open, from a shadow copy of the drive
+/// (Windows asks the user for admin permission). Returns the run's updated record.
+#[tauri::command]
+pub async fn backup_open_files(core: CoreState<'_>, run_id: String, source_index: usize) -> Result<RunRecord, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.backup_open_files(&run_id, source_index))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Closes the "a backup wasn't deleted" question without deleting.
 #[tauri::command]
 pub fn dismiss_delete_problems(core: CoreState, paths: Vec<String>) {
