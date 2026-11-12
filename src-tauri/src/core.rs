@@ -10,6 +10,7 @@ use crate::store::Store;
 use chrono::{Duration as ChronoDuration, Local};
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -367,6 +368,69 @@ impl Core {
         }
         self.changed();
         result.map(|_| left)
+    }
+
+    /// "Back up the open files now" on a finished run's source: the files that failed because another
+    /// program held them open are copied from a shadow copy into that run's backup folder (Windows
+    /// asks for admin permission). Fixes the run's record, the folder's index and the task's last
+    /// status. Returns the updated record.
+    pub fn backup_open_files(&self, run_id: &str, source_index: usize) -> Result<RunRecord, String> {
+        let busy = "גיבוי רץ או ממתין בתור כרגע - נסו שוב כשיסתיים";
+        let record = self.store.lock().unwrap().history.iter().find(|r| r.id == run_id).cloned().ok_or("הריצה לא נמצאה ביומן")?;
+        let src = record.sources.get(source_index).ok_or("המקור לא נמצא בריצה")?.clone();
+        let folder = PathBuf::from(src.target_folder.clone().ok_or("לריצה הזאת אין תיקיית גיבוי")?);
+        if !folder.is_dir() {
+            return Err("תיקיית הגיבוי של הריצה הזאת כבר לא קיימת".into());
+        }
+        let mut errors = src.errors.clone();
+        let never = AtomicBool::new(false);
+        let saved = self
+            .when_idle(|| crate::vss::save_open_files(Path::new(&src.source), &folder, &mut errors, None, &never))
+            .ok_or(busy)?;
+        if saved.files == 0 {
+            return Err(saved.problem.unwrap_or_else(|| "לא נמצאו קבצים פתוחים לגבות".into()));
+        }
+        crate::manifest::add(&folder, &saved.listed);
+        let mut s = self.store.lock().unwrap();
+        let Some(rec) = s.history.iter_mut().find(|r| r.id == run_id) else {
+            return Err("הריצה לא נמצאה ביומן".into());
+        };
+        {
+            let run = &mut rec.sources[source_index];
+            run.errors = errors;
+            run.files_copied += saved.files;
+            run.bytes_copied += saved.bytes;
+            run.backup_bytes += saved.bytes;
+            run.files_failed = run.files_failed.saturating_sub(saved.files);
+            if run.status == Some(RunStatus::Warning) && run.files_failed == 0 && run.errors.is_empty() {
+                run.status = Some(RunStatus::Success);
+                run.message = format!("הועתקו {} קבצים, מהם {} שהיו פתוחים בתוכנה אחרת וגובו אחר כך דרך VSS", run.files_copied, saved.files);
+            } else {
+                run.message = format!("{}. {} קבצים שהיו פתוחים בתוכנה אחרת גובו אחר כך דרך VSS", run.message, saved.files);
+            }
+        }
+        rec.status = rec.sources.iter().filter_map(|s| s.status).max().unwrap_or(rec.status);
+        rec.files_copied = rec.sources.iter().map(|s| s.files_copied).sum();
+        rec.bytes_copied = rec.sources.iter().map(|s| s.bytes_copied).sum();
+        rec.backup_bytes = rec.sources.iter().map(|s| s.backup_bytes).sum();
+        rec.files_failed = rec.sources.iter().map(|s| s.files_failed).sum();
+        rec.message = match rec.sources.as_slice() {
+            [one] => one.message.clone(),
+            _ => format!("{}. {} קבצים שהיו פתוחים בתוכנה אחרת גובו אחר כך דרך VSS", rec.message, saved.files),
+        };
+        let rec = rec.clone();
+        // The task's last run is this one: its status (and the tray's warning dot) follow.
+        if let Some(st) = s.states.get_mut(&rec.task_id) {
+            if st.last_run_at == Some(rec.finished_at) {
+                st.last_status = Some(rec.status);
+                st.last_message = Some(rec.message.clone());
+            }
+        }
+        s.save_history();
+        s.save_states();
+        drop(s);
+        self.changed();
+        Ok(rec)
     }
 
     /// Cancels a queued or running task. A running one is paused (its folder is kept, the next run

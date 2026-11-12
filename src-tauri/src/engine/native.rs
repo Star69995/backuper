@@ -717,6 +717,19 @@ pub fn copy_stream(from: &Path, to: &Path) -> io::Result<u64> {
 
 /// `fs::copy`, and when Windows refuses with an error `stream_retry` knows, the copy by streaming.
 /// The copy never keeps the read-only attribute (CopyFileEx hands it over), like robocopy's /A-:R.
+/// Copies a file out of a shadow copy (`vss.rs`): the destination is replaced, and like every copy
+/// here it doesn't keep the read-only attribute.
+pub fn copy_from_snapshot(from: &Path, to: &Path) -> io::Result<u64> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // An older, read-only copy (a resumed folder) can't be overwritten.
+    drop_readonly(to);
+    let n = fs::copy(from, to)?;
+    drop_readonly(to);
+    Ok(n)
+}
+
 fn copy_file(from: &Path, to: &Path, debug: &mut Vec<String>) -> io::Result<u64> {
     let n = copy_file_as_is(from, to, debug)?;
     drop_readonly(to);

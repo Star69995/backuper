@@ -212,18 +212,14 @@ pub fn is_backup_folder_name(name: &str) -> bool {
     re.is_match(name)
 }
 
-/// Starts the app again as admin to delete `paths` (Windows shows its permission prompt). Returns
-/// once that copy has finished. Err = the prompt was declined or the copy couldn't start.
-pub fn delete_elevated(paths: &[String]) -> Result<(), String> {
+/// Starts the app again as admin with `params` as its command line (Windows shows its permission
+/// prompt) and returns once that copy has finished, with its exit code. Err = the prompt was
+/// declined or the copy couldn't start. Blocks while the prompt is open.
+pub fn run_elevated(params: &str) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Our paths never end in a backslash or hold quotes, so plain quoting is enough.
-    let mut params = DELETE_SWITCH.to_string();
-    for p in paths {
-        params.push_str(&format!(" \"{}\"", p.trim_end_matches('\\')));
-    }
     let verb = wide(std::ffi::OsStr::new("runas"));
     let file = wide(exe.as_os_str());
-    let params = wide(std::ffi::OsStr::new(&params));
+    let params = wide(std::ffi::OsStr::new(params));
     let mut info = ShellExecuteInfoW {
         cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
         f_mask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
@@ -244,30 +240,51 @@ pub fn delete_elevated(paths: &[String]) -> Result<(), String> {
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
         let e = io::Error::last_os_error();
         return Err(if e.raw_os_error() == Some(ERROR_CANCELLED) {
-            "האישור של Windows בוטל - התיקיות לא נמחקו".into()
+            "האישור של Windows בוטל".into()
         } else {
-            format!("לא ניתן להפעיל מחיקה בהרשאת מנהל: {e}")
+            format!("לא ניתן להפעיל פעולה בהרשאת מנהל: {e}")
         });
     }
+    let mut code = 0;
     if info.h_process != 0 {
-        let mut code = 0;
         unsafe {
             WaitForSingleObject(info.h_process, INFINITE);
             GetExitCodeProcess(info.h_process, &mut code);
             CloseHandle(info.h_process);
         }
     }
-    Ok(())
+    Ok(code)
 }
 
-/// The admin copy: `args` = the folders to delete. Takes ownership, grants full control, deletes.
-/// Exit code = how many folders are left.
-pub fn elevated_main(args: &[String]) -> i32 {
+/// Starts the app again as admin to delete `paths`. Returns once that copy has finished.
+pub fn delete_elevated(paths: &[String]) -> Result<(), String> {
+    // Our paths never end in a backslash or hold quotes, so plain quoting is enough.
+    let mut params = DELETE_SWITCH.to_string();
+    for p in paths {
+        params.push_str(&format!(" \"{}\"", p.trim_end_matches('\\')));
+    }
+    run_elevated(&params).map(|_| ()).map_err(|e| {
+        if e.contains("בוטל") {
+            "האישור של Windows בוטל - התיקיות לא נמחקו".into()
+        } else {
+            e
+        }
+    })
+}
+
+/// Turns on the privileges an admin copy needs to read and write files regardless of their permissions.
+pub fn enable_backup_privileges() {
     if let Some(t) = Token::open(TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES) {
         for p in ["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"] {
             t.enable(p);
         }
     }
+}
+
+/// The admin copy: `args` = the folders to delete. Takes ownership, grants full control, deletes.
+/// Exit code = how many folders are left.
+pub fn elevated_main(args: &[String]) -> i32 {
+    enable_backup_privileges();
     let mut left = 0;
     for a in args {
         let path = Path::new(a);

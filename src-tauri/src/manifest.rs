@@ -107,6 +107,18 @@ pub fn load_or_build(folder: &Path) -> Vec<ListedFile> {
     files
 }
 
+/// Files added to a finished backup folder afterwards (open files saved from a shadow copy): they
+/// join its index, so the next incremental knows they are backed up. A folder without an index
+/// gets one when it is next needed.
+pub fn add(folder: &Path, added: &[ListedFile]) {
+    let Some(mut files) = read(folder) else { return };
+    for a in added {
+        files.retain(|f| !f.rel.eq_ignore_ascii_case(&a.rel));
+        files.push(a.clone());
+    }
+    write(folder, &files);
+}
+
 /// The folder was renamed from `old_name`: its index (header holds the name) follows it.
 pub fn renamed(folder: &Path, old_name: &str) {
     let path = folder.join(FILE_NAME);

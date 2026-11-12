@@ -28,7 +28,8 @@ import type {
 import { newTask } from "../types";
 
 /** A mock task without the hidden / system rules a new task starts with, so the mock tasks show only the rules they list. */
-const plainTask = (): Task => ({ ...newTask(), filters: [] });
+// Like a task saved before VSS existed: no rules, open files not backed up through VSS.
+const plainTask = (): Task => ({ ...newTask(), filters: [], vssOpenFiles: false });
 
 const mockCopyStart = Date.now() - 60_000;
 
@@ -381,6 +382,44 @@ export function installDevMock() {
       sources,
     };
   });
+  // The Outlook file that was open: the run's details offer VSS or skipping it.
+  {
+    const t = tasks[0];
+    const run = history.find((h) => h.taskId === t.id && h.status === "success")!;
+    const src: SourceRun = {
+      ...run.sources[0],
+      mode: "incremental",
+      status: "warning",
+      message: "הועתקו 1,244 קבצים, 1 קבצים לא הועתקו",
+      targetFolder: "K:\\cobian\\Docs\\Documents 2026-11-12 02h34 אינקרמנטלי",
+      filesCopied: 1244,
+      bytesCopied: 17_800_000_000,
+      backupBytes: 17_800_000_000,
+      freedBytes: 0,
+      filesFailed: 1,
+      errors: [
+        {
+          path: `${run.sources[0].source}\\Outlook Files\\mail.pst`,
+          code: 32,
+          message: "The process cannot access the file because it is being used by another process. (os error 32)",
+        },
+      ],
+    };
+    history.unshift({
+      ...run,
+      id: "outlook",
+      mode: "incremental",
+      startedAt: iso(-20),
+      finishedAt: iso(-12),
+      status: "warning",
+      message: src.message,
+      filesCopied: src.filesCopied,
+      bytesCopied: src.bytesCopied,
+      backupBytes: src.backupBytes,
+      filesFailed: 1,
+      sources: [src],
+    });
+  }
   // Task 5 was paused twice: the card adds both parts up.
   history.unshift(
     ...[-25, -60].map((at, i): RunRecord => {
@@ -665,6 +704,18 @@ export function installDevMock() {
           savedAt: iso(-minutesAgo),
           taskCount: tasks.length - i,
         }));
+      case "backup_open_files": {
+        const rec = history.find((h) => h.id === a.runId)!;
+        const src = rec.sources[a.sourceIndex as number];
+        src.filesCopied += src.errors.length;
+        src.filesFailed = 0;
+        src.errors = [];
+        src.status = "success";
+        src.message = `${src.message}. 1 קבצים שהיו פתוחים בתוכנה אחרת גובו אחר כך דרך VSS`;
+        rec.status = "success";
+        rec.filesFailed = 0;
+        return rec;
+      }
       case "retry_delete":
       case "dismiss_delete_problems":
         deleteProblems = deleteProblems.filter((p) => !(a.paths as string[]).includes(p.path));

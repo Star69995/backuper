@@ -639,6 +639,12 @@ export default function TaskEditor({
               label="העתקת תיקיות ריקות"
               description="כברירת מחדל תיקיות ריקות לא מועתקות לגיבוי."
             />
+            <Toggle
+              checked={t.vssOpenFiles}
+              onChange={(v) => set("vssOpenFiles", v)}
+              label="גיבוי קבצים שפתוחים בתוכנה אחרת (VSS)"
+              description="קובץ שתוכנה אחרת מחזיקה פתוח (כמו קובץ הדואר של Outlook או מסד נתונים) לא נכשל בגיבוי: הוא מועתק מתצלום מצב של הכונן (Volume Shadow Copy). Windows מבקשת אישור מנהל בכל פעם. בהרצה מתוזמנת שאף אחד לא מאשר, הקובץ מדולג אחרי 3 דקות והגיבוי ממשיך."
+            />
           </Section>
         </div>
       </div>

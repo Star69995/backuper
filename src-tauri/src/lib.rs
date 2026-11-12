@@ -18,6 +18,7 @@ mod store;
 mod tasklist;
 mod tray;
 mod updater;
+mod vss;
 
 use crate::core::Core;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,12 +78,15 @@ fn mirror_title_bar(window: &tauri::WebviewWindow) {
     }
 }
 
-/// The app started again as admin to delete backup folders (`acl::delete_elevated`): does that and
-/// exits, before anything else (single instance, window) starts.
+/// The app started again as admin (`acl::delete_elevated`: delete backup folders, `vss::copy_open_files`:
+/// copy open files from a shadow copy): does that and exits, before anything else (single instance,
+/// window) starts.
 pub fn elevated_delete_if_asked() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some(acl::DELETE_SWITCH) {
-        std::process::exit(acl::elevated_main(&args[1..]));
+    match args.first().map(String::as_str) {
+        Some(acl::DELETE_SWITCH) => std::process::exit(acl::elevated_main(&args[1..])),
+        Some(vss::SWITCH) => std::process::exit(vss::elevated_main(&args[1..])),
+        _ => {}
     }
 }
 
@@ -185,6 +189,7 @@ pub fn run() {
             commands::dismiss_notice,
             commands::answer_drive_prompts,
             commands::retry_delete,
+            commands::backup_open_files,
             commands::dismiss_delete_problems,
             commands::test_sound,
             commands::check_updates,

@@ -1,4 +1,4 @@
-import { ArrowUp, Check, CircleAlert, Copy, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
+import { ArrowUp, Check, CircleAlert, Copy, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, ShieldCheck, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
@@ -175,6 +175,18 @@ interface Skipper {
   skip: (path: string, source: string, all: string[]) => void;
 }
 
+/** What the user can do about files that another program held open: back them up through a shadow copy, or skip them. */
+interface OpenFilesActions {
+  /** The task already backs such files up through VSS (so the files here are ones that still failed). */
+  vssOn: boolean;
+  /** A VSS copy is running (Windows's permission prompt may be open). */
+  busy: boolean;
+  backupNow: (sourceIndex: number) => void;
+  /** Turns on VSS for the task's next runs. */
+  enableAuto: () => void;
+  skipAll: (paths: string[]) => void;
+}
+
 /** One kind of copy failure: what happened, why, what to do, and the affected files. */
 function ErrorGroup({
   kind,
@@ -182,12 +194,15 @@ function ErrorGroup({
   source,
   allPaths,
   skipper,
+  actions,
 }: {
   kind: ErrorKind;
   errors: FileError[];
   source: string;
   allPaths: string[];
   skipper: Skipper | null;
+  /** What can be done about the whole group at once (buttons under the explanation). */
+  actions?: ReactNode;
 }) {
   const canSkip = skipper !== null && !NOT_SKIPPABLE.has(kind.id);
   const bad = kind.tone === "bad";
@@ -212,6 +227,7 @@ function ErrorGroup({
         <span className="font-medium">מה לעשות? </span>
         {kind.fix}
       </p>
+      {actions}
       <details className="group">
         <summary className="cursor-pointer text-xs text-muted select-none hover:text-fg">הצגת הקבצים</summary>
         <ul className="mt-1.5 flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
@@ -365,6 +381,7 @@ function SourceCard({
   index,
   onShowLog,
   skipper,
+  openFiles,
   resumable,
   task,
   globalRules,
@@ -374,6 +391,7 @@ function SourceCard({
   index: number;
   onShowLog: (i: number) => void;
   skipper: Skipper | null;
+  openFiles: OpenFilesActions | null;
   /** The run's task as it is now and the global rules, for the debug text of "copy errors". */
   task: Task | null;
   globalRules: FilterRule[];
@@ -430,6 +448,40 @@ function SourceCard({
           source={src.source}
           allPaths={src.errors.map((e) => e.path).filter(Boolean)}
           skipper={skipper}
+          actions={
+            g.kind.id === "inUse" && openFiles ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-2.5">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={<ShieldCheck size={14} />}
+                    disabled={openFiles.busy || !src.targetFolder}
+                    onClick={() => openFiles.backupNow(index)}
+                  >
+                    {openFiles.busy ? "מגבה דרך VSS..." : "גיבוי הקבצים עכשיו דרך VSS"}
+                  </Button>
+                  {!openFiles.vssOn && (
+                    <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAuto}>
+                      גיבוי אוטומטי דרך VSS בכל הרצה
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    icon={<EyeOff size={14} />}
+                    disabled={openFiles.busy}
+                    onClick={() => openFiles.skipAll(g.errors.map((e) => e.path).filter(Boolean))}
+                  >
+                    דילוג על הקבצים האלה
+                  </Button>
+                </div>
+                <p className="text-xs leading-relaxed text-muted">
+                  VSS הוא תצלום מצב של הכונן, שממנו Windows מאפשרת לקרוא גם קבצים פתוחים. היא תבקש אישור מנהל.
+                  {openFiles.vssOn && " הגיבוי האוטומטי דרך VSS כבר מופעל במשימה הזאת."}
+                </p>
+              </div>
+            ) : null
+          }
         />
       ))}
       {src.filesFailed > src.errors.length && src.errors.length > 0 && (
@@ -475,8 +527,12 @@ function openBackupFolder(path: string): Promise<unknown> {
   return api.openPath(path).catch((e) => (modern !== path ? api.openPath(modern) : Promise.reject(e)));
 }
 
-export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () => void }) {
+export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: () => void }) {
   const { toast } = useFeedback();
+  // The record after "back up the open files now" changed it (the history list behind keeps the old one until it reloads).
+  const [updated, setUpdated] = useState<RunRecord | null>(null);
+  const r = updated && updated.id === shown.id ? updated : shown;
+  const [vssBusy, setVssBusy] = useState(false);
   // The run's task as it is now (null = deleted since), for "skip this next time".
   const [task, setTask] = useState<Task | null>(null);
   const [globalRules, setGlobalRules] = useState<FilterRule[]>([]);
@@ -525,6 +581,64 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
     } catch (e) {
       toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
     }
+  };
+  const backupOpenFiles = async (sourceIndex: number) => {
+    setVssBusy(true);
+    try {
+      const rec = await api.backupOpenFiles(r.id, sourceIndex);
+      setUpdated(rec);
+      const left = rec.sources[sourceIndex]?.errors.length ?? 0;
+      toast({
+        tone: left > 0 ? "warn" : "ok",
+        title: left > 0 ? "חלק מהקבצים עדיין לא גובו" : "הקבצים הפתוחים גובו דרך VSS",
+        message: left > 0 ? "פרטים ברשימת השגיאות" : undefined,
+      });
+    } catch (e) {
+      toast({ tone: "bad", title: "הגיבוי דרך VSS לא הצליח", message: errorText(e) });
+    } finally {
+      setVssBusy(false);
+    }
+  };
+  const enableAutoVss = async () => {
+    try {
+      const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
+      if (!now) throw new Error("המשימה נמחקה");
+      const [saved] = await api.saveTasks([{ ...now, vssOpenFiles: true }]);
+      setTask(saved);
+      toast({ tone: "ok", title: "הגיבוי האוטומטי דרך VSS הופעל", message: "קבצים פתוחים יגובו דרך VSS בכל הרצה של המשימה." });
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
+    }
+  };
+  const skipAll = async (paths: string[]) => {
+    try {
+      const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
+      if (!now) throw new Error("המשימה נמחקה");
+      const rules: FilterRule[] = paths.filter((p) => !isSkipped(now, p)).map((value) => ({ kind: "file", value }));
+      const [saved] = await api.saveTasks([{ ...now, filters: [...now.filters, ...rules] }]);
+      setTask(saved);
+      toast({
+        tone: "ok",
+        title: rules.length === 1 ? "הקובץ ידולג בגיבויים הבאים" : `${rules.length} קבצים ידולגו בגיבויים הבאים`,
+        action: {
+          label: "ביטול",
+          onClick: () =>
+            api
+              .saveTasks([now])
+              .then(([t]) => setTask(t))
+              .catch((e) => toast({ tone: "bad", title: "הביטול לא הצליח", message: errorText(e) })),
+        },
+      });
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
+    }
+  };
+  const openFiles: OpenFilesActions | null = task && {
+    vssOn: task.vssOpenFiles,
+    busy: vssBusy,
+    backupNow: backupOpenFiles,
+    enableAuto: enableAutoVss,
+    skipAll,
   };
   const askSkip = (path: string, source: string, all: string[]) => {
     if (canSkipPath(path, source)) setSkipAsk({ path, source, all });
@@ -656,6 +770,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
             index={i}
             onShowLog={showLog}
             skipper={skipper}
+            openFiles={openFiles}
             resumable={resumable}
             task={task}
             globalRules={globalRules}

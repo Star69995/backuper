@@ -195,6 +195,9 @@ pub struct Task {
     /// On a full backup, delete incremental folders that ended up empty (no changes at that run).
     pub delete_empty_incrementals: bool,
     pub copy_empty_dirs: bool,
+    /// Files another program holds open (Outlook's mail file, a database) are copied from a Volume
+    /// Shadow Copy of the drive (`vss.rs`; Windows asks for admin permission) instead of failing.
+    pub vss_open_files: bool,
     /// Run a scheduled occurrence that was missed while the computer was off.
     pub catch_up: bool,
     /// Start (or offer to start) a backup when the task's drives become available.
@@ -230,6 +233,7 @@ impl Default for Task {
             reuse_previous: false,
             delete_empty_incrementals: true,
             copy_empty_dirs: false,
+            vss_open_files: false,
             catch_up: true,
             on_drive_connect: DriveAction::Off,
             filters: Vec::new(),

@@ -13,6 +13,7 @@
 
 use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters, ListedFile, Outcome, TotalsSource};
 use crate::manifest;
+use crate::vss;
 use crate::model::{BackupFolder, BackupMode, FullSpace, KeepMode, RunRecord, RunStatus, Source, SourceBackups, SourceRun, Task};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::collections::{HashMap, HashSet};
@@ -976,7 +977,7 @@ pub fn backup_source(
     // Whether a full stop may delete `work`: always for an incremental (it holds new files only).
     // For a full, set below.
     let mut discard_safe = mode == BackupMode::Incremental;
-    let result = match mode {
+    let mut result = match mode {
         BackupMode::Full => {
             // Fast full: reuse the newest full folder so only differences are copied.
             // Not with an include rule: robocopy only purges names matching it, so files that
@@ -1170,6 +1171,31 @@ pub fn backup_source(
             result
         }
     };
+
+    // Files another program holds open: from a shadow copy of the drive, if the task asks for it.
+    if task.vss_open_files
+        && matches!(result.outcome, Outcome::Warning | Outcome::Failed)
+        && result.stats.errors.iter().any(|e| vss::is_in_use(e.code))
+        && !ctx.cancel.load(Ordering::SeqCst)
+    {
+        on_event(EngineEvent::Phase("vss"));
+        // A scheduled run may have nobody to answer Windows's permission prompt: it doesn't wait for ever.
+        let wait = ctx.scheduled.then_some(vss::UNATTENDED_WAIT);
+        let saved = vss::save_open_files(&source, &work, &mut result.stats.errors, wait, ctx.cancel);
+        if saved.files > 0 {
+            result.stats.files_copied += saved.files;
+            result.stats.bytes_copied += saved.bytes;
+            result.stats.files_failed = result.stats.files_failed.saturating_sub(saved.files);
+            notes.push(format!("{} קבצים שהיו פתוחים בתוכנה אחרת גובו דרך VSS", saved.files));
+            if result.stats.files_failed == 0 && result.stats.errors.is_empty() {
+                result.outcome = Outcome::Success;
+                result.message = format!("הועתקו {} קבצים", result.stats.files_copied);
+            } else if result.message.contains("לא הועתקו") {
+                result.message = format!("הגיבוי הסתיים, אבל {} קבצים לא הועתקו (פירוט ברשימת השגיאות)", result.stats.files_failed.max(1));
+            }
+        }
+        notes.extend(saved.problem);
+    }
 
     unhide(&work);
     let mut status = status_of(result.outcome);

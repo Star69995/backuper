@@ -32,6 +32,7 @@ export default function RunningCard({
     scanning: "סורק את הקבצים...",
     deleting: waitingForDelete ? "ממתין להחלטה: גיבוי ישן לא נמחק" : "מוחק גיבויים קודמים לפני ההעתקה...",
     pruning: "מנקה מהגיבוי קבצים שכללי הסינון מדלגים עליהם...",
+    vss: "מגבה קבצים פתוחים דרך VSS (ייתכן ש-Windows מבקשת אישור)...",
     copying: "מעתיק קבצים",
   }[waitingForDelete ? "deleting" : p.phase];
   // No totals while copying = the pre-scan was skipped and nothing could estimate the work: counters only.
@@ -71,7 +72,9 @@ export default function RunningCard({
           ? "מפנה מקום ביעד"
           : p.phase === "pruning"
             ? "הכללים שונו מאז ההעתקה הקודמת בתיקייה"
-            : "מחשב את כמות השינויים"}
+            : p.phase === "vss"
+              ? "הקבצים נקראים מתצלום מצב של הכונן"
+              : "מחשב את כמות השינויים"}
     </span>
   ) : unknownTotal ? (
     <span>
