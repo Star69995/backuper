@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, type LucideProps, Play, Search, SkipForward, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleHelp, type LucideProps, Play, Search, SkipForward, X } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -241,6 +241,7 @@ export function Toggle({
   label,
   ariaLabel,
   description,
+  help,
   disabled,
 }: {
   checked: boolean;
@@ -249,8 +250,11 @@ export function Toggle({
   /** Accessible name when there's no visible `label`. */
   ariaLabel?: string;
   description?: ReactNode;
+  /** Full explanation: a "?" button next to the label opens it under the row, so `description` can stay one short line. */
+  help?: ReactNode;
   disabled?: boolean;
 }) {
+  const [helpOpen, setHelpOpen] = useState(false);
   const sw = (
     <button
       type="button"
@@ -275,14 +279,37 @@ export function Toggle({
   );
   if (!label) return sw;
   return (
-    <div className={cx("flex items-start justify-between gap-4", disabled && "opacity-60")}>
-      <div className="flex flex-col gap-0.5">
-        <span className="text-sm font-medium cursor-default" onClick={() => !disabled && onChange(!checked)}>
-          {label}
-        </span>
-        {description && <span className="text-xs text-muted">{description}</span>}
+    <div className="flex flex-col gap-2">
+      <div className={cx("flex items-start justify-between gap-4", disabled && "opacity-60")}>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1.5">
+            <span className="text-sm font-medium cursor-default" onClick={() => !disabled && onChange(!checked)}>
+              {label}
+            </span>
+            {help && (
+              <button
+                type="button"
+                aria-label="הסבר מלא"
+                aria-expanded={helpOpen}
+                title="הסבר מלא"
+                onClick={() => setHelpOpen((o) => !o)}
+                className={cx(
+                  "inline-flex size-5 items-center justify-center rounded-full text-muted transition-colors",
+                  "hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+                  helpOpen && "text-accent",
+                )}
+              >
+                <CircleHelp size={16} />
+              </button>
+            )}
+          </span>
+          {description && <span className="text-xs text-muted">{description}</span>}
+        </div>
+        {sw}
       </div>
-      {sw}
+      {help && helpOpen && (
+        <div className="rounded-lg border border-line bg-panel2 p-3 text-xs leading-relaxed text-muted">{help}</div>
+      )}
     </div>
   );
 }
