@@ -4,7 +4,7 @@
 use crate::backup;
 use crate::drives::DriveWatch;
 use crate::engine::{robocopy::Robocopy, CopyEngine, EngineEvent};
-use crate::model::{BackupMode, DeleteProblem, DriveAction, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
+use crate::model::{BackupMode, DeleteProblem, DriveAction, Navigate, Progress, RunRecord, RunStatus, Schedule, Settings, SourceRun, Task, Trigger};
 use crate::schedule;
 use crate::store::Store;
 use chrono::{Duration as ChronoDuration, Local};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 /// `backup::rename_previous` for each source of the task (same order).
@@ -169,6 +169,13 @@ pub struct Core {
     drive_prompts: Mutex<Vec<String>>,
     /// Backup folders that should have been deleted but weren't, until the user deals with them.
     delete_problems: Mutex<Vec<DeleteProblem>>,
+    /// Where a clicked notification sends the window, until the window went there (`Snapshot.navigate`:
+    /// state, not an event, so it survives a window that is still coming up).
+    navigate: Mutex<Option<Navigate>>,
+    /// The last notification shown, while the window hasn't been brought up since. A click on it
+    /// once it moved to the notification center doesn't reach our handler: Windows starts the app
+    /// again (a second instance, `reopened`), which is then taken as the click.
+    unseen_toast: Mutex<Option<ToastTarget>>,
     engine: Box<dyn CopyEngine>,
     app: AppHandle,
 }
@@ -186,6 +193,8 @@ impl Core {
             working: AtomicBool::new(false),
             drive_prompts: Mutex::new(Vec::new()),
             delete_problems: Mutex::new(Vec::new()),
+            navigate: Mutex::new(None),
+            unseen_toast: Mutex::new(None),
             engine: Box::new(Robocopy),
             app,
         })
@@ -208,6 +217,31 @@ impl Core {
     pub fn changed(&self) {
         let _ = self.app.emit("snapshot-changed", ());
         crate::tray::refresh(&self.app);
+    }
+
+    pub fn navigate(&self) -> Option<Navigate> {
+        self.navigate.lock().unwrap().clone()
+    }
+
+    pub fn dismiss_navigate(&self) {
+        *self.navigate.lock().unwrap() = None;
+    }
+
+    /// The main window was brought up: a notification still waiting counts as seen.
+    pub fn toast_seen(&self) {
+        *self.unseen_toast.lock().unwrap() = None;
+    }
+
+    /// A notification was clicked: points the window at what it was about.
+    fn follow(&self, target: &ToastTarget) {
+        let navigate = match target {
+            ToastTarget::Window | ToastTarget::Update => return,
+            ToastTarget::Tasks => Navigate { view: "tasks".into(), run_id: None },
+            ToastTarget::Settings => Navigate { view: "settings".into(), run_id: None },
+            ToastTarget::Run(id) => Navigate { view: "history".into(), run_id: Some(id.clone()) },
+        };
+        *self.navigate.lock().unwrap() = Some(navigate);
+        self.changed();
     }
 
     pub fn queued(&self) -> Vec<Job> {
@@ -296,7 +330,7 @@ impl Core {
         }
         let sound = self.store.lock().unwrap().settings.sound_failure.clone();
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        toast(&self.app, format!("גיבוי ישן לא נמחק: {}", task.name), format!("{name} - הוא ממשיך לתפוס מקום בכונן הגיבוי. פתחו את Backuper כדי לטפל בזה"), &sound);
+        toast(&self.app, format!("גיבוי ישן לא נמחק: {}", task.name), format!("{name} - הוא ממשיך לתפוס מקום בכונן הגיבוי. פתחו את Backuper כדי לטפל בזה"), &sound, ToastTarget::Window);
         self.changed();
         crate::tray::show_main(&self.app);
     }
@@ -705,6 +739,7 @@ impl Core {
                                     format!("נדרש אישור מנהל: {}", task.name),
                                     "קבצים פתוחים בתוכנה אחרת (כמו Outlook) מגובים דרך VSS. אשרו את בקשת ההרשאה של Windows, אחרת הם ידולגו".to_string(),
                                     &sound,
+                                    ToastTarget::Tasks,
                                 );
                                 if !matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp) {
                                     crate::tray::show_main(&self.app);
@@ -827,7 +862,7 @@ impl Core {
             RunStatus::Cancelled => (false, String::new(), &settings.sound_success),
         };
         if show {
-            toast(&self.app, title, &r.message, sound);
+            toast(&self.app, title, &r.message, sound, ToastTarget::Run(r.id.clone()));
         }
     }
 
@@ -894,7 +929,7 @@ impl Core {
                             fresh: false,
                         });
                         if queued && notify {
-                            toast(&self.app, format!("הכונן חובר - מתחיל גיבוי: {}", t.name), drives, &sound);
+                            toast(&self.app, format!("הכונן חובר - מתחיל גיבוי: {}", t.name), drives, &sound, ToastTarget::Tasks);
                         }
                     }
                     DriveAction::Ask => {
@@ -1028,8 +1063,75 @@ mod tests {
     }
 }
 
-/// Shows a Windows notification. `sound` is a toast sound name; empty plays nothing.
-pub fn toast(app: &AppHandle, title: impl Into<String>, body: impl Into<String>, sound: &str) {
+/// Where a click on a Windows notification leads. Every one of them brings the main window up.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToastTarget {
+    /// Just the window (what the notification is about shows there as a dialog, or needs no place).
+    Window,
+    /// The task list, with the running backup on top.
+    Tasks,
+    /// The details of this run in the log.
+    Run(String),
+    /// The settings page (updates card).
+    Settings,
+    /// The update dialog.
+    Update,
+}
+
+/// A notification was clicked: brings the window up, at what the notification was about.
+fn activated(app: &AppHandle, target: &ToastTarget) {
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        core.toast_seen();
+        core.follow(target);
+    }
+    if *target == ToastTarget::Update {
+        if let Some(updates) = app.try_state::<Arc<crate::updater::Updates>>() {
+            updates.request_prompt();
+        }
+    }
+    crate::tray::show_main(app);
+}
+
+/// The app was started again while it runs (second instance): brings the window up, and takes it
+/// as the click on a notification still waiting in the notification center.
+pub fn reopened(app: &AppHandle) {
+    let waiting = app.try_state::<Arc<Core>>().and_then(|core| core.unseen_toast.lock().unwrap().take());
+    match waiting {
+        Some(target) => activated(app, &target),
+        None => crate::tray::show_main(app),
+    }
+}
+
+/// Shows a Windows notification. `sound` is a toast sound name; empty plays nothing. A click on it
+/// opens the main window at `target`.
+pub fn toast(app: &AppHandle, title: impl Into<String>, body: impl Into<String>, sound: &str, target: ToastTarget) {
+    let (title, body) = (title.into(), body.into());
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        *core.unseen_toast.lock().unwrap() = Some(target.clone());
+    }
+    #[cfg(windows)]
+    {
+        use tauri_winrt_notification::{Sound, Toast};
+        // Windows only shows notifications of an app id it knows: ours once installed (the
+        // installer's shortcut carries it), PowerShell's when run from a build folder.
+        let built = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).is_some_and(|dir| {
+            dir.parent().is_some_and(|t| t.ends_with("target")) && (dir.ends_with("debug") || dir.ends_with("release"))
+        });
+        let id = if built { Toast::POWERSHELL_APP_ID.to_string() } else { app.config().identifier.clone() };
+        let handle = app.clone();
+        let shown = Toast::new(&id)
+            .title(&title)
+            .text1(&body)
+            .sound(sound.parse::<Sound>().ok())
+            .on_activated(move |_| {
+                activated(&handle, &target);
+                Ok(())
+            })
+            .show();
+        if shown.is_ok() {
+            return;
+        }
+    }
     let mut n = app.notification().builder().title(title).body(body);
     if !sound.is_empty() {
         n = n.sound(sound);

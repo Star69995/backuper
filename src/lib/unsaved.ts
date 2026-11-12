@@ -19,6 +19,9 @@ export function resetUnsaved() {
   sync();
 }
 
+/** Something is open with unsaved changes right now. */
+export const hasUnsaved = () => open.size > 0;
+
 /** Registers `what` (a short Hebrew description) while it is not null. */
 export function useUnsaved(what: string | null) {
   useEffect(() => {

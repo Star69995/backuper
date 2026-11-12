@@ -92,7 +92,9 @@ pub fn elevated_delete_if_asked() {
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)))
+        // Started again: by the user, or by a click on a notification that moved to the notification
+        // center (which doesn't reach the notification's own handler).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| core::reopened(app)))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![HIDDEN_ARG]),
@@ -120,7 +122,8 @@ pub fn run() {
                 s.notice.clone().map(|n| (n, s.settings.sound_failure.clone()))
             };
             if let Some((n, sound)) = notice {
-                crate::core::toast(&handle, n.title, n.message, &sound);
+                // The notice itself is a dialog in the window.
+                crate::core::toast(&handle, n.title, n.message, &sound, core::ToastTarget::Window);
             }
             core.start();
             let updates = updater::Updates::new(handle.clone(), core.clone());
@@ -195,6 +198,7 @@ pub fn run() {
             commands::check_updates,
             commands::install_update,
             commands::dismiss_update_prompt,
+            commands::dismiss_navigate,
             commands::set_unsaved,
             commands::find_cobian_lists,
             commands::plan_cobian_takeover,

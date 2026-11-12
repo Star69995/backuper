@@ -10,7 +10,7 @@ import SettingsView from "./components/SettingsView";
 import TasksView from "./components/TasksView";
 import UpdateDialog from "./components/UpdateDialog";
 import { cx, RunIcon, Spinner } from "./components/ui";
-import { resetUnsaved } from "./lib/unsaved";
+import { hasUnsaved, resetUnsaved } from "./lib/unsaved";
 import { useSnapshot, useTheme } from "./lib/useSnapshot";
 
 type View = "tasks" | "history" | "settings" | "help";
@@ -23,6 +23,18 @@ export default function App() {
   useTheme(snap?.settings.theme);
   // A reloaded page has nothing unsaved (the backend keeps the last list it was told).
   useEffect(resetUnsaved, []);
+  // A clicked Windows notification leads somewhere (`Snapshot.navigate`): the page, and for a finished
+  // backup its run in the log. Not while something is being edited - switching pages would drop it.
+  const [openRun, setOpenRun] = useState<string | null>(null);
+  const target = snap?.navigate ?? null;
+  useEffect(() => {
+    if (!target) return;
+    if (!hasUnsaved()) {
+      setView(target.view);
+      setOpenRun(target.view === "history" ? target.runId : null);
+    }
+    api.dismissNavigate().catch(() => {});
+  }, [target?.view, target?.runId]);
 
   if (!snap) {
     return (
@@ -109,7 +121,7 @@ export default function App() {
       </aside>
       <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         {view === "tasks" && <TasksView snap={snap} refresh={refresh} />}
-        {view === "history" && <HistoryView snap={snap} />}
+        {view === "history" && <HistoryView snap={snap} openRun={openRun} onOpened={() => setOpenRun(null)} />}
         {view === "settings" && <SettingsView snap={snap} refresh={refresh} />}
         {view === "help" && <HelpView />}
       </main>

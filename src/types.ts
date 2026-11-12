@@ -243,7 +243,29 @@ export interface UpdateStatus {
   prompt: boolean;
 }
 
+/** Where a clicked Windows notification leads (model.rs `Navigate`). */
+export interface Navigate {
+  view: "tasks" | "history" | "settings";
+  /** `history`: the run whose details to open. */
+  runId: string | null;
+}
+
+/** A quick full backup updates the one full backup that is kept, so it needs exactly one. */
+export const keepsOneFull = (t: Pick<Task, "keepMode" | "keepCount">) => t.keepMode === "count" && t.keepCount === 1;
+
+/**
+ * Settings that can't go together (model.rs `Task::settle_retention`): no quick full backup when more
+ * than one full is kept, and no delete-before with it (it copies only the differences into the previous full).
+ */
+export function settleRetention<T extends Pick<Task, "keepMode" | "keepCount" | "reusePrevious" | "deleteBefore">>(t: T): T {
+  const reusePrevious = t.reusePrevious && keepsOneFull(t);
+  const deleteBefore = t.deleteBefore && !reusePrevious;
+  return reusePrevious === t.reusePrevious && deleteBefore === t.deleteBefore ? t : { ...t, reusePrevious, deleteBefore };
+}
+
 export interface Snapshot {
+  /** A Windows notification was clicked: go there, then `dismiss_navigate`. */
+  navigate: Navigate | null;
   tasks: Task[];
   states: Record<string, TaskState>;
   current: Progress | null;

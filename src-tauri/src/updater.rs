@@ -302,33 +302,9 @@ impl Updates {
         let sound = self.core.store.lock().unwrap().settings.sound_success.clone();
         let title = format!("גרסה חדשה של Backuper זמינה: {version}");
         let body = "לחצו כאן כדי לפתוח את Backuper ולעדכן.";
-        #[cfg(windows)]
-        {
-            use tauri_winrt_notification::{Sound, Toast};
-            let app = self.app.clone();
-            let id = self.app.config().identifier.clone();
-            let mut toast = Toast::new(&id).title(&title).text1(body).on_activated(move |_| {
-                open_update_page(&app);
-                Ok(())
-            });
-            if let Ok(s) = sound.parse::<Sound>() {
-                toast = toast.sound(Some(s));
-            }
-            if toast.show().is_ok() {
-                return;
-            }
-        }
-        crate::core::toast(&self.app, title, body, &sound);
+        // A click brings the window up with the update dialog (`request_prompt`).
+        crate::core::toast(&self.app, title, body, &sound, crate::core::ToastTarget::Update);
     }
-}
-
-/// A click on the "new version" notification: brings the window up with the update dialog.
-#[cfg(windows)]
-fn open_update_page(app: &AppHandle) {
-    if let Some(updates) = app.try_state::<Arc<Updates>>() {
-        updates.request_prompt();
-    }
-    crate::tray::show_main(app);
 }
 
 /// Called at startup: if this launch follows an update, removes the marker, says so, and
@@ -342,6 +318,8 @@ pub fn after_update(app: &AppHandle, core: &Core) -> Option<bool> {
         format!("Backuper עודכן לגרסה {}", app.package_info().version),
         "הגיבויים והמשימות ממשיכים כרגיל.",
         "",
+        // The updates card says which version is installed.
+        crate::core::ToastTarget::Settings,
     );
     Some(content.trim() == MARKER_HIDDEN)
 }

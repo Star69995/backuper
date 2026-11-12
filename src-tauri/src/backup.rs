@@ -589,7 +589,7 @@ fn prune(
 /// A full backup renames the previous full folder and updates it in place (when no include
 /// filter stands in the way, which the run checks) instead of copying everything again.
 fn reuses_previous_full(task: &Task) -> bool {
-    task.reuse_previous && task.keep_mode == KeepMode::Count && task.keep_count == 1
+    task.reuse_previous && task.keeps_one_full()
 }
 
 /// The space the task's next full backup needs on the destination, to compare with what is free
@@ -1008,7 +1008,9 @@ pub fn backup_source(
             // folder with no complete full next to it).
             discard_safe = !reused && (resume.is_none() || latest_full.is_some());
             let (totals, late) = full_totals(ctx, previous_files, !reused && resume.is_none(), &work);
-            if task.delete_before {
+            // Not with a quick full backup (tasks saved before `Task::settle_retention` may hold both):
+            // it copies only the differences, so there is no second copy to make room for.
+            if task.delete_before && !reuses_previous_full(task) {
                 on_event(EngineEvent::Phase("deleting"));
                 let (deleted, freed) = prune(
                     &task.destination,
@@ -2006,6 +2008,31 @@ mod tests {
         assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03h00 מלא"]);
         let index = manifest::read(&dst.join("Src 2026-10-02 03h00 מלא")).unwrap();
         assert_eq!(index.len(), 2, "the reused folder gets a fresh index");
+    }
+
+    /// A task saved by an older version may hold a quick full and delete-before together: nothing is
+    /// deleted first, the previous full is what gets updated.
+    #[test]
+    fn fast_full_never_deletes_before() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let t = Task {
+            reuse_previous: true,
+            delete_before: true,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        fs::write(src.join("c.txt"), "c").unwrap();
+        let mut deleting = false;
+        let r = env.run_with(&t, BackupMode::Full, "2026-10-02 03:00", &mut |_, e| {
+            deleting |= matches!(e, EngineEvent::Phase("deleting"));
+        });
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        assert!(!deleting, "no delete-before step");
+        assert_eq!(r[0].files_copied, 1, "only the difference is copied: {r:?}");
+        assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03h00 מלא"]);
     }
 
     /// A fast full makes the reused folder match the source and the current rules: what was deleted

@@ -36,7 +36,7 @@ import {
   taskDrives,
   taskKind,
 } from "../lib/format";
-import type { BackupMode, DriveAction, FilterRule, KeepMode, Source, Task } from "../types";
+import { type BackupMode, type DriveAction, type FilterRule, type KeepMode, keepsOneFull, settleRetention, type Source, type Task } from "../types";
 import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
@@ -331,9 +331,11 @@ export default function TaskEditor({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const set = <K extends keyof Task>(k: K, v: Task[K]) => setT((x) => ({ ...x, [k]: v }));
+  const set = <K extends keyof Task>(k: K, v: Task[K]) => setT((x) => settleRetention({ ...x, [k]: v }));
   const kind = taskKind(t);
-  const keepsOne = t.keepMode === "count" && t.keepCount === 1;
+  const keepsOne = keepsOneFull(t);
+  // A quick full backup copies only the differences into the previous full: nothing to delete first.
+  const quickFull = keepsOne && t.reusePrevious;
   const dirty = JSON.stringify(t) !== JSON.stringify(task);
   useUnsaved(dirty ? (isNew ? "משימה חדשה" : `עריכת המשימה "${task.name}"`) : null);
   // Existing backups are found by destination + folder name. A new destination leaves them behind;
@@ -543,65 +545,68 @@ export default function TaskEditor({
           </Section>
 
           <Section {...sec("retention")}>
-            <RetentionEditor value={t} onChange={(v) => setT((x) => ({ ...x, ...v }))} />
-            {kind !== "incremental" && (
-              <Toggle
-                checked={t.reusePrevious}
-                onChange={(v) => set("reusePrevious", v)}
-                disabled={!keepsOne}
-                label={
-                  <span className="flex items-center gap-1.5">
-                    <RefreshCw size={14} /> גיבוי מלא מהיר
-                  </span>
-                }
-                description={
-                  !keepsOne
-                    ? "זמין רק כששומרים גיבוי מלא אחד."
-                    : "הגיבוי הקודם מתעדכן במקום להעתיק הכול מחדש. חוסך זמן ומקום."
-                }
-                help={
-                  keepsOne && (
-                    <div className="flex flex-col gap-2">
-                      <p>
-                        הגיבוי המלא הקודם הופך לגיבוי החדש: התיקייה מקבלת את התאריך החדש, ומועתקים אליה רק קבצים חדשים או
-                        ששונו.
-                      </p>
-                      <ul className="list-disc ps-5 flex flex-col gap-1">
-                        <li>
-                          קובץ נחשב משונה אם הגודל שלו שונה, או אם שעת השינוי שלו שונה (בלי לפתוח את הקבצים ובלי להשוות תוכן).
-                        </li>
-                        <li>
-                          הבדיקה היא לפי תאריך ושעה, לא לפי יום: הפרש של יותר משתי שניות מספיק כדי להעתיק מחדש. ההפרש מוזנח עד שתי
-                          שניות בלבד (כך בדיסקים בפורמט FAT / exFAT לא מועתקים קבצים בלי סיבה).
-                        </li>
-                        <li>
-                          כל הבדל נחשב, גם אם הקובץ במקור ישן יותר מזה שבגיבוי (למשל אחרי שחזור גרסה קודמת): הגיבוי מתעדכן להיות
-                          זהה למקור.
-                        </li>
-                        <li>
-                          אם גודל ושעת השינוי זהים בדיוק, הקובץ לא יועתק גם אם התוכן שונה. זה קורה רק כשתוכנה משחזרת במכוון את
-                          שעת השינוי המקורית.
-                        </li>
-                        <li>קבצים שנמחקו מהמקור נמחקים גם מהתיקייה.</li>
-                        <li>
-                          החיסרון: הגיבוי הקודם לא נשמר לצד החדש. בזמן הריצה אין עותק שלם נוסף, ואם הריצה נקטעת התיקייה
-                          נשארת באמצע העדכון (אפשר להמשיך אותה).
-                        </li>
-                      </ul>
-                    </div>
-                  )
-                }
-              />
-            )}
+            <RetentionEditor value={t} onChange={(v) => setT((x) => settleRetention({ ...x, ...v }))} />
+            <Toggle
+              checked={quickFull}
+              onChange={(v) => set("reusePrevious", v)}
+              disabled={!keepsOne}
+              label={
+                <span className="flex items-center gap-1.5">
+                  <RefreshCw size={14} /> גיבוי מלא מהיר
+                </span>
+              }
+              description={
+                !keepsOne
+                  ? "זמין רק כששומרים גיבוי מלא אחד. כששומרים יותר, כל גיבוי מלא מעתיק הכול מחדש."
+                  : "הגיבוי הקודם מתעדכן במקום להעתיק הכול מחדש. חוסך זמן ומקום."
+              }
+              help={
+                keepsOne && (
+                  <div className="flex flex-col gap-2">
+                    <p>
+                      הגיבוי המלא הקודם הופך לגיבוי החדש: התיקייה מקבלת את התאריך החדש, ומועתקים אליה רק קבצים חדשים או
+                      ששונו.
+                    </p>
+                    <ul className="list-disc ps-5 flex flex-col gap-1">
+                      <li>
+                        קובץ נחשב משונה אם הגודל שלו שונה, או אם שעת השינוי שלו שונה (בלי לפתוח את הקבצים ובלי להשוות תוכן).
+                      </li>
+                      <li>
+                        הבדיקה היא לפי תאריך ושעה, לא לפי יום: הפרש של יותר משתי שניות מספיק כדי להעתיק מחדש. ההפרש מוזנח עד שתי
+                        שניות בלבד (כך בדיסקים בפורמט FAT / exFAT לא מועתקים קבצים בלי סיבה).
+                      </li>
+                      <li>
+                        כל הבדל נחשב, גם אם הקובץ במקור ישן יותר מזה שבגיבוי (למשל אחרי שחזור גרסה קודמת): הגיבוי מתעדכן להיות
+                        זהה למקור.
+                      </li>
+                      <li>
+                        אם גודל ושעת השינוי זהים בדיוק, הקובץ לא יועתק גם אם התוכן שונה. זה קורה רק כשתוכנה משחזרת במכוון את
+                        שעת השינוי המקורית.
+                      </li>
+                      <li>קבצים שנמחקו מהמקור נמחקים גם מהתיקייה.</li>
+                      <li>
+                        החיסרון: הגיבוי הקודם לא נשמר לצד החדש. בזמן הריצה אין עותק שלם נוסף, ואם הריצה נקטעת התיקייה
+                        נשארת באמצע העדכון (אפשר להמשיך אותה).
+                      </li>
+                    </ul>
+                  </div>
+                )
+              }
+            />
             {t.keepMode !== "all" && (
               <Toggle
-                checked={t.deleteBefore}
+                checked={t.deleteBefore && !quickFull}
                 onChange={(v) => set("deleteBefore", v)}
+                disabled={quickFull}
                 label="מחיקת הגיבויים הקודמים לפני תחילת גיבוי מלא"
-                description="מפנה מקום בדיסק לפני ההעתקה, כשאין מספיק מקום לשני עותקים. כברירת מחדל הגיבויים הקודמים נמחקים רק אחרי שהגיבוי החדש הצליח."
+                description={
+                  quickFull
+                    ? "לא נדרש בגיבוי מלא מהיר: הגיבוי הקודם מתעדכן במקום, ולא נוצר עותק שני שצריך לפנות לו מקום."
+                    : "מפנה מקום בדיסק לפני ההעתקה, כשאין מספיק מקום לשני עותקים. כברירת מחדל הגיבויים הקודמים נמחקים רק אחרי שהגיבוי החדש הצליח."
+                }
               />
             )}
-            {t.deleteBefore && t.keepMode !== "all" && (
+            {t.deleteBefore && !quickFull && t.keepMode !== "all" && (
               <div className="flex items-start gap-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
                 <AlertTriangle size={16} className="mt-0.5 shrink-0" />
                 שימו לב: אם הגיבוי המלא ייכשל או ייעצר באמצע, לא יישאר גיבוי שלם קודם (אפשר להמשיך אותו מאותה נקודה).
