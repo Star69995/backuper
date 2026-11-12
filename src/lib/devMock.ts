@@ -29,7 +29,8 @@ import { newTask } from "../types";
 
 /** A mock task without the hidden / system rules a new task starts with, so the mock tasks show only the rules they list. */
 // Like a task saved before VSS existed: no rules, open files not backed up through VSS.
-const plainTask = (): Task => ({ ...newTask(), filters: [], vssOpenFiles: false });
+// ?vssTasks: the mock tasks back up open files (VSS), as in the "permanent admin permission" offer.
+const plainTask = (): Task => ({ ...newTask(), filters: [], vssOpenFiles: new URLSearchParams(location.search).has("vssTasks") });
 
 const mockCopyStart = Date.now() - 60_000;
 
