@@ -172,10 +172,6 @@ pub struct Core {
     /// Where a clicked notification sends the window, until the window went there (`Snapshot.navigate`:
     /// state, not an event, so it survives a window that is still coming up).
     navigate: Mutex<Option<Navigate>>,
-    /// The last notification shown, while the window hasn't been brought up since. A click on it
-    /// once it moved to the notification center doesn't reach our handler: Windows starts the app
-    /// again (a second instance, `reopened`), which is then taken as the click.
-    unseen_toast: Mutex<Option<ToastTarget>>,
     engine: Box<dyn CopyEngine>,
     app: AppHandle,
 }
@@ -194,7 +190,6 @@ impl Core {
             drive_prompts: Mutex::new(Vec::new()),
             delete_problems: Mutex::new(Vec::new()),
             navigate: Mutex::new(None),
-            unseen_toast: Mutex::new(None),
             engine: Box::new(Robocopy),
             app,
         })
@@ -225,11 +220,6 @@ impl Core {
 
     pub fn dismiss_navigate(&self) {
         *self.navigate.lock().unwrap() = None;
-    }
-
-    /// The main window was brought up: a notification still waiting counts as seen.
-    pub fn toast_seen(&self) {
-        *self.unseen_toast.lock().unwrap() = None;
     }
 
     /// A notification was clicked: points the window at what it was about.
@@ -1079,9 +1069,8 @@ pub enum ToastTarget {
 }
 
 /// A notification was clicked: brings the window up, at what the notification was about.
-fn activated(app: &AppHandle, target: &ToastTarget) {
+pub fn activated(app: &AppHandle, target: &ToastTarget) {
     if let Some(core) = app.try_state::<Arc<Core>>() {
-        core.toast_seen();
         core.follow(target);
     }
     if *target == ToastTarget::Update {
@@ -1092,11 +1081,10 @@ fn activated(app: &AppHandle, target: &ToastTarget) {
     crate::tray::show_main(app);
 }
 
-/// The app was started again while it runs (second instance): brings the window up, and takes it
-/// as the click on a notification still waiting in the notification center.
-pub fn reopened(app: &AppHandle) {
-    let waiting = app.try_state::<Arc<Core>>().and_then(|core| core.unseen_toast.lock().unwrap().take());
-    match waiting {
+/// The app was started again while it runs (second instance): by the user, or by a click on a
+/// notification (`args` holds its `backuper://` address, `protocol`).
+pub fn reopened(app: &AppHandle, args: &[String]) {
+    match crate::protocol::from_args(args) {
         Some(target) => activated(app, &target),
         None => crate::tray::show_main(app),
     }
@@ -1106,29 +1094,30 @@ pub fn reopened(app: &AppHandle) {
 /// opens the main window at `target`.
 pub fn toast(app: &AppHandle, title: impl Into<String>, body: impl Into<String>, sound: &str, target: ToastTarget) {
     let (title, body) = (title.into(), body.into());
-    if let Some(core) = app.try_state::<Arc<Core>>() {
-        *core.unseen_toast.lock().unwrap() = Some(target.clone());
-    }
     #[cfg(windows)]
     {
         use tauri_winrt_notification::{Sound, Toast};
         // Windows only shows notifications of an app id it knows: ours once installed (the
-        // installer's shortcut carries it), PowerShell's when run from a build folder.
-        let built = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).is_some_and(|dir| {
-            dir.parent().is_some_and(|t| t.ends_with("target")) && (dir.ends_with("debug") || dir.ends_with("release"))
-        });
-        let id = if built { Toast::POWERSHELL_APP_ID.to_string() } else { app.config().identifier.clone() };
-        let handle = app.clone();
-        let shown = Toast::new(&id)
-            .title(&title)
-            .text1(&body)
-            .sound(sound.parse::<Sound>().ok())
-            .on_activated(move |_| {
-                activated(&handle, &target);
-                Ok(())
-            })
-            .show();
-        if shown.is_ok() {
+        // installer's shortcut carries it), PowerShell's when run from a build folder. Ours open
+        // `backuper://` on a click, the only way a click in the notification center reaches us;
+        // under PowerShell's id that address may not be this copy, so a dev build keeps the
+        // in-process handler (pop-up clicks only).
+        let shown = if crate::protocol::from_build_folder() {
+            let handle = app.clone();
+            Toast::new(Toast::POWERSHELL_APP_ID)
+                .title(&title)
+                .text1(&body)
+                .sound(sound.parse::<Sound>().ok())
+                .on_activated(move |_| {
+                    activated(&handle, &target);
+                    Ok(())
+                })
+                .show()
+                .is_ok()
+        } else {
+            crate::protocol::show(&app.config().identifier, &title, &body, sound, &target).is_ok()
+        };
+        if shown {
             return;
         }
     }

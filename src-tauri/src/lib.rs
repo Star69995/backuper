@@ -12,6 +12,7 @@ mod filters;
 mod manifest;
 mod model;
 mod filtercheck;
+mod protocol;
 mod regexcheck;
 mod schedule;
 mod store;
@@ -92,9 +93,8 @@ pub fn elevated_delete_if_asked() {
 
 pub fn run() {
     tauri::Builder::default()
-        // Started again: by the user, or by a click on a notification that moved to the notification
-        // center (which doesn't reach the notification's own handler).
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| core::reopened(app)))
+        // Started again: by the user, or by a click on a notification (its `backuper://` address).
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| core::reopened(app, &args)))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![HIDDEN_ARG]),
@@ -111,6 +111,8 @@ pub fn run() {
             // Keep the Windows startup entry in line with the user's choice.
             let start_with_windows = core.store.lock().unwrap().settings.start_with_windows;
             let _ = commands::apply_autostart(&handle, start_with_windows);
+            // A click on a notification opens `backuper://`, which has to start this exe.
+            protocol::register();
 
             if let Some(w) = app.get_webview_window("main") {
                 mirror_title_bar(&w);
@@ -134,7 +136,12 @@ pub fn run() {
                 Some(hidden) => hidden,
                 None => std::env::args().any(|a| a == HIDDEN_ARG),
             };
-            if !hidden {
+            // Started by a click on a notification of an earlier run of the app.
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(target) = protocol::from_args(&args) {
+                SHOW_ON_LOAD.store(true, Ordering::SeqCst);
+                core::activated(&handle, &target);
+            } else if !hidden {
                 SHOW_ON_LOAD.store(true, Ordering::SeqCst);
                 tray::show_main(&handle);
             }

@@ -96,13 +96,6 @@ pub fn show_main(app: &AppHandle) {
         let _ = w.set_focus();
         let _ = w.set_always_on_top(false);
     }
-    if let Some(updates) = app.try_state::<Arc<crate::updater::Updates>>() {
-        updates.window_shown();
-    }
-    // Whatever notification was waiting has been seen now.
-    if let Some(core) = app.try_state::<Arc<crate::core::Core>>() {
-        core.toast_seen();
-    }
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {

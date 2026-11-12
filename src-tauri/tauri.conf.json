@@ -46,6 +46,9 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFRUQyQzU3QzAyQTJEMkIKUldRckxTckFWeXp0VHFSaG9ncVZLWmdmaGJIQUc1WXR3SVJQQ1AzODY0Nk5TRjF5cmRpcG1jRU8K",
       "endpoints": ["https://github.com/Star69995/backuper/releases/latest/download/latest.json"],
       "windows": { "installMode": "passive" }
+    },
+    "deep-link": {
+      "desktop": { "schemes": ["backuper"] }
     }
   }
 }
