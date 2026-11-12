@@ -154,6 +154,9 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
 /** Error kinds where skipping the path next time makes no sense (the problem is the drive, not the file). */
 const NOT_SKIPPABLE = new Set(["diskFull", "disconnected"]);
 
+/** How many log lines the detailed log draws at once (the filter searches all of them). */
+const LOG_LINES = 3000;
+
 const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 
 /** Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it). */
@@ -448,7 +451,7 @@ function SourceCard({
           </Button>
         )}
         {/* A failure with no file list (e.g. robocopy rejected the command): the debug text is the only detail. */}
-        {src.errors.length === 0 && src.status === "failed" && (
+        {src.errors.length === 0 && (src.status === "failed" || src.status === "warning") && (
           <CopyErrorsButton text={() => errorsText(run, src, index, task, globalRules)} />
         )}
         {src.logFile && (
@@ -458,6 +461,75 @@ function SourceCard({
         )}
       </div>
     </section>
+  );
+}
+
+/** A robocopy error line ("ERROR 32 (0x00000020) Copying File ...") - its reason is the line after it. */
+const ERROR_LINE = /\bERROR \d+ \(0x/;
+
+/** The detailed log: filter (debounced), "errors only", matches highlighted, at most LOG_LINES lines drawn. */
+function LogViewer({ text }: { text: string }) {
+  const [input, setInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(input.trim()), 250);
+    return () => clearTimeout(t);
+  }, [input]);
+
+  const lines = useMemo(() => text.split("\n"), [text]);
+  const lower = useMemo(() => lines.map((l) => l.toLowerCase()), [lines]);
+  const errorCount = useMemo(() => lines.filter((l) => ERROR_LINE.test(l)).length, [lines]);
+
+  const view = useMemo(() => {
+    const q = query.toLowerCase();
+    const keep: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (errorsOnly && !ERROR_LINE.test(lines[i]) && !(i > 0 && ERROR_LINE.test(lines[i - 1]))) continue;
+      if (q && !lower[i].includes(q)) continue;
+      keep.push(lines[i]);
+    }
+    const shown = keep.length > LOG_LINES ? keep.slice(-LOG_LINES) : keep;
+    return { shown, hidden: keep.length - shown.length, total: keep.length };
+  }, [lines, lower, query, errorsOnly]);
+
+  const body = useMemo(() => {
+    if (!query) return view.shown.join("\n");
+    const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+    return view.shown.join("\n").split(re).map((part, i) =>
+      i % 2 === 1 ? (
+        <mark key={i} className="rounded-sm bg-warn/40 text-inherit">
+          {part}
+        </mark>
+      ) : (
+        part
+      ),
+    );
+  }, [view, query]);
+
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[200px] flex-1">
+          <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
+          <TextInput value={input} onChange={(e) => setInput(e.target.value)} placeholder="סינון שורות ביומן..." className="ps-9" />
+        </div>
+        <Button size="sm" variant={errorsOnly ? "primary" : "secondary"} onClick={() => setErrorsOnly(!errorsOnly)}>
+          שורות שגיאה בלבד ({fmtNumber(errorCount)})
+        </Button>
+      </div>
+      <pre
+        dir="ltr"
+        className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed"
+      >
+        {view.total ? body : errorsOnly && !errorCount ? "(אין ביומן שורות שגיאה)" : "(אין שורות מתאימות)"}
+      </pre>
+      {view.hidden > 0 && (
+        <p className="text-xs text-muted">
+          מוצגות {fmtNumber(LOG_LINES)} השורות האחרונות מתוך {fmtNumber(view.total)} - {fmtNumber(view.hidden)} שורות קודמות מוסתרות, צמצמו עם הסינון.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -560,22 +632,12 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
     }
   };
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
-  const [logFilter, setLogFilter] = useState("");
 
   const showLog = (index: number) =>
     api
       .readLog(r.id, index)
       .then((text) => setLog({ index, text }))
       .catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את היומן", message: errorText(e) }));
-
-  const filtered = useMemo(() => {
-    if (log === null || !logFilter.trim()) return log?.text ?? null;
-    const q = logFilter.toLowerCase();
-    return log.text
-      .split("\n")
-      .filter((l) => l.toLowerCase().includes(q))
-      .join("\n");
-  }, [log, logFilter]);
 
   const stat = (label: string, value: ReactNode) => (
     <div className="rounded-lg bg-panel2 px-3 py-2">
@@ -666,21 +728,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
             <h3 className="text-[13px] font-semibold">
               יומן מפורט: <bdi>{r.sources[log.index]?.folderName}</bdi>
             </h3>
-            <div className="relative">
-              <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
-              <TextInput
-                value={logFilter}
-                onChange={(e) => setLogFilter(e.target.value)}
-                placeholder="סינון שורות ביומן..."
-                className="ps-9"
-              />
-            </div>
-            <pre
-              dir="ltr"
-              className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed"
-            >
-              {filtered || "(ריק)"}
-            </pre>
+            <LogViewer text={log.text} />
           </div>
         )}
       </div>

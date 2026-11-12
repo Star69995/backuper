@@ -530,7 +530,11 @@ impl CopyEngine for Robocopy {
         // plain read and write: they are not failures. Failures robocopy counted itself remain.
         let streamed = native::settle_errors(&job.source, &job.target, &mut stats, cancel, &mut |e| (on_event.borrow_mut())(e));
         // Everything robocopy called a failure is accounted for: its "some failed" bit (8) no longer applies.
-        let code = if streamed > 0 && stats.files_failed == 0 && code < 16 { code & !8 } else { code };
+        // Also when robocopy's own summary says nothing failed and every logged error was settled (the file
+        // was in the destination after a retry): bit 8 then has nothing behind it, and a warning with an
+        // empty error list would tell the user nothing.
+        let all_settled = summary.files().is_some() && stats.errors.is_empty();
+        let code = if (streamed > 0 || all_settled) && stats.files_failed == 0 && code < 16 { code & !8 } else { code };
 
         // robocopy exit codes are bit flags: 1 copied, 2 extras, 4 mismatch, 8 failures, 16 fatal.
         stats.debug.extend(console_errors.iter().map(|l| format!("robocopy console: {l}")));
