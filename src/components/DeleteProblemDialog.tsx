@@ -4,6 +4,7 @@ import { api, errorText } from "../api";
 import { fmtBytes } from "../lib/format";
 import { useDiskSpace, useFullSpace } from "../lib/useDiskSpace";
 import type { DeleteProblem, Snapshot } from "../types";
+import { AdminPermissionOffer } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import { Button, Modal, PathText, SkipIcon } from "./ui";
 
@@ -175,6 +176,11 @@ export default function DeleteProblemDialog({ snap, refresh }: { snap: Snapshot;
       }
     >
       <div className="flex flex-col gap-4">
+        {needsAdmin && (
+          <AdminPermissionOffer>
+            עם הרשאה קבועה, גיבוי שלא מצליח למחוק גיבוי ישן ימחק אותו בהרשאת מנהל מעצמו, בלי לחכות לכם - גם כשאף אחד לא ליד המחשב.
+          </AdminPermissionOffer>
+        )}
         {taskIds.map((id) => {
           const mine = problems.filter((p) => p.taskId === id);
           const known = mine.map((p) => sizes[p.path]);

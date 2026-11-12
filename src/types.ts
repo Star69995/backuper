@@ -283,7 +283,12 @@ export interface Snapshot {
   update: UpdateStatus;
   /** Per task id: how many of its folders a Cobian takeover renamed (their names can be put back). */
   cobianRenamed: Record<string, number>;
+  /** Whether admin work (open files through VSS, stuck deletes) runs without Windows's prompt (model.rs `AdminPermission`). */
+  adminPermission: AdminPermission;
 }
+
+/** unknown = not checked yet; outdated = given by an older version, approve again; notAdmin = a standard Windows account. */
+export type AdminPermission = "unknown" | "off" | "on" | "outdated" | "notAdmin";
 
 /** A backup folder that should have been deleted but wasn't (model.rs `DeleteProblem`). */
 export interface DeleteProblem {

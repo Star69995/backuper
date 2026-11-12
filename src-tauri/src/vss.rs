@@ -2,11 +2,12 @@
 //! read normally: the program opened them without sharing. A Volume Shadow Copy is a read-only
 //! snapshot of the whole drive that Windows keeps beside it, and files in it aren't locked.
 //!
-//! Making one needs admin rights, so the app starts itself again as admin (`acl::run_elevated`,
-//! Windows shows its permission prompt) with `--vss-copy`: that copy (`elevated_main`) makes the
+//! Making one needs admin rights, so the app starts itself again as admin with `--vss-copy`
+//! (`elevation::run_as_admin`: Windows shows its permission prompt, or with permanent permission
+//! a Task Scheduler task starts it without one): that copy (`elevated_main`) makes the
 //! snapshot, copies the given files out of it, deletes the snapshot and reports per file.
-//! The files to copy travel on the command line (nobody can swap them after the prompt); the
-//! copy refuses to write anywhere but into one of our dated backup folders.
+//! The files to copy travel on the command line (nobody can swap them after the prompt; through
+//! the task, in a request file in the user's temp folder); the copy refuses to write anywhere but into one of our dated backup folders.
 //!
 //! The snapshot is taken without the programs' cooperation (Outlook has no VSS writer), like
 //! the one a power cut would leave: a mail file is fine, a database that was in the middle of a
@@ -56,10 +57,6 @@ fn side(control: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn quoted(p: &Path) -> String {
-    format!(" \"{}\"", p.to_string_lossy().trim_end_matches('\\'))
-}
-
 /// Copies the files from a shadow copy of their drives, one result per pair (same order). Err =
 /// nothing was copied: the permission prompt was declined, nobody answered it in `wait` (unattended
 /// runs; None waits for as long as it takes), the run was cancelled, or the snapshot failed.
@@ -69,14 +66,17 @@ pub fn copy_open_files(pairs: &[Pair], wait: Option<Duration>, cancel: &AtomicBo
         return Ok(Vec::new());
     }
     let control = control_path();
-    let mut params = format!("{SWITCH}{}", quoted(&control));
+    let mut args = vec![SWITCH.to_string(), control.to_string_lossy().to_string()];
+    let mut len = acl::command_line(&args).len();
     let mut sent = 0;
     for p in pairs {
-        let next = format!("{}{}", quoted(&p.src), quoted(&p.dst));
-        if params.len() + next.len() > MAX_PARAMS {
+        let next = [p.src.to_string_lossy().to_string(), p.dst.to_string_lossy().to_string()];
+        let more = acl::command_line(&next).len() + 1;
+        if len + more > MAX_PARAMS {
             break;
         }
-        params.push_str(&next);
+        len += more;
+        args.extend(next);
         sent += 1;
     }
     if sent == 0 {
@@ -84,7 +84,7 @@ pub fn copy_open_files(pairs: &[Pair], wait: Option<Duration>, cancel: &AtomicBo
     }
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(acl::run_elevated(&params));
+        let _ = tx.send(crate::elevation::run_as_admin(&args));
     });
     let started = Instant::now();
     let (started_file, cancel_file) = (side(&control, "started"), side(&control, "cancel"));
@@ -154,7 +154,7 @@ fn parse_results(text: &str, expected: usize) -> Result<Vec<Copied>, String> {
 
 // ---- the admin copy ----
 
-fn powershell(script: &str) -> Result<String, String> {
+pub(crate) fn powershell(script: &str) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     let out = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])

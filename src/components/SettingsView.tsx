@@ -1,8 +1,9 @@
-import { Bell, Download, Filter, FolderSearch, Gauge, History, Import, Monitor, Moon, Power, RefreshCw, RotateCcw, Sun, Volume2 } from "lucide-react";
+import { Bell, Download, Filter, FolderSearch, Gauge, History, Import, Monitor, Moon, Power, RefreshCw, RotateCcw, ShieldCheck, Sun, Volume2 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtRelative, fmtSmart } from "../lib/format";
 import type { Settings, Snapshot, TaskSnapshot } from "../types";
+import { GrantButton, NOT_ADMIN_TEXT, useAdminPermission } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import FilterRulesEditor from "./FilterRulesEditor";
 import { useTaskListTransfer } from "./ImportTasksDialog";
@@ -10,6 +11,43 @@ import { PathPicker } from "./TaskEditor";
 import { autoInstallWhen } from "./UpdateDialog";
 import { useUnsaved } from "../lib/unsaved";
 import { Button, IconButton, Modal, PathText, Segmented, Select, Toggle } from "./ui";
+
+/** Permanent admin permission (elevation.rs): VSS and stuck deletes without Windows's prompt. */
+function AdminPermissionCard({ refresh }: { refresh: () => void }) {
+  const { status, busy, revoke } = useAdminPermission();
+  // Read from Windows again: it may have been removed in the Task Scheduler since the app started.
+  useEffect(() => {
+    api.checkAdminPermission().then(refresh, () => {});
+  }, [refresh]);
+  const text = {
+    unknown: "בודק...",
+    on: "פעילה. גיבוי קבצים פתוחים (VSS) ומחיקת גיבויים ישנים שנתקעו מתבצעים בהרשאת מנהל בלי לבקש אישור, גם בגיבוי מתוזמן כשאף אחד לא ליד המחשב וגם אחרי הפעלה מחדש.",
+    off: "כבויה. כשגיבוי צריך הרשאת מנהל (קבצים פתוחים בתוכנה אחרת כמו Outlook, או גיבוי ישן שלא נמחק) Windows מבקשת אישור בכל פעם. בגיבוי מתוזמן שאף אחד לא מאשר, הקבצים הפתוחים מדולגים אחרי 3 דקות.",
+    outdated: "ניתנה בגרסה קודמת של התוכנה וצריכה אישור מחדש. עד אז Windows מבקשת אישור בכל פעם.",
+    notAdmin: NOT_ADMIN_TEXT,
+  }[status];
+  return (
+    <Card title="הרשאת מנהל" icon={<ShieldCheck size={18} />}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-48 flex-1 flex-col gap-0.5">
+          <span className="text-sm font-medium">הרשאה קבועה לגיבויים</span>
+          <span className="text-xs text-muted">{text}</span>
+        </div>
+        {status === "on" ? (
+          <Button
+            className="shrink-0"
+            disabled={busy}
+            onClick={() => revoke().then(refresh)}
+          >
+            {busy ? "ממתין לאישור של Windows..." : "ביטול ההרשאה הקבועה"}
+          </Button>
+        ) : status === "off" || status === "outdated" ? (
+          <GrantButton size="md" onDone={refresh} />
+        ) : null}
+      </div>
+    </Card>
+  );
+}
 
 function Card({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
@@ -86,6 +124,8 @@ export default function SettingsView({ snap, refresh }: { snap: Snapshot; refres
           description="משימות לא ירוצו אוטומטית עד לחידוש. אפשר עדיין להריץ ידנית."
         />
       </Card>
+
+      <AdminPermissionCard refresh={refresh} />
 
       <Card title="ביצועים" icon={<Gauge size={18} />}>
         <Toggle
