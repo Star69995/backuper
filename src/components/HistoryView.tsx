@@ -418,6 +418,8 @@ function SourceCard({
   resumable: boolean;
 }) {
   const { toast } = useFeedback();
+  const openTarget = () =>
+    openBackupFolder(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }));
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-line p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -450,7 +452,14 @@ function SourceCard({
       {src.targetFolder && (
         <div className="flex min-w-0 items-center gap-2 text-xs">
           <span className="shrink-0 text-muted">תיקיית הגיבוי:</span>
-          <PathText path={src.targetFolder} className="min-w-0 truncate" />
+          <button
+            type="button"
+            title="פתיחה בסייר הקבצים"
+            onClick={openTarget}
+            className="min-w-0 truncate rounded text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            <PathText path={src.targetFolder} />
+          </button>
         </div>
       )}
       {src.errors.length > 0 && (
@@ -513,7 +522,7 @@ function SourceCard({
           <Button
             size="sm"
             icon={<FolderOpen size={14} />}
-            onClick={() => openBackupFolder(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }))}
+            onClick={openTarget}
           >
             פתיחת תיקיית הגיבוי
           </Button>
