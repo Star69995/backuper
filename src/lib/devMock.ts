@@ -533,7 +533,8 @@ export function installDevMock() {
       taskId: "1",
       taskName: "מסמכים ותמונות",
       mode: "incremental",
-      phase: "copying",
+      // ?vss: the copy is done and Windows is asking for admin permission for the open files.
+      phase: new URLSearchParams(location.search).has("vss") ? "vss" : "copying",
       startedAt: iso(-2),
       sourceIndex: 2,
       sourceCount: 3,
