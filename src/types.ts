@@ -297,6 +297,8 @@ export interface DeleteProblem {
   at: string;
   /** The running backup waits for the answer before it copies (a delete-before failed). */
   blocking: boolean;
+  /** A scheduled run waits only until then, and then goes on without the delete. */
+  waitUntil: string | null;
 }
 
 export interface Notice {

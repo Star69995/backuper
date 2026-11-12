@@ -22,6 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 
+/// How long a scheduled run waits for an answer about a backup folder its delete-before couldn't
+/// delete, before it goes on without the delete.
+pub const UNATTENDED_DELETE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// "03h15" (not "03;15" or "03_15", which show as "15;03" inside Hebrew text: only "-", "." and
 /// "," keep the two numbers together; a letter does too).
 const DATE_FMT: &str = "%Y-%m-%d %Hh%M";
@@ -771,8 +775,9 @@ pub struct RunContext<'a> {
     /// `blocking` = the run waits for the answer (`await_deletes`) before it copies.
     pub delete_failed: &'a (dyn Fn(&Path, &std::io::Error, bool) + Sync),
     /// Waits until the user has dealt with the blocking reports of this run (deleted, or skipped
-    /// the delete to go on), or the run is cancelled.
-    pub await_deletes: &'a (dyn Fn() + Sync),
+    /// the delete to go on), or the run is cancelled, or - given a limit - that long has passed.
+    /// Returns true when it gave up waiting.
+    pub await_deletes: &'a (dyn Fn(Option<std::time::Duration>) -> bool + Sync),
 }
 
 /// What a background scan compares the source with, to find how much a full copy will do.
@@ -1026,8 +1031,15 @@ pub fn backup_source(
                     notes.push("הגיבויים הקודמים נמחקו לפני תחילת הגיבוי (לפי הגדרות המשימה)".into());
                 }
                 // The point of deleting first is room for this copy: let the user deal with what
-                // wouldn't go (delete as admin, close a program, or skip it) before copying.
-                (ctx.await_deletes)();
+                // wouldn't go (delete as admin, close a program, or skip it) before copying. A scheduled
+                // run may have nobody to answer: it goes on without the delete after a while, rather
+                // than hold every other backup in the queue until someone comes by.
+                if (ctx.await_deletes)(ctx.scheduled.then_some(UNATTENDED_DELETE_WAIT)) {
+                    notes.push(format!(
+                        "גיבוי ישן לא נמחק ואף אחד לא החליט מה לעשות בו תוך {} דקות, ולכן הגיבוי המשיך בלי המחיקה",
+                        UNATTENDED_DELETE_WAIT.as_secs() / 60
+                    ));
+                }
             }
             if !reused {
                 if let Err(e) = fs::create_dir_all(&work) {
@@ -1472,7 +1484,7 @@ mod tests {
                 skip_scan: &self.skip_scan,
                 exact_progress: false,
                 delete_failed: &|_, _, _| {},
-                await_deletes: &|| {},
+                await_deletes: &|_| false,
             };
             let logs = self.root.clone();
             run_task(
