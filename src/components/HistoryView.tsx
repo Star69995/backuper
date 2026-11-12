@@ -1,5 +1,5 @@
 import { ArrowUp, Check, CircleAlert, Copy, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
 import { cacheFolderIn } from "../lib/cacheFolders";
@@ -153,6 +153,9 @@ export default function HistoryView({ snap }: { snap: Snapshot }) {
 
 /** Error kinds where skipping the path next time makes no sense (the problem is the drive, not the file). */
 const NOT_SKIPPABLE = new Set(["diskFull", "disconnected"]);
+
+/** How many log lines the detailed log draws at once (the filter searches all of them). */
+const LOG_LINES = 3000;
 
 const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 
@@ -448,7 +451,7 @@ function SourceCard({
           </Button>
         )}
         {/* A failure with no file list (e.g. robocopy rejected the command): the debug text is the only detail. */}
-        {src.errors.length === 0 && src.status === "failed" && (
+        {src.errors.length === 0 && (src.status === "failed" || src.status === "warning") && (
           <CopyErrorsButton text={() => errorsText(run, src, index, task, globalRules)} />
         )}
         {src.logFile && (
@@ -568,14 +571,20 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
       .then((text) => setLog({ index, text }))
       .catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את היומן", message: errorText(e) }));
 
+  // Millions of characters in one <pre> freeze the window, so only the last LOG_LINES lines of the (filtered) log
+  // are drawn; the filter still searches all of it.
+  const logLines = useMemo(() => (log === null ? null : log.text.split("\n")), [log]);
+  const deferredFilter = useDeferredValue(logFilter);
   const filtered = useMemo(() => {
-    if (log === null || !logFilter.trim()) return log?.text ?? null;
-    const q = logFilter.toLowerCase();
-    return log.text
-      .split("\n")
-      .filter((l) => l.toLowerCase().includes(q))
-      .join("\n");
-  }, [log, logFilter]);
+    if (logLines === null) return null;
+    const q = deferredFilter.trim().toLowerCase();
+    const lines = q ? logLines.filter((l) => l.toLowerCase().includes(q)) : logLines;
+    const shown = lines.length > LOG_LINES ? lines.slice(-LOG_LINES) : lines;
+    return {
+      text: shown.join("\n"),
+      hidden: lines.length - shown.length,
+    };
+  }, [logLines, deferredFilter]);
 
   const stat = (label: string, value: ReactNode) => (
     <div className="rounded-lg bg-panel2 px-3 py-2">
@@ -679,8 +688,13 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
               dir="ltr"
               className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed"
             >
-              {filtered || "(ריק)"}
+              {filtered?.text || "(ריק)"}
             </pre>
+            {filtered !== null && filtered.hidden > 0 && (
+              <p className="text-xs text-muted">
+                מוצגות {fmtNumber(LOG_LINES)} השורות האחרונות, {fmtNumber(filtered.hidden)} שורות קודמות מוסתרות - לחיפוש בכולן כתבו בתיבת הסינון.
+              </p>
+            )}
           </div>
         )}
       </div>

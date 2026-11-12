@@ -308,14 +308,29 @@ pub async fn read_log(core: CoreState<'_>, run_id: String, source_index: usize) 
             .and_then(|r| r.sources.get(source_index)?.log_file.clone())
     }
     .ok_or("אין יומן מפורט לריצה זו")?;
-    let bytes = std::fs::read(&path).map_err(|_| "קובץ היומן לא נמצא".to_string())?;
-    const MAX: usize = 8 * 1024 * 1024;
-    let start = bytes.len().saturating_sub(MAX) & !1;
-    let units: Vec<u16> = bytes[start..]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    Ok(String::from_utf16_lossy(&units).trim_start_matches('\u{feff}').to_string())
+    // Off the async executor, and only the tail is read: a big log used to be read whole before being cut.
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        const MAX: u64 = 8 * 1024 * 1024;
+        let not_found = || "קובץ היומן לא נמצא".to_string();
+        let mut file = std::fs::File::open(&path).map_err(|_| not_found())?;
+        let len = file.metadata().map_err(|_| not_found())?.len();
+        let start = len.saturating_sub(MAX) & !1;
+        file.seek(SeekFrom::Start(start)).map_err(|_| not_found())?;
+        let mut bytes = Vec::with_capacity((len - start) as usize);
+        file.read_to_end(&mut bytes).map_err(|_| not_found())?;
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        let text = text.trim_start_matches('\u{feff}');
+        // A cut tail starts mid-line: drop that partial line.
+        let text = if start > 0 { text.split_once('\n').map_or(text, |(_, rest)| rest) } else { text };
+        Ok(text.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn find_task(core: &Core, id: &str) -> Result<Task, String> {
