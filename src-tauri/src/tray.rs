@@ -103,7 +103,7 @@ pub fn show_main(app: &AppHandle) {
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "פתיחת Backuper", true, None::<&str>)?;
-    let pause = CheckMenuItem::with_id(app, "pause", "השהיית התזמון", true, false, None::<&str>)?;
+    let pause = CheckMenuItem::with_id(app, "pause", "השהיית הגיבוי האוטומטי", true, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "יציאה", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &pause, &PredefinedMenuItem::separator(app)?, &quit])?;
     app.manage(TrayItems {
@@ -176,7 +176,7 @@ pub fn refresh(app: &AppHandle) {
     let running = core.current.lock().unwrap().as_ref().map(|p| p.task_name.clone());
     let mut tip = match (running, paused) {
         (Some(name), _) => format!("Backuper - מגבה: {name}"),
-        (None, true) => "Backuper - התזמון מושהה".to_string(),
+        (None, true) => "Backuper - הגיבוי האוטומטי מושהה".to_string(),
         (None, false) => "Backuper - פעיל".to_string(),
     };
     match failed {

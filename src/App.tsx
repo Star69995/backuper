@@ -1,4 +1,4 @@
-import { CircleHelp, Download, HardDriveDownload, History, ListChecks, Pause, Settings as SettingsIcon } from "lucide-react";
+import { CalendarClock, CircleHelp, Download, HardDriveDownload, History, ListChecks, Settings as SettingsIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api } from "./api";
 import DeleteProblemDialog from "./components/DeleteProblemDialog";
@@ -93,16 +93,16 @@ export default function App() {
           <button
             type="button"
             onClick={togglePause}
-            title={paused ? "חידוש התזמון" : "השהיית התזמון"}
+            title={paused ? "חידוש הגיבוי האוטומטי" : "השהיית הגיבוי האוטומטי"}
             className={cx(
               "flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-start text-[13px] transition-colors",
               paused ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-muted hover:bg-hover",
             )}
           >
-            {paused ? <RunIcon size={16} /> : <Pause size={16} />}
+            {paused ? <RunIcon size={16} /> : <CalendarClock size={16} />}
             <span className="hidden flex-col leading-tight md:flex">
-              <span className="font-medium text-fg">{paused ? "התזמון מושהה" : "התזמון פעיל"}</span>
-              <span className="text-xs">{paused ? "לחצו לחידוש" : "לחצו להשהיה"}</span>
+              <span className="font-medium text-fg">{paused ? "הגיבוי האוטומטי מושהה" : "הגיבוי האוטומטי פועל"}</span>
+              <span className="text-xs">{paused ? "לחצו כדי לחדש אותו" : "לחצו כדי להשהות אותו"}</span>
             </span>
           </button>
         </div>
