@@ -695,6 +695,21 @@ impl Core {
                         }
                         EngineEvent::Phase(p) => {
                             progress.phase = p.into();
+                            if p == "vss" {
+                                // Windows is about to ask for admin permission, possibly while the window is hidden
+                                // in the tray: say so now, not when the run is over. A scheduled run (nobody may be
+                                // there) only toasts; the window stays hidden.
+                                let sound = self.store.lock().unwrap().settings.sound_failure.clone();
+                                toast(
+                                    &self.app,
+                                    format!("נדרש אישור מנהל: {}", task.name),
+                                    "קבצים פתוחים בתוכנה אחרת (כמו Outlook) מגובים דרך VSS. אשרו את בקשת ההרשאה של Windows, אחרת הם ידולגו".to_string(),
+                                    &sound,
+                                );
+                                if !matches!(job.trigger, Trigger::Scheduled | Trigger::CatchUp) {
+                                    crate::tray::show_main(&self.app);
+                                }
+                            }
                             if p == "copying" {
                                 progress.copy_started_at.get_or_insert_with(Local::now);
                             }
