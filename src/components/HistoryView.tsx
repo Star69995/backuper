@@ -1,5 +1,5 @@
 import { ArrowUp, Check, CircleAlert, Copy, EyeOff, FileText, Folder, FolderOpen, History, Info, RotateCcw, Search, Trash2 } from "lucide-react";
-import { type ReactNode, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorText } from "../api";
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, STATUS_LABEL, TRIGGER_LABEL } from "../lib/format";
 import { cacheFolderIn } from "../lib/cacheFolders";
@@ -464,6 +464,75 @@ function SourceCard({
   );
 }
 
+/** A robocopy error line ("ERROR 32 (0x00000020) Copying File ...") - its reason is the line after it. */
+const ERROR_LINE = /\bERROR \d+ \(0x/;
+
+/** The detailed log: filter (debounced), "errors only", matches highlighted, at most LOG_LINES lines drawn. */
+function LogViewer({ text }: { text: string }) {
+  const [input, setInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(input.trim()), 250);
+    return () => clearTimeout(t);
+  }, [input]);
+
+  const lines = useMemo(() => text.split("\n"), [text]);
+  const lower = useMemo(() => lines.map((l) => l.toLowerCase()), [lines]);
+  const errorCount = useMemo(() => lines.filter((l) => ERROR_LINE.test(l)).length, [lines]);
+
+  const view = useMemo(() => {
+    const q = query.toLowerCase();
+    const keep: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (errorsOnly && !ERROR_LINE.test(lines[i]) && !(i > 0 && ERROR_LINE.test(lines[i - 1]))) continue;
+      if (q && !lower[i].includes(q)) continue;
+      keep.push(lines[i]);
+    }
+    const shown = keep.length > LOG_LINES ? keep.slice(-LOG_LINES) : keep;
+    return { shown, hidden: keep.length - shown.length, total: keep.length };
+  }, [lines, lower, query, errorsOnly]);
+
+  const body = useMemo(() => {
+    if (!query) return view.shown.join("\n");
+    const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+    return view.shown.join("\n").split(re).map((part, i) =>
+      i % 2 === 1 ? (
+        <mark key={i} className="rounded-sm bg-warn/40 text-inherit">
+          {part}
+        </mark>
+      ) : (
+        part
+      ),
+    );
+  }, [view, query]);
+
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[200px] flex-1">
+          <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
+          <TextInput value={input} onChange={(e) => setInput(e.target.value)} placeholder="סינון שורות ביומן..." className="ps-9" />
+        </div>
+        <Button size="sm" variant={errorsOnly ? "primary" : "secondary"} onClick={() => setErrorsOnly(!errorsOnly)}>
+          שורות שגיאה בלבד ({fmtNumber(errorCount)})
+        </Button>
+      </div>
+      <pre
+        dir="ltr"
+        className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed"
+      >
+        {view.total ? body : errorsOnly && !errorCount ? "(אין ביומן שורות שגיאה)" : "(אין שורות מתאימות)"}
+      </pre>
+      {view.hidden > 0 && (
+        <p className="text-xs text-muted">
+          מוצגות {fmtNumber(LOG_LINES)} השורות האחרונות מתוך {fmtNumber(view.total)} - {fmtNumber(view.hidden)} שורות קודמות מוסתרות, צמצמו עם הסינון.
+        </p>
+      )}
+    </>
+  );
+}
+
 /** Details of one run (per source: result, errors, full log). Also opened from the tasks table. */
 /**
  * A run recorded by an older version names its folder with hyphens in the time ("03-00"); such
@@ -563,28 +632,12 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
     }
   };
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
-  const [logFilter, setLogFilter] = useState("");
 
   const showLog = (index: number) =>
     api
       .readLog(r.id, index)
       .then((text) => setLog({ index, text }))
       .catch((e) => toast({ tone: "bad", title: "לא ניתן לפתוח את היומן", message: errorText(e) }));
-
-  // Millions of characters in one <pre> freeze the window, so only the last LOG_LINES lines of the (filtered) log
-  // are drawn; the filter still searches all of it.
-  const logLines = useMemo(() => (log === null ? null : log.text.split("\n")), [log]);
-  const deferredFilter = useDeferredValue(logFilter);
-  const filtered = useMemo(() => {
-    if (logLines === null) return null;
-    const q = deferredFilter.trim().toLowerCase();
-    const lines = q ? logLines.filter((l) => l.toLowerCase().includes(q)) : logLines;
-    const shown = lines.length > LOG_LINES ? lines.slice(-LOG_LINES) : lines;
-    return {
-      text: shown.join("\n"),
-      hidden: lines.length - shown.length,
-    };
-  }, [logLines, deferredFilter]);
 
   const stat = (label: string, value: ReactNode) => (
     <div className="rounded-lg bg-panel2 px-3 py-2">
@@ -675,26 +728,7 @@ export function RunDetails({ run: r, onClose }: { run: RunRecord; onClose: () =>
             <h3 className="text-[13px] font-semibold">
               יומן מפורט: <bdi>{r.sources[log.index]?.folderName}</bdi>
             </h3>
-            <div className="relative">
-              <Search size={16} className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted" />
-              <TextInput
-                value={logFilter}
-                onChange={(e) => setLogFilter(e.target.value)}
-                placeholder="סינון שורות ביומן..."
-                className="ps-9"
-              />
-            </div>
-            <pre
-              dir="ltr"
-              className="selectable max-h-[50vh] overflow-auto rounded-lg border border-line bg-panel2 p-3 text-left font-mono text-xs leading-relaxed"
-            >
-              {filtered?.text || "(ריק)"}
-            </pre>
-            {filtered !== null && filtered.hidden > 0 && (
-              <p className="text-xs text-muted">
-                מוצגות {fmtNumber(LOG_LINES)} השורות האחרונות, {fmtNumber(filtered.hidden)} שורות קודמות מוסתרות - לחיפוש בכולן כתבו בתיבת הסינון.
-              </p>
-            )}
+            <LogViewer text={log.text} />
           </div>
         )}
       </div>
