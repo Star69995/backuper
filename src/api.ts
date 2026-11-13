@@ -42,7 +42,8 @@ export const api = {
   /** Copies a run source's files that were open in another program from a shadow copy into its backup folder (Windows asks for admin permission). Resolves to the updated run. */
   backupOpenFiles: (runId: string, sourceIndex: number) => invoke<RunRecord>("backup_open_files", { runId, sourceIndex }),
   dismissDeleteProblems: (paths: string[]) => invoke<void>("dismiss_delete_problems", { paths }),
-  answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
+  answerDrivePrompts: (ids: string[], run: string[], remember = false) =>
+    invoke<void>("answer_drive_prompts", { ids, run, remember }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
   /** Makes the task's next automatic run a full backup (once), or takes that back. */

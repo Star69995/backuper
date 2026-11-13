@@ -279,8 +279,21 @@ impl Core {
     }
 
     /// The user's answer to the drive prompt: `run` gets queued, all of `ids` stop waiting.
-    pub fn answer_drive_prompts(&self, ids: &[String], run: &[String]) {
+    /// `remember`: don't ask about these tasks again - the ones in `run` back up on their own the
+    /// next time their drives connect, the others do nothing.
+    pub fn answer_drive_prompts(&self, ids: &[String], run: &[String], remember: bool) {
         self.drive_prompts.lock().unwrap().retain(|id| !ids.contains(id));
+        if remember {
+            let mut s = self.store.lock().unwrap();
+            let mut changed = false;
+            for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id) && t.on_drive_connect == DriveAction::Ask) {
+                t.on_drive_connect = if run.contains(&t.id) { DriveAction::Run } else { DriveAction::Off };
+                changed = true;
+            }
+            if changed {
+                s.save_tasks();
+            }
+        }
         for id in run {
             self.enqueue(Job {
                 task_id: id.clone(),

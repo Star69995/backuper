@@ -264,8 +264,8 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
 
 /// Answers the "drive connected" question: queues `run`, drops the rest of `ids`.
 #[tauri::command]
-pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>) {
-    core.answer_drive_prompts(&ids, &run);
+pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>, remember: bool) {
+    core.answer_drive_prompts(&ids, &run, remember);
 }
 
 #[tauri::command]
