@@ -123,3 +123,27 @@ export function AdminPermissionOffer({ children, className }: { children: ReactN
     </div>
   );
 }
+
+/**
+ * The side menu's standing offer: whenever the permission is off (or needs renewing), even with no
+ * sign yet that a backup will need it - so a backup never waits for a "yes" nobody gives.
+ */
+export function AdminPermissionSideOffer({ onDone }: { onDone?: () => void }) {
+  const { status, busy, grant } = useAdminPermission();
+  if (status !== "off" && status !== "outdated") return null;
+  return (
+    <button
+      type="button"
+      onClick={() => grant().then(() => onDone?.())}
+      disabled={busy}
+      title="מתן הרשאת מנהל קבועה - כדי שגיבויים לא ייתקעו בהמתנה לאישור של Windows"
+      className="flex w-full items-center gap-2 rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-2 text-start text-[13px] text-warn transition-colors hover:bg-hover disabled:opacity-60"
+    >
+      <ShieldAlert size={16} className="shrink-0" />
+      <span className="hidden flex-col leading-tight md:flex">
+        <span className="font-medium text-fg">{status === "outdated" ? "חידוש הרשאת מנהל" : "הרשאת מנהל קבועה"}</span>
+        <span className="text-xs">{busy ? "ממתין לאישור של Windows..." : "כדי שגיבויים לא ייתקעו - לחצו להוספה"}</span>
+      </span>
+    </button>
+  );
+}
