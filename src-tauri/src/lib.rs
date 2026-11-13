@@ -6,6 +6,7 @@ mod simpleconfig;
 mod commands;
 mod core;
 mod drives;
+mod elevation;
 mod engine;
 mod filterlist;
 mod filters;
@@ -80,13 +81,18 @@ fn mirror_title_bar(window: &tauri::WebviewWindow) {
 }
 
 /// The app started again as admin (`acl::delete_elevated`: delete backup folders, `vss::copy_open_files`:
-/// copy open files from a shadow copy): does that and exits, before anything else (single instance,
-/// window) starts.
+/// copy open files from a shadow copy; `elevation`: the permanent permission's task, setting it up
+/// or removing it, also from the uninstaller): does that and exits, before anything else (single
+/// instance, window) starts.
 pub fn elevated_delete_if_asked() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some(acl::DELETE_SWITCH) => std::process::exit(acl::elevated_main(&args[1..])),
         Some(vss::SWITCH) => std::process::exit(vss::elevated_main(&args[1..])),
+        Some(elevation::TASK_SWITCH) => std::process::exit(elevation::task_main(&args[1..])),
+        Some(elevation::INSTALL_SWITCH) => std::process::exit(elevation::install_main(&args[1..])),
+        Some(elevation::REMOVE_SWITCH) => std::process::exit(elevation::remove_main(&args[1..])),
+        Some(elevation::UNINSTALL_SWITCH) => std::process::exit(elevation::uninstall_main()),
         _ => {}
     }
 }
@@ -168,6 +174,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
+            commands::grant_admin_permission,
+            commands::revoke_admin_permission,
+            commands::check_admin_permission,
             commands::save_tasks,
             commands::delete_tasks,
             commands::reorder_tasks,

@@ -33,6 +33,8 @@ pub struct Snapshot {
     update: crate::model::UpdateStatus,
     /// Per task: how many of its folders a Cobian takeover renamed (recorded, can be put back).
     cobian_renamed: HashMap<String, usize>,
+    /// Whether admin work (VSS, stuck deletes) runs without Windows's prompt (`elevation`).
+    admin_permission: crate::model::AdminPermission,
 }
 
 #[tauri::command]
@@ -53,6 +55,7 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
             *m.entry(r.task_id.clone()).or_insert(0) += 1;
             m
         }),
+        admin_permission: crate::elevation::cached(),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -60,6 +63,37 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
             app.autolaunch().is_enabled().unwrap_or(false)
         },
     }
+}
+
+/// Gives the app permanent admin permission (Windows asks once). Blocks while the prompt is open.
+#[tauri::command]
+pub async fn grant_admin_permission(core: CoreState<'_>) -> Result<(), String> {
+    let core = core.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(crate::elevation::grant).await.map_err(|e| e.to_string())?;
+    core.changed();
+    result
+}
+
+/// Takes the permanent admin permission back (Windows asks).
+#[tauri::command]
+pub async fn revoke_admin_permission(core: CoreState<'_>) -> Result<(), String> {
+    let core = core.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(crate::elevation::revoke).await.map_err(|e| e.to_string())?;
+    core.changed();
+    result
+}
+
+/// Reads the permission's state from Windows again (the settings page, on focus: it may have been
+/// removed in the Task Scheduler).
+#[tauri::command]
+pub async fn check_admin_permission(core: CoreState<'_>) -> Result<crate::model::AdminPermission, String> {
+    let core = core.inner().clone();
+    let before = crate::elevation::cached();
+    let now = tauri::async_runtime::spawn_blocking(crate::elevation::refresh).await.map_err(|e| e.to_string())?;
+    if now != before {
+        core.changed();
+    }
+    Ok(now)
 }
 
 fn prepare(mut t: Task) -> Result<Task, String> {

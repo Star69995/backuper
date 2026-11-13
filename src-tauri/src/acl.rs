@@ -86,6 +86,7 @@ extern "system" {
     ) -> u32;
     fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut u32) -> i32;
     fn AdjustTokenPrivileges(token: isize, disable_all: i32, new: *const TokenPrivileges, len: u32, prev: *mut c_void, ret: *mut u32) -> i32;
+    fn ConvertSidToStringSidW(sid: *const c_void, out: *mut *mut u16) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -94,6 +95,7 @@ extern "system" {
     fn CloseHandle(h: isize) -> i32;
     fn WaitForSingleObject(h: isize, ms: u32) -> u32;
     fn GetExitCodeProcess(h: isize, code: *mut u32) -> i32;
+    fn LocalFree(mem: *mut c_void) -> *mut c_void;
 }
 
 #[link(name = "shell32")]
@@ -129,6 +131,13 @@ impl Token {
         Some(out)
     }
 
+    /// A `u32` piece of token information (TokenElevationType, TokenElevation).
+    fn info_u32(&self, class: i32) -> Option<u32> {
+        let mut v = 0u32;
+        let mut len = 0;
+        (unsafe { GetTokenInformation(self.0, class, (&mut v as *mut u32).cast(), 4, &mut len) } != 0).then_some(v)
+    }
+
     fn enable(&self, privilege: &str) -> bool {
         let name = wide(std::ffi::OsStr::new(privilege));
         let mut luid = [0u32; 2];
@@ -143,6 +152,41 @@ impl Token {
 impl Drop for Token {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.0) };
+    }
+}
+
+const TOKEN_ELEVATION_TYPE: i32 = 18;
+const TOKEN_ELEVATION: i32 = 20;
+
+/// The account the app runs as, as "S-1-5-21-...".
+pub fn user_sid_string() -> Option<String> {
+    let sid = Token::open(TOKEN_QUERY)?.user_sid()?;
+    let mut out: *mut u16 = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid.as_ptr().cast(), &mut out) } == 0 || out.is_null() {
+        return None;
+    }
+    let s = unsafe {
+        let len = (0..).take_while(|&i| *out.add(i) != 0).count();
+        String::from_utf16_lossy(std::slice::from_raw_parts(out, len))
+    };
+    unsafe { LocalFree(out.cast()) };
+    Some(s)
+}
+
+/// Whether the app runs with admin rights right now (an elevated token).
+pub fn is_elevated() -> bool {
+    Token::open(TOKEN_QUERY).and_then(|t| t.info_u32(TOKEN_ELEVATION)).is_some_and(|v| v != 0)
+}
+
+/// Whether the account can become admin by itself, with a yes in Windows's prompt (an admin
+/// account), rather than needing someone else's password (a standard account).
+pub fn is_admin_account() -> bool {
+    let Some(t) = Token::open(TOKEN_QUERY) else { return false };
+    match t.info_u32(TOKEN_ELEVATION_TYPE) {
+        // TokenElevationTypeFull / Limited: an admin account (elevated now, or able to).
+        Some(2 | 3) => true,
+        // Default: no split token - UAC is off, or a standard account. Only the first is elevated.
+        _ => t.info_u32(TOKEN_ELEVATION).is_some_and(|v| v != 0),
     }
 }
 
@@ -212,14 +256,20 @@ pub fn is_backup_folder_name(name: &str) -> bool {
     re.is_match(name)
 }
 
-/// Starts the app again as admin with `params` as its command line (Windows shows its permission
-/// prompt) and returns once that copy has finished, with its exit code. Err = the prompt was
-/// declined or the copy couldn't start. Blocks while the prompt is open.
-pub fn run_elevated(params: &str) -> Result<u32, String> {
+/// A command line from `args`. Ours never end in a backslash or hold quotes, so plain quoting is enough.
+pub fn command_line(args: &[String]) -> String {
+    args.iter().map(|a| format!("\"{}\"", a.trim_end_matches('\\'))).collect::<Vec<_>>().join(" ")
+}
+
+/// Starts the app again as admin with `args` (Windows shows its permission prompt) and returns once
+/// that copy has finished, with its exit code. Err = the prompt was declined or the copy couldn't
+/// start. Blocks while the prompt is open. Use `elevation::run_as_admin`, which skips the prompt
+/// when the user gave the app permanent permission.
+pub fn run_elevated(args: &[String]) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let verb = wide(std::ffi::OsStr::new("runas"));
     let file = wide(exe.as_os_str());
-    let params = wide(std::ffi::OsStr::new(params));
+    let params = wide(std::ffi::OsStr::new(&command_line(args)));
     let mut info = ShellExecuteInfoW {
         cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
         f_mask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
@@ -256,14 +306,12 @@ pub fn run_elevated(params: &str) -> Result<u32, String> {
     Ok(code)
 }
 
-/// Starts the app again as admin to delete `paths`. Returns once that copy has finished.
+/// Deletes `paths` as admin (Windows asks first, unless the user gave permanent permission).
+/// Returns once that copy has finished.
 pub fn delete_elevated(paths: &[String]) -> Result<(), String> {
-    // Our paths never end in a backslash or hold quotes, so plain quoting is enough.
-    let mut params = DELETE_SWITCH.to_string();
-    for p in paths {
-        params.push_str(&format!(" \"{}\"", p.trim_end_matches('\\')));
-    }
-    run_elevated(&params).map(|_| ()).map_err(|e| {
+    let mut args = vec![DELETE_SWITCH.to_string()];
+    args.extend(paths.iter().cloned());
+    crate::elevation::run_as_admin(&args).map(|_| ()).map_err(|e| {
         if e.contains("בוטל") {
             "האישור של Windows בוטל - התיקיות לא נמחקו".into()
         } else {

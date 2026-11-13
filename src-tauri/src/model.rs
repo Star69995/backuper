@@ -553,6 +553,23 @@ impl Default for Settings {
     }
 }
 
+/// Whether backups can do what needs admin rights (open files through VSS, stuck deletes) without
+/// Windows's permission prompt: the user approved it once (`elevation`). Not persisted - read from
+/// Windows (the Task Scheduler task and the helper copy in Program Files).
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AdminPermission {
+    /// Not checked yet (the first second after start).
+    #[default]
+    Unknown,
+    Off,
+    On,
+    /// Given by an older version whose helper doesn't match this one: approve again.
+    Outdated,
+    /// A standard Windows account: only someone with an admin password can approve, every time.
+    NotAdmin,
+}
+
 /// Where the app's self-update stands (not persisted).
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]

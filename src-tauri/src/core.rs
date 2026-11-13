@@ -206,6 +206,12 @@ impl Core {
         // Sources renamed while their drive wasn't connected, if it is now.
         let me = self.clone();
         std::thread::spawn(move || me.rename_backups_when_idle(None));
+        // Whether admin work needs Windows's prompt (`elevation`): asks Windows, takes a moment.
+        let me = self.clone();
+        std::thread::spawn(move || {
+            crate::elevation::refresh();
+            me.changed();
+        });
     }
 
     /// Tells the UI to refetch its snapshot.
@@ -304,6 +310,13 @@ impl Core {
 
     /// `blocking`: the running backup waits for the user's answer (`await_delete_problems`).
     fn report_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error, blocking: bool) {
+        // With permanent admin permission, try as admin first, unasked (nobody may be at the computer).
+        if crate::elevation::cached() == crate::model::AdminPermission::On {
+            let p = path.to_string_lossy().to_string();
+            if crate::acl::delete_elevated(std::slice::from_ref(&p)).is_ok() && !path.exists() {
+                return;
+            }
+        }
         let problem = DeleteProblem {
             blocking,
             task_id: task.id.clone(),
@@ -732,7 +745,7 @@ impl Core {
                         }
                         EngineEvent::Phase(p) => {
                             progress.phase = p.into();
-                            if p == "vss" {
+                            if p == "vss" && crate::elevation::cached() != crate::model::AdminPermission::On {
                                 // Windows is about to ask for admin permission, possibly while the window is hidden
                                 // in the tray: say so now, not when the run is over. A scheduled run (nobody may be
                                 // there) only toasts; the window stays hidden.

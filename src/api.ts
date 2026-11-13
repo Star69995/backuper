@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
+  AdminPermission,
   AdoptPlan,
   AdoptResult,
   BackupMode,
@@ -107,6 +108,11 @@ export const api = {
   dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
   /** The window went where a clicked notification pointed. */
   dismissNavigate: () => invoke<void>("dismiss_navigate"),
+  /** Permanent admin permission (Windows asks once); rejects with the reason. */
+  grantAdminPermission: () => invoke<void>("grant_admin_permission"),
+  revokeAdminPermission: () => invoke<void>("revoke_admin_permission"),
+  /** Reads the permission's state from Windows again. */
+  checkAdminPermission: () => invoke<AdminPermission>("check_admin_permission"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;

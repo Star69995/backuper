@@ -801,6 +801,12 @@ Section Uninstall
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
+  ; Backuper: remove the permanent admin permission (a Task Scheduler task and a copy of the app in
+  ; Program Files, elevation.rs) if this account gave one - Windows asks, since it needs admin. Not on updates.
+  ${If} $UpdateMode <> 1
+    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --admin-uninstall'
+  ${EndIf}
+
   ; Delete the app directory and its content from disk
   ; Copy main executable
   Delete "$INSTDIR\${MAINBINARYNAME}.exe"
