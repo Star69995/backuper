@@ -217,7 +217,7 @@ fn run_process(
 ) -> Result<Exit, String> {
     let _ = std::fs::remove_file(log);
     let stdout = File::create(stdout_path(log)).map_or_else(|_| Stdio::null(), Stdio::from);
-    let mut child = Command::new("robocopy")
+    let mut child = Command::new(crate::engine::system_tool("robocopy.exe"))
         .args(args)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -361,6 +361,12 @@ impl CopyEngine for Robocopy {
             message,
             stats: CopyStats::default(),
         };
+        // Saving a task refuses such a rule (`filters::validate`); this is for tasks saved before that.
+        if let Some(bad) = job.filters.switch_like() {
+            return fail(format!(
+                "כלל הסינון \"{bad}\" מתחיל ב-/ ולכן הגיבוי לא הופעל: robocopy היה מפרש אותו כפקודה ולא כשם. תקנו או מחקו את הכלל בעריכת המשימה (או בכללים הכלליים בהגדרות) והריצו שוב."
+            ));
+        }
 
         let on_event = RefCell::new(on_event);
         // Pass 1 (only when asked for): list-only scan, so progress can show an exact percentage.

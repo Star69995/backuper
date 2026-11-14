@@ -475,7 +475,11 @@ pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Ve
 
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    // Explorer runs a file it is handed, and a quote would end the argument: folders only.
+    if path.contains('"') || !std::path::Path::new(&path).is_dir() {
+        return Err("התיקייה לא נמצאה - ייתכן שהכונן לא מחובר או שהיא נמחקה".into());
+    }
+    std::process::Command::new(crate::engine::explorer())
         .raw_arg(format!("\"{path}\""))
         .spawn()
         .map(|_| ())

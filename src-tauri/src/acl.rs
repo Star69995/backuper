@@ -8,14 +8,19 @@
 //! - `delete_elevated`: they aren't. The app starts itself again as admin (Windows asks the user,
 //!   UAC), and that copy (`elevated_main`) takes ownership, grants itself full control and deletes.
 
+use crate::backup;
+use crate::model::Task;
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The command-line switch of the admin copy that deletes the folders given after it.
 pub const DELETE_SWITCH: &str = "--delete-elevated";
+/// The app's data folder under AppData\Roaming (`identifier` in tauri.conf.json).
+const APP_ID: &str = "org.tovtech.backuper";
 
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const TOKEN_QUERY: u32 = 0x8;
 const TOKEN_ADJUST_PRIVILEGES: u32 = 0x20;
 const TOKEN_USER: i32 = 1;
@@ -86,10 +91,18 @@ extern "system" {
     ) -> u32;
     fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut u32) -> i32;
     fn AdjustTokenPrivileges(token: isize, disable_all: i32, new: *const TokenPrivileges, len: u32, prev: *mut c_void, ret: *mut u32) -> i32;
+    fn ConvertSidToStringSidW(sid: *const c_void, out: *mut *mut u16) -> i32;
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryInformationProcess(process: isize, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
 }
 
 #[link(name = "kernel32")]
 extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn GetCurrentProcess() -> isize;
     fn CloseHandle(h: isize) -> i32;
     fn WaitForSingleObject(h: isize, ms: u32) -> u32;
@@ -110,8 +123,12 @@ struct Token(isize);
 
 impl Token {
     fn open(access: u32) -> Option<Token> {
+        Token::of(unsafe { GetCurrentProcess() }, access)
+    }
+
+    fn of(process: isize, access: u32) -> Option<Token> {
         let mut h = 0;
-        (unsafe { OpenProcessToken(GetCurrentProcess(), access, &mut h) } != 0).then_some(Token(h))
+        (unsafe { OpenProcessToken(process, access, &mut h) } != 0).then_some(Token(h))
     }
 
     /// The account the process runs as, as a SID (u32 words: a SID wants that alignment).
@@ -272,24 +289,148 @@ pub fn delete_elevated(paths: &[String]) -> Result<(), String> {
     })
 }
 
-/// Turns on the privileges an admin copy needs to read and write files regardless of their permissions.
-pub fn enable_backup_privileges() {
+/// Turns on privileges of an admin copy (they let it work on files regardless of their
+/// permissions). Each admin copy asks only for the ones its job needs.
+pub fn enable_privileges(names: &[&str]) {
     if let Some(t) = Token::open(TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES) {
-        for p in ["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"] {
+        for p in names {
             t.enable(p);
         }
+    }
+}
+
+/// The account that started this process, as a SID: for an admin copy, the user who asked for it
+/// (Windows starts the admin copy as a child of the asking process).
+fn launcher_sid() -> Option<Vec<u32>> {
+    // PROCESS_BASIC_INFORMATION: six pointer-sized fields, the last one is the parent's id.
+    let mut info = [0usize; 6];
+    let status = unsafe {
+        NtQueryInformationProcess(GetCurrentProcess(), 0, info.as_mut_ptr().cast(), std::mem::size_of_val(&info) as u32, std::ptr::null_mut())
+    };
+    if status != 0 {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, info[5] as u32) };
+    if process == 0 {
+        return None;
+    }
+    let sid = Token::of(process, TOKEN_QUERY).and_then(|t| t.user_sid());
+    unsafe { CloseHandle(process) };
+    sid
+}
+
+/// "S-1-5-21-...".
+fn sid_string(sid: &[u32]) -> Option<String> {
+    let mut p: *mut u16 = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid.as_ptr().cast(), &mut p) } == 0 {
+        return None;
+    }
+    let s = unsafe {
+        let len = (0..).take_while(|&i| *p.add(i) != 0).count();
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+    };
+    unsafe { LocalFree(p.cast()) };
+    Some(s)
+}
+
+/// Where the app of the user who started this process keeps its data. Usually that user is us.
+/// When an admin of another account typed their password into Windows's prompt, the admin copy
+/// runs as that admin, and the data is in the asking user's profile.
+fn launcher_data_dir() -> Option<PathBuf> {
+    let own = Token::open(TOKEN_QUERY)?.user_sid()?;
+    let roaming = match launcher_sid() {
+        Some(sid) if sid != own => {
+            let key = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+                .open_subkey(format!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{}", sid_string(&sid)?))
+                .ok()?;
+            let profile: String = key.get_value("ProfileImagePath").ok()?;
+            if profile.contains('%') {
+                return None;
+            }
+            PathBuf::from(profile).join(r"AppData\Roaming")
+        }
+        _ => dirs::data_dir()?,
+    };
+    Some(roaming.join(APP_ID))
+}
+
+/// What an admin copy may touch. It is started with a command line, and any program of the user
+/// can start it with its own (Windows's prompt looks the same), so the command line is checked
+/// against the saved tasks: only their backup folders, and only files of their sources.
+/// The task list is a file the user's programs can write, so this narrows what a request can
+/// reach rather than closing it; what it does close is reaching other places by name alone.
+pub struct Allowed(pub(crate) Option<Vec<Task>>);
+
+impl Allowed {
+    pub fn of(tasks: &[Task]) -> Allowed {
+        Allowed(Some(tasks.to_vec()))
+    }
+
+    /// For an admin copy: the task list of the user who asked. When it can't be read (None), only
+    /// the folder names are checked, as before the list was.
+    pub fn load() -> Allowed {
+        let tasks = launcher_data_dir()
+            .and_then(|d| std::fs::read(d.join("tasks.json")).ok())
+            .and_then(|b| serde_json::from_slice::<Vec<Task>>(&b).ok())
+            .map(|mut tasks| {
+                tasks.iter_mut().for_each(Task::migrate);
+                tasks
+            });
+        Allowed(tasks)
+    }
+
+    /// The source folder that `folder` is a backup of: `folder` sits directly in a task's
+    /// destination and is named like the dated folders of one of its sources.
+    fn source_of(&self, folder: &Path) -> Option<&str> {
+        let name = folder.file_name()?.to_str()?;
+        let dest = backup::normalize(&folder.parent()?.to_string_lossy());
+        self.0
+            .as_ref()?
+            .iter()
+            .filter(|t| backup::normalize(&t.destination) == dest)
+            .flat_map(|t| &t.sources)
+            .find(|s| {
+                std::iter::once(&s.folder_name)
+                    .chain(&s.previous_names)
+                    .any(|n| backup::is_dated(&backup::sanitize_folder_name(n), name))
+            })
+            .map(|s| s.path.as_str())
+    }
+
+    /// Whether `folder` is a backup folder that may be deleted as admin.
+    pub fn folder(&self, folder: &Path) -> bool {
+        let named = folder.file_name().and_then(|n| n.to_str()).is_some_and(is_backup_folder_name);
+        named && (self.0.is_none() || self.source_of(folder).is_some())
+    }
+
+    /// Whether `folder` is a backup folder of the source folder `source`.
+    pub fn backup_of(&self, source: &Path, folder: &Path) -> bool {
+        self.source_of(folder).is_some_and(|s| backup::normalize(s) == backup::normalize(&source.to_string_lossy()))
+    }
+
+    /// The backup folder that a copy of `src` to `dst` goes into, when the copy is one a backup
+    /// makes: `dst` is inside a backup folder, at the same place `src` has in that folder's source.
+    pub fn copy_root<'a>(&self, src: &Path, dst: &'a Path) -> Option<&'a Path> {
+        dst.ancestors().skip(1).find(|folder| match &self.0 {
+            None => folder.file_name().and_then(|n| n.to_str()).is_some_and(is_backup_folder_name),
+            Some(_) => self.source_of(folder).zip(dst.strip_prefix(folder).ok()).is_some_and(|(source, rel)| {
+                backup::normalize(&Path::new(source).join(rel).to_string_lossy()) == backup::normalize(&src.to_string_lossy())
+            }),
+        })
     }
 }
 
 /// The admin copy: `args` = the folders to delete. Takes ownership, grants full control, deletes.
 /// Exit code = how many folders are left.
 pub fn elevated_main(args: &[String]) -> i32 {
-    enable_backup_privileges();
+    enable_privileges(&["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"]);
+    let allowed = Allowed::load();
     let mut left = 0;
     for a in args {
         let path = Path::new(a);
-        let ours = path.file_name().and_then(|n| n.to_str()).is_some_and(is_backup_folder_name);
-        if !ours || !path.is_dir() {
+        // A link named like a backup folder leads somewhere else: never through it.
+        let ours = allowed.folder(path) && crate::engine::native::find(path).is_some_and(|i| i.is_dir() && !i.is_link());
+        if !ours {
             continue;
         }
         let _ = reset_tree(path, true);
@@ -317,5 +458,60 @@ mod tests {
         for bad in ["Docs", "Windows", "Docs 2026-11-10", "2026-11-10 14-25 מלא", "Docs 2026-11-10 14-25 other"] {
             assert!(!is_backup_folder_name(bad), "{bad}");
         }
+    }
+
+    fn allowed() -> Allowed {
+        use crate::model::Source;
+        Allowed::of(&[Task {
+            destination: r"K:\Backup".into(),
+            sources: vec![Source {
+                path: r"C:\Users\me\Documents".into(),
+                folder_name: "Docs".into(),
+                previous_names: vec!["Old".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }])
+    }
+
+    #[test]
+    fn only_folders_of_saved_tasks_are_deleted_as_admin() {
+        let a = allowed();
+        assert!(a.folder(Path::new(r"K:\Backup\Docs 2026-11-10 14h25 מלא")));
+        assert!(a.folder(Path::new(r"k:\backup\Docs 2026-11-10 14h25 אינקרמנטלי.partial")));
+        assert!(a.folder(Path::new(r"K:\Backup\Old 2026-11-10 14-25")));
+        // Named like a backup folder, but not of a task: another name, another place, deeper.
+        assert!(!a.folder(Path::new(r"K:\Backup\Other 2026-11-10 14h25 מלא")));
+        assert!(!a.folder(Path::new(r"C:\Windows\Docs 2026-11-10 14h25 מלא")));
+        assert!(!a.folder(Path::new(r"K:\Backup\x\Docs 2026-11-10 14h25 מלא")));
+        assert!(!a.folder(Path::new(r"K:\Backup")));
+        // No task list to check against: the name alone, as before.
+        assert!(Allowed(None).folder(Path::new(r"C:\x\Other 2026-11-10 14h25 מלא")));
+        assert!(!Allowed(None).folder(Path::new(r"C:\Windows")));
+    }
+
+    #[test]
+    fn a_copy_as_admin_goes_from_a_source_to_its_place_in_its_backup_folder() {
+        let a = allowed();
+        let folder = r"K:\Backup\Docs 2026-11-10 14h25 מלא.partial";
+        let dst = PathBuf::from(format!(r"{folder}\Outlook\mail.pst"));
+        assert_eq!(a.copy_root(Path::new(r"c:\users\me\documents\Outlook\mail.pst"), &dst), Some(Path::new(folder)));
+        // Another file of the computer, or the right file to another place in the folder.
+        assert_eq!(a.copy_root(Path::new(r"C:\Windows\System32\config\SAM"), &dst), None);
+        assert_eq!(a.copy_root(Path::new(r"C:\Users\me\Documents\mail.pst"), &dst), None);
+        let elsewhere = PathBuf::from(r"C:\x\Docs 2026-11-10 14h25 מלא\Outlook\mail.pst");
+        assert_eq!(a.copy_root(Path::new(r"C:\Users\me\Documents\Outlook\mail.pst"), &elsewhere), None);
+        assert!(a.backup_of(Path::new(r"C:\Users\me\Documents\"), Path::new(folder)));
+        assert!(!a.backup_of(Path::new(r"C:\Users\me"), Path::new(folder)));
+    }
+
+    #[test]
+    fn the_admin_copy_finds_the_asking_users_data() {
+        // The tests' parent (cargo) runs as the same user, like the app that asks for an admin copy.
+        let own = Token::open(TOKEN_QUERY).and_then(|t| t.user_sid()).unwrap();
+        assert_eq!(launcher_sid(), Some(own.clone()));
+        assert_eq!(launcher_data_dir(), dirs::data_dir().map(|d| d.join(APP_ID)));
+        assert!(sid_string(&own).is_some_and(|s| s.starts_with("S-1-5-")));
+        assert!(include_str!("../tauri.conf.json").contains(&format!("\"identifier\": \"{APP_ID}\"")));
     }
 }

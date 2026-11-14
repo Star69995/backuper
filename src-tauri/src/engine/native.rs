@@ -334,6 +334,11 @@ impl Item {
     pub fn is_dir(&self) -> bool {
         self.attributes & ATTR_DIRECTORY != 0
     }
+
+    /// A link to another place (junction, symlink), not a cloud placeholder.
+    pub fn is_link(&self) -> bool {
+        self.entry().is_link()
+    }
 }
 
 /// The folder or file at `path` as a directory listing reports it (with its 8.3 name), or None.
