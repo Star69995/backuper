@@ -254,11 +254,14 @@ impl Rules {
         }
     }
 
+    /// A file rule by path (`exclude_file_paths`) skips a folder at that path too: older versions reported an
+    /// unreadable folder without a trailing backslash, so "skip next time" saved it as a file rule. robocopy
+    /// gets those paths in /XD as well (`robocopy::args`).
     fn skip_dir(&self, e: &Entry, rel: &str) -> bool {
         e.matches_any(&self.exclude_dir_names)
-            || (!self.exclude_dir_paths.is_empty() && {
+            || ((!self.exclude_dir_paths.is_empty() || !self.exclude_file_paths.is_empty()) && {
                 let full: Vec<u16> = format!("{}\\{rel}", self.base).encode_utf16().collect();
-                self.exclude_dir_paths.iter().any(|p| p.matches(&full))
+                self.exclude_dir_paths.iter().chain(&self.exclude_file_paths).any(|p| p.matches(&full))
             })
     }
 
@@ -515,7 +518,8 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
                 out.failed_dirs += 1;
                 if out.errors.len() < MAX_ERRORS {
                     out.errors.push(FileError {
-                        path: format!("{}\\{rel}", rules.base),
+                        // The trailing backslash marks a folder (the UI then offers to skip the folder).
+                        path: format!("{}\\{rel}\\", rules.base),
                         code: e.raw_os_error().map(|c| c as u32),
                         message: e.to_string(),
                         debug: String::new(),
@@ -533,6 +537,7 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
             if e.attributes & ATTR_DIRECTORY != 0 {
                 if rules.skip_dir(&e, &child) {
                     out.wild_dirs.extend(rules.wild_match(&rules.exclude_dir_wild, &child));
+                    out.wild_dirs.extend(rules.wild_match(&rules.exclude_file_wild, &child));
                     continue;
                 }
                 match rules.regex_skips_dir(&e) {
@@ -1143,6 +1148,8 @@ mod tests {
             Filters { exclude_files: v(&[&src.join("sub").join("s.htm").display().to_string(), "x.txt"]), ..Default::default() },
             Filters { exclude_dirs: v(&[&format!("{}\\", src.join("sub").join("deep").display()), "hid"]), ..Default::default() },
             Filters { exclude_dirs: v(&[r"sub\deep"]), ..Default::default() },
+            // A file rule by path that names a folder (saved from an unreadable-folder error) skips the folder.
+            Filters { exclude_files: v(&[&src.join("sub").join("deep").display().to_string()]), ..Default::default() },
             Filters { exclude_hidden: true, exclude_system: true, ..Default::default() },
             Filters { max_size: Some(4000), max_age_days: Some(2), ..Default::default() },
         ];
