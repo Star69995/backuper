@@ -502,7 +502,7 @@ pub fn task_main(args: &[String]) -> i32 {
         // Taken back by the app (it gave up waiting), or someone else's.
         std::fs::rename(side(&control, "req"), &taken)?;
         let text = std::fs::read_to_string(&taken)?;
-        std::fs::write(&alive, "")?;
+        std::fs::write(&alive, "0")?;
         Ok(serde_json::from_str(&text).unwrap_or_default())
     }) {
         Ok(r) => r,
@@ -510,9 +510,12 @@ pub fn task_main(args: &[String]) -> i32 {
     };
     {
         let alive = alive.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(3));
-            let _ = acl::as_user(|| std::fs::write(&alive, ""));
+        // The content changes every time: rewriting an empty file with nothing leaves its modified time alone.
+        std::thread::spawn(move || {
+            for beat in 1u64.. {
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = acl::as_user(|| std::fs::write(&alive, beat.to_string()));
+            }
         });
     }
     let code = match request.first().map(String::as_str) {
