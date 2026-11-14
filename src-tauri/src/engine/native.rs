@@ -887,6 +887,20 @@ extern "system" {
     fn GetDriveTypeW(root: *const u16) -> u32;
 }
 
+/// A path on a drive of this computer (a lettered, non-network drive). Asking a network path anything
+/// can stall for many seconds while the server is away, so code that only wants to peek at the disk
+/// (the load-time rule migration) skips what this refuses.
+pub fn is_local_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let [d, b':', ..] = s.as_bytes() else { return false };
+    if !d.is_ascii_alphabetic() {
+        return false;
+    }
+    let root: Vec<u16> = format!("{}:\\", *d as char).encode_utf16().chain(Some(0)).collect();
+    // 2 removable, 3 fixed, 5 optical, 6 ram disk; not 0/1 (unknown, no such root) and not 4 (network).
+    matches!(unsafe { GetDriveTypeW(root.as_ptr()) }, 2 | 3 | 5 | 6)
+}
+
 /// The drive of `path` as "D: NTFS, fixed disk" (for the debug text of a run).
 pub fn volume_info(path: &Path) -> String {
     let s = path.to_string_lossy();

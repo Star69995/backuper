@@ -271,7 +271,12 @@ impl Task {
                     FilterRule::File { value } => {
                         let v = value.trim();
                         let full = v.len() > 2 && (v.as_bytes()[1] == b':' || v.starts_with(r"\\"));
-                        (full && std::path::Path::new(v).is_dir()).then(|| v.trim_end_matches('\\').to_string())
+                        // Only a drive of this computer is asked: a network path can stall for seconds
+                        // (this runs at load and at every save); such a rule stays a file rule, which
+                        // the engine treats the same.
+                        let path = std::path::Path::new(v);
+                        (full && crate::engine::native::is_local_path(path) && path.is_dir())
+                            .then(|| v.trim_end_matches('\\').to_string())
                     }
                     _ => None,
                 };
@@ -690,12 +695,17 @@ mod tests {
             ],
             ..Task::default()
         };
+        // A network path is not asked about at all (it could stall), so it stays as it is.
+        t.filters.push(FilterRule::File { value: r"\\no-such-server\share\dir".into() });
         t.fix_folder_file_rules();
         let _ = std::fs::remove_dir(&dir);
         assert!(matches!(&t.filters[0], FilterRule::Folder { value } if *value == d));
         assert!(matches!(&t.filters[1], FilterRule::File { value } if *value == file));
         let FilterRule::Group { rules, .. } = &t.filters[2] else { panic!() };
         assert!(matches!(&rules[0], FilterRule::Folder { value } if *value == d));
+        assert!(matches!(&t.filters[3], FilterRule::File { .. }));
+        assert!(crate::engine::native::is_local_path(&dir));
+        assert!(!crate::engine::native::is_local_path(std::path::Path::new(r"\\server\share\x")));
     }
 
     #[test]
