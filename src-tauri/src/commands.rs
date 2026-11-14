@@ -64,6 +64,7 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
 
 fn prepare(mut t: Task) -> Result<Task, String> {
     t.migrate();
+    t.fix_folder_file_rules();
     t.settle_retention();
     // A full schedule only makes sense next to incremental runs (combined mode).
     if t.mode == BackupMode::Full {

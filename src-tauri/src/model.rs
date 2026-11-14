@@ -256,6 +256,33 @@ impl Task {
         }
     }
 
+    /// A "file" rule whose full path is a folder on disk becomes a folder rule. Older versions
+    /// reported an unreadable source folder without a trailing backslash, so "skip next time" in a
+    /// run's details saved it as a file rule (the engine skips such a folder anyway - see
+    /// `native::Rules::skip_dir` - but the editor showed it as a file).
+    pub fn fix_folder_file_rules(&mut self) {
+        fn fix(rules: &mut [FilterRule]) {
+            for r in rules {
+                let folder = match r {
+                    FilterRule::Group { rules, .. } => {
+                        fix(rules);
+                        None
+                    }
+                    FilterRule::File { value } => {
+                        let v = value.trim();
+                        let full = v.len() > 2 && (v.as_bytes()[1] == b':' || v.starts_with(r"\\"));
+                        (full && std::path::Path::new(v).is_dir()).then(|| v.trim_end_matches('\\').to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(value) = folder {
+                    *r = FilterRule::Folder { value };
+                }
+            }
+        }
+        fix(&mut self.filters);
+    }
+
     /// A quick full backup updates the previous full in place, so it needs exactly one full kept.
     pub fn keeps_one_full(&self) -> bool {
         self.keep_mode == KeepMode::Count && self.keep_count == 1
@@ -644,6 +671,32 @@ pub struct FullSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_rules_naming_a_folder_become_folder_rules() {
+        let dir = std::env::temp_dir().join(format!("backuper-rules-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.display().to_string();
+        let file = format!(r"{d}\nothing-here.txt");
+        let mut t = Task {
+            filters: vec![
+                FilterRule::File { value: d.clone() },
+                FilterRule::File { value: file.clone() },
+                FilterRule::Group {
+                    name: "g".into(),
+                    enabled: true,
+                    rules: vec![FilterRule::File { value: format!(r"{d}\") }],
+                },
+            ],
+            ..Task::default()
+        };
+        t.fix_folder_file_rules();
+        let _ = std::fs::remove_dir(&dir);
+        assert!(matches!(&t.filters[0], FilterRule::Folder { value } if *value == d));
+        assert!(matches!(&t.filters[1], FilterRule::File { value } if *value == file));
+        let FilterRule::Group { rules, .. } = &t.filters[2] else { panic!() };
+        assert!(matches!(&rules[0], FilterRule::Folder { value } if *value == d));
+    }
 
     #[test]
     fn quick_full_needs_one_full_kept_and_rules_out_delete_before() {
