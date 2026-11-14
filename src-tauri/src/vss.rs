@@ -224,12 +224,15 @@ pub fn elevated_main(args: &[String]) -> i32 {
     if side(control, "cancel").exists() {
         return 3;
     }
-    let _ = std::fs::write(side(control, "started"), "");
+    // The files beside the control path are written as the user: the path comes from the request.
+    let _ = acl::as_user(|| std::fs::write(side(control, "started"), ""));
     acl::enable_backup_privileges();
     let pairs: Vec<Pair> = rest.chunks_exact(2).map(|c| Pair { src: PathBuf::from(&c[0]), dst: PathBuf::from(&c[1]) }).collect();
     let report = report_of(control, &pairs);
-    let _ = std::fs::write(side(control, "result"), report);
-    0
+    match acl::as_user(|| std::fs::write(side(control, "result"), report)) {
+        Ok(()) => 0,
+        Err(_) => acl::REFUSED,
+    }
 }
 
 fn report_of(control: &Path, pairs: &[Pair]) -> String {
@@ -240,10 +243,16 @@ fn report_of(control: &Path, pairs: &[Pair]) -> String {
             lines.push("ERR\t\tהגיבוי בוטל".to_string());
             continue;
         }
-        let Some((root, rel)) = split_drive(&p.src).filter(|_| inside_backup_folder(&p.dst)) else {
+        let Some((root, rel)) = split_drive(&p.src).filter(|_| acl::plain_absolute(&p.src) && acl::plain_absolute(&p.dst) && inside_backup_folder(&p.dst)) else {
             lines.push("ERR\t\tגיבוי דרך VSS אפשרי רק לקבצים בכונן מקומי, אל תיקיית גיבוי".to_string());
             continue;
         };
+        // Started by the permanent permission, nothing is read that the user couldn't read
+        // themselves: only a file another program holds open (what the shadow copy is for) is let through.
+        if acl::is_bounded() && !acl::user_can_read(&p.src) {
+            lines.push("ERR\t5\tאין לכם הרשאת קריאה לקובץ, ולכן הוא לא גובה בהרשאת מנהל".to_string());
+            continue;
+        }
         if !shadows.iter().any(|(r, _)| *r == root) {
             let s = Shadow::create(&root);
             shadows.push((root.clone(), s));
@@ -392,6 +401,8 @@ mod tests {
         assert!(inside_backup_folder(Path::new(r"K:\cobian\Docs\Documents 2026-11-12 02h34 אינקרמנטלי.partial\Outlook\a.pst")));
         assert!(!inside_backup_folder(Path::new(r"C:\Windows\System32\a.dll")));
         assert!(!inside_backup_folder(Path::new(r"K:\cobian\Docs\Documents 2026-11-12 02h34 אינקרמנטלי")));
+        // The name check reads text: a path that climbs out of the named folder is refused before it.
+        assert!(!acl::plain_absolute(Path::new(r"C:\x\Docs 2026-11-12 02h34 מלא\..\..\Windows\System32\a.dll")));
     }
 
     #[test]

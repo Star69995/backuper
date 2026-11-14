@@ -15,6 +15,15 @@
 //! (renames it to `.taken`), keeps `.alive` fresh while it works and writes `.exit`. A task that
 //! doesn't start, or a permission that isn't there, falls back to the prompt.
 //!
+//! What the helper may do is bounded, because anything running as the user can start the task
+//! (`acl.rs`, "what the admin copy may do"): it does no more than the user could do themselves,
+//! except what only admin rights allow. Everything beside the request - the control files - is
+//! touched as the user (`acl::as_user`: the path comes from the request), the shadow-copy copy
+//! reads only files the user could read and writes as the user, a delete needs a real (not linked)
+//! backup folder the user may delete inside, and every request is noted in `audit.log` next to the
+//! helper (admin-only folder). A request outside the bounds exits with `acl::REFUSED` and the app
+//! asks Windows for permission instead, so an unusual case costs one prompt, never a silent action.
+//!
 //! `HELPER_VERSION` = what the helper understands; a helper of another version (`version.txt`
 //! beside it) counts as `Outdated` until the user approves again, which copies this version.
 
@@ -36,7 +45,7 @@ pub const UNINSTALL_SWITCH: &str = "--admin-uninstall";
 /// A request that only checks the helper really runs as admin (exit code 0).
 const PING: &str = "--admin-ping";
 /// Raise when what the helper understands changes (switches, request format).
-const HELPER_VERSION: &str = "1";
+const HELPER_VERSION: &str = "2";
 /// How long a task that was started may take to pick its request up.
 const START_WAIT: Duration = Duration::from_secs(30);
 /// The helper refreshes `.alive` every few seconds; this long without = it is gone.
@@ -122,8 +131,10 @@ fn helper_exe(sid: &str) -> PathBuf {
     helper_dir(sid).join("backuper-admin.exe")
 }
 
+const CONTROL_PREFIX: &str = "backuper-admin-";
+
 fn control_path() -> PathBuf {
-    std::env::temp_dir().join(format!("backuper-admin-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("{CONTROL_PREFIX}{}", uuid::Uuid::new_v4()))
 }
 
 fn side(control: &Path, ext: &str) -> PathBuf {
@@ -206,6 +217,8 @@ fn task_xml(sid: &str, exe: &Path) -> String {
 pub fn run_as_admin(args: &[String]) -> Result<u32, String> {
     if cached() == AdminPermission::On {
         match through_task(args) {
+            // Outside what the helper may do silently: the user is asked, as without the permission.
+            Ok(code) if code == acl::REFUSED as u32 => {}
             Ok(code) => return Ok(code),
             Err(TaskError::Failed(e)) => return Err(e),
             // Removed or broken behind our back: read the state again, and ask this time.
@@ -449,23 +462,57 @@ fn delete_at_restart(path: &Path) {
     unsafe { MoveFileExW(w.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
 }
 
+/// What a control path must look like: ours (`control_path`), in a folder that is not a link-following
+/// trick. Anything else is not a request of the app.
+fn valid_control(control: &Path) -> bool {
+    acl::plain_absolute(control)
+        && control.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(CONTROL_PREFIX) && n.len() > CONTROL_PREFIX.len())
+}
+
+/// One line per request in `audit.log` beside the helper, for whoever wonders what ran as admin.
+/// The folder is admin-only; the log is cut to its newest half when it gets big.
+fn audit(request: &[String], outcome: &str) {
+    use std::io::Write;
+    let Some(sid) = acl::user_sid_string() else { return };
+    let path = helper_dir(&sid).join("audit.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 512 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("old"));
+    }
+    let what: String = request.iter().take(8).map(|a| a.replace(['\r', '\n'], " ")).collect::<Vec<_>>().join(" | ");
+    let what: String = what.chars().take(600).collect();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{}\t{} ({} args)\t{}\t{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), request.first().map_or("", String::as_str), request.len().saturating_sub(1), outcome, what);
+    }
+}
+
 /// The task: `args` = the control path. Takes the request, runs it, writes the exit code.
 pub fn task_main(args: &[String]) -> i32 {
+    // Silent, so bounded (see the module docs). Nothing below trusts a path of the request.
+    acl::set_bounded(true);
     let Some(control) = args.first() else { return 2 };
     let control = PathBuf::from(control);
-    let taken = side(&control, "taken");
-    // Taken back by the app (it gave up waiting), or someone else's.
-    if std::fs::rename(side(&control, "req"), &taken).is_err() {
+    if !valid_control(&control) {
         return 2;
     }
-    let request: Vec<String> = std::fs::read_to_string(&taken).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let taken = side(&control, "taken");
     let alive = side(&control, "alive");
-    let _ = std::fs::write(&alive, "");
+    // The control files: touched as the user only. A request to touch someone else's files with the
+    // admin's rights (a link in the path, a path into a protected folder) fails here.
+    let request: Vec<String> = match acl::as_user(|| {
+        // Taken back by the app (it gave up waiting), or someone else's.
+        std::fs::rename(side(&control, "req"), &taken)?;
+        let text = std::fs::read_to_string(&taken)?;
+        std::fs::write(&alive, "")?;
+        Ok(serde_json::from_str(&text).unwrap_or_default())
+    }) {
+        Ok(r) => r,
+        Err(_) => return 2,
+    };
     {
         let alive = alive.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(3));
-            let _ = std::fs::write(&alive, "");
+            let _ = acl::as_user(|| std::fs::write(&alive, ""));
         });
     }
     let code = match request.first().map(String::as_str) {
@@ -474,11 +521,15 @@ pub fn task_main(args: &[String]) -> i32 {
         Some(PING) => i32::from(!acl::is_elevated()),
         _ => 2,
     };
+    audit(&request, &if code == acl::REFUSED { "refused".to_string() } else { format!("exit {code}") });
     let exit = side(&control, "exit");
     let tmp = side(&control, "exit.tmp");
-    let _ = std::fs::write(&tmp, code.to_string());
-    let _ = std::fs::rename(&tmp, &exit);
-    let _ = std::fs::remove_file(&taken);
+    let _ = acl::as_user(|| {
+        std::fs::write(&tmp, code.to_string())?;
+        std::fs::rename(&tmp, &exit)?;
+        let _ = std::fs::remove_file(&taken);
+        Ok(())
+    });
     code
 }
 
@@ -493,6 +544,15 @@ mod tests {
         assert!(xml.contains("<UserId>S-1-5-21-1-2-3-1001</UserId>"));
         assert!(task_sddl("S-1-5-21-1-2-3-1001").ends_with("(A;;GRGX;;;S-1-5-21-1-2-3-1001)"));
         assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+    }
+
+    #[test]
+    fn only_the_apps_own_control_paths_are_served() {
+        assert!(valid_control(Path::new(r"C:\Users\a\AppData\Local\Temp\backuper-admin-1234")));
+        assert!(!valid_control(Path::new(r"C:\Windows\System32\drivers\etc\hosts")));
+        assert!(!valid_control(Path::new(r"C:\Users\a\Temp\..\..\Windows\backuper-admin-1")));
+        assert!(!valid_control(Path::new(r"Temp\backuper-admin-1")));
+        assert!(!valid_control(Path::new(r"C:\Temp\backuper-admin-")));
     }
 
     #[test]
