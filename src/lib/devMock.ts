@@ -729,6 +729,10 @@ export function installDevMock() {
         return cmd === "retry_delete" ? [] : null;
       case "answer_drive_prompts":
         drivePrompts = drivePrompts.filter((id) => !(a.ids as string[]).includes(id));
+        if (a.remember)
+          for (const t of tasks)
+            if ((a.ids as string[]).includes(t.id) && t.onDriveConnect === "ask")
+              t.onDriveConnect = (a.run as string[]).includes(t.id) ? "run" : "off";
         return null;
       case "check_updates":
         update.checkedAt = new Date().toISOString();

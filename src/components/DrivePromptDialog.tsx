@@ -10,15 +10,29 @@ export default function DrivePromptDialog({ snap }: { snap: Snapshot }) {
   const { toast } = useFeedback();
   // Unchecked tasks; new prompts arrive checked.
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
+  const [remember, setRemember] = useState(false);
   const tasks = snap.drivePrompts.map((id) => snap.tasks.find((t) => t.id === id)).filter((t) => t !== undefined);
   if (tasks.length === 0) return null;
 
   const ids = tasks.map((t) => t.id);
-  const answer = (run: string[]) => {
+  // `keep`: the answer counts as the user's choice (the close button only closes, it never remembers).
+  const answer = (run: string[], keep = remember) => {
     setSkipped(new Set());
-    api.answerDrivePrompts(ids, run).catch((e) => toast({ tone: "bad", title: "הפעולה נכשלה", message: errorText(e) }));
+    setRemember(false);
+    api
+      .answerDrivePrompts(ids, run, keep)
+      .then(() => {
+        if (keep)
+          toast({
+            tone: "ok",
+            title: "הבחירה נשמרה",
+            message: 'אפשר לשנות אותה בעריכת המשימה, בשדה "כשהכונן מתחבר למחשב".',
+          });
+      })
+      .catch((e) => toast({ tone: "bad", title: "הפעולה נכשלה", message: errorText(e) }));
   };
   const toRun = ids.filter((id) => !skipped.has(id));
+  const one = tasks.length === 1;
 
   return (
     <Modal
@@ -30,11 +44,17 @@ export default function DrivePromptDialog({ snap }: { snap: Snapshot }) {
         </span>
       }
       subtitle={tasks.length === 1 ? "להתחיל את הגיבוי עכשיו?" : "אילו גיבויים להתחיל עכשיו?"}
-      onClose={() => answer([])}
+      onClose={() => answer([], false)}
       footer={
         <>
-          <Button onClick={() => answer([])}>לא עכשיו</Button>
-          <Button variant="primary" icon={<RunIcon size={15} />} disabled={toRun.length === 0} onClick={() => answer(toRun)} autoFocus>
+          <Button onClick={() => answer([])}>{remember ? "לא לגבות" : "לא עכשיו"}</Button>
+          <Button
+            variant="primary"
+            icon={<RunIcon size={15} />}
+            disabled={toRun.length === 0}
+            onClick={() => answer(toRun)}
+            autoFocus
+          >
             {tasks.length === 1 || toRun.length === tasks.length ? "גיבוי עכשיו" : `גיבוי ${toRun.length} משימות`}
           </Button>
         </>
@@ -70,6 +90,21 @@ export default function DrivePromptDialog({ snap }: { snap: Snapshot }) {
           </li>
         ))}
       </ul>
+      <label className="mt-4 flex cursor-pointer items-start gap-3">
+        <span className="pt-0.5">
+          <Checkbox label="לזכור את הבחירה ולא לשאול שוב" checked={remember} onChange={setRemember} />
+        </span>
+        <span className="flex flex-col gap-0.5">
+          <span className="text-sm">לזכור את הבחירה ולא לשאול שוב</span>
+          {remember && (
+            <span className="text-xs text-muted">
+              {one
+                ? "בחיבור הבא: גיבוי אוטומטי בלי לשאול אם תבחרו בגיבוי, ובלי גיבוי אם תבחרו שלא."
+                : "בחיבור הבא: המשימות המסומנות יגובו אוטומטית בלי לשאול, והאחרות לא יגובו."}
+            </span>
+          )}
+        </span>
+      </label>
     </Modal>
   );
 }
