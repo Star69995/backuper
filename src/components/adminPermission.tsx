@@ -3,14 +3,14 @@ import { createContext, type ReactNode, useContext, useState } from "react";
 import { api, errorText } from "../api";
 import type { AdminPermission, Task } from "../types";
 import { useFeedback } from "./feedback";
-import { Button, cx } from "./ui";
+import { Button, Checkbox, cx } from "./ui";
 
 // Permanent admin permission (elevation.rs): approved once, then open files (VSS) and stuck deletes
 // run as admin without Windows's prompt - a scheduled backup has nobody there to answer it. Every
 // place that may end in that prompt offers it (`AdminPermissionOffer`) until it is on.
 
-const Ctx = createContext<AdminPermission>("unknown");
-/** App.tsx provides `snap.adminPermission`, so any component can read it. */
+const Ctx = createContext<{ status: AdminPermission; full: boolean }>({ status: "unknown", full: false });
+/** App.tsx provides `snap.adminPermission` and `snap.adminFullAccess`, so any component can read them. */
 export const AdminPermissionProvider = Ctx.Provider;
 
 export const NOT_ADMIN_TEXT =
@@ -20,14 +20,53 @@ export const NOT_ADMIN_TEXT =
 export const runsUnattendedWithVss = (t: Task) =>
   t.enabled && t.vssOpenFiles && (t.schedule.kind !== "manual" || t.onDriveConnect === "run");
 
+/**
+ * The choice inside the grant dialog. Full access = the admin helper never hands a request back to
+ * Windows's prompt (elevation.rs); the choice is kept in an admin-only folder, so only this
+ * dialog, through Windows's own prompt, changes it.
+ */
+function FullAccessChoice({ initial, onChange }: { initial: boolean; onChange: (v: boolean) => void }) {
+  const [full, setFull] = useState(initial);
+  const label = "גישה מלאה - בלי לבקש אישור אף פעם";
+  return (
+    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-line p-2.5">
+      <span className="pt-0.5">
+        <Checkbox
+          label={label}
+          checked={full}
+          onChange={(v) => {
+            setFull(v);
+            onChange(v);
+          }}
+        />
+      </span>
+      <span className="flex flex-col gap-1">
+        <span className="font-medium">{label}</span>
+        <span className="text-xs leading-relaxed text-muted">
+          בלי הסימון, במקרים חריגים Windows עדיין תבקש אישור: יעד גיבוי שמגיעים אליו דרך קישור או כונן ממופה, או קובץ שלחשבון
+          שלכם אין הרשאה לקרוא. עם הסימון גם אלה מתבצעים בלי לשאול.
+        </span>
+        {full && (
+          <span className="text-xs leading-relaxed text-warn">
+            שימו לב: עם גישה מלאה, כל תוכנה שרצה בחשבון Windows שלכם יכולה לשנות את רשימת המשימות ודרכה לקרוא כל קובץ במחשב בלי
+            אישור. מתאים למחשב שרק אתם משתמשים בו.
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
+
 export function useAdminPermission() {
-  const status = useContext(Ctx);
+  const { status, full } = useContext(Ctx);
   const { toast, confirm } = useFeedback();
   const [busy, setBusy] = useState(false);
 
   const grant = async () => {
+    // What the dialog's checkbox says when it is confirmed (it starts from the current choice).
+    let wantFull = full;
     const ok = await confirm({
-      title: "מתן הרשאת מנהל קבועה",
+      title: status === "on" ? "שינוי רמת הגישה של ההרשאה הקבועה" : "מתן הרשאת מנהל קבועה",
       message: (
         <div className="flex flex-col gap-2">
           <p>
@@ -38,6 +77,7 @@ export function useAdminPermission() {
             ההרשאה נשמרת כמשימה במתזמן המשימות של Windows, ועותק של התוכנה נשמר בתיקייה מוגנת ב-Program Files. אפשר לבטל אותה בכל
             עת בהגדרות, וגם הסרת התוכנה מבטלת אותה.
           </p>
+          <FullAccessChoice initial={full} onChange={(v) => (wantFull = v)} />
         </div>
       ),
       confirmLabel: "המשך לאישור של Windows",
@@ -45,8 +85,14 @@ export function useAdminPermission() {
     if (!ok) return false;
     setBusy(true);
     try {
-      await api.grantAdminPermission();
-      toast({ tone: "ok", title: "ההרשאה הקבועה הופעלה", message: "גיבויים יבצעו פעולות מנהל בלי לבקש אישור." });
+      await api.grantAdminPermission(wantFull);
+      toast({
+        tone: "ok",
+        title: wantFull ? "ההרשאה הקבועה הופעלה בגישה מלאה" : "ההרשאה הקבועה הופעלה",
+        message: wantFull
+          ? "גיבויים יבצעו פעולות מנהל בלי לבקש אישור, גם במקרים חריגים."
+          : "גיבויים יבצעו פעולות מנהל בלי לבקש אישור. במקרה חריג Windows עדיין תשאל.",
+      });
       return true;
     } catch (e) {
       toast({ tone: "bad", title: "ההרשאה הקבועה לא הופעלה", message: errorText(e) });
@@ -76,7 +122,7 @@ export function useAdminPermission() {
     }
   };
 
-  return { status, busy, grant, revoke };
+  return { status, full, busy, grant, revoke };
 }
 
 /** `onDone`: after an attempt (the snapshot also refreshes by itself; the dev mock doesn't). */

@@ -47,6 +47,15 @@ fn is_file_path(p: &str) -> bool {
 
 pub fn validate(rules: &[FilterRule]) -> Result<(), String> {
     for r in FilterRule::flatten(rules) {
+        let listed = match r {
+            FilterRule::Include { value } | FilterRule::Extension { value } => patterns(value),
+            FilterRule::IncludeName { value } | FilterRule::Pattern { value } => names(value),
+            FilterRule::Folder { value } => vec![value.trim().to_string()],
+            _ => Vec::new(),
+        };
+        if let Some(v) = listed.iter().find(|v| crate::engine::is_switch(v)) {
+            return Err(format!("כלל סינון: שם של קובץ או תיקייה לא יכול להתחיל ב-/ ({v})"));
+        }
         match r {
             FilterRule::Include { value } if patterns(value).is_empty() => {
                 return Err("כלל סינון: יש להזין אילו קבצים לגבות (למשל *.lrcat)".into())
@@ -151,6 +160,26 @@ mod tests {
         assert_eq!(f.exclude_dirs, ["node_modules"]);
         assert_eq!(f.max_size, Some(10 * 1024 * 1024));
         assert!(f.exclude_hidden && !f.exclude_system);
+    }
+
+    /// robocopy would take "/MOV" among the file names as its switch and delete the source files.
+    #[test]
+    fn a_value_robocopy_would_read_as_a_switch_is_refused() {
+        let bad = [
+            FilterRule::Pattern { value: "/MOV".into() },
+            FilterRule::IncludeName { value: "notes.txt, /MOVE".into() },
+            FilterRule::Extension { value: "tmp; /JOB:x.rcj".into() },
+            FilterRule::Include { value: "/PURGE*".into() },
+            FilterRule::Folder { value: " /MIR".into() },
+        ];
+        for r in bad {
+            assert!(validate(std::slice::from_ref(&r)).is_err(), "{r:?}");
+            // A task saved before the check: the engine finds it and doesn't start robocopy.
+            assert!(compile([&r]).switch_like().is_some(), "{r:?}");
+        }
+        let ok = [FilterRule::Pattern { value: "~$*, Thumbs.db".into() }, FilterRule::Folder { value: r"Projects\cache".into() }];
+        assert!(validate(&ok).is_ok());
+        assert_eq!(compile(&ok).switch_like(), None);
     }
 
     #[test]

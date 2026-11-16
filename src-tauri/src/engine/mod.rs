@@ -100,6 +100,50 @@ impl Filters {
         out.exclude_files.iter_mut().for_each(abs);
         out
     }
+
+    /// A file / folder entry robocopy would read as one of its own switches (see `is_switch`).
+    pub fn switch_like(&self) -> Option<&str> {
+        self.include_files
+            .iter()
+            .chain(&self.exclude_files)
+            .chain(&self.exclude_dirs)
+            .map(|v| v.trim())
+            .find(|v| is_switch(v))
+    }
+}
+
+/// robocopy takes anything on its command line that starts with a slash as a switch, wherever it
+/// stands: a file name rule "/MOV" would delete the source files after copying them. No file or
+/// folder name can start with one, so such a value is never a real rule.
+pub fn is_switch(value: &str) -> bool {
+    value.trim_start().starts_with('/')
+}
+
+/// Windows's own folder ("C:\Windows\System32"), asked from Windows and not from the environment.
+fn system_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
+    }
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    (n > 0 && n < buf.len()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
+}
+
+/// A tool that comes with Windows, by its full path under System32 (`robocopy.exe`,
+/// `WindowsPowerShell\v1.0\powershell.exe`). A bare name is looked for in the app's own folder
+/// first, and any program of the user can put a file there.
+pub fn system_tool(rel: &str) -> PathBuf {
+    system_dir().map(|d| d.join(rel)).filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from(Path::new(rel).file_name().unwrap_or(rel.as_ref())))
+}
+
+/// Explorer, by its full path (it sits in the Windows folder, above System32).
+pub fn explorer() -> PathBuf {
+    system_dir()
+        .and_then(|d| d.parent().map(|w| w.join("explorer.exe")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("explorer.exe"))
 }
 
 /// A file under some root (a source that passed the filters, or a file in a backup folder).

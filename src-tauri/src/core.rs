@@ -379,6 +379,15 @@ impl Core {
             .map(|p| p.path.clone())
             .collect();
         let mut failures: Vec<(String, std::io::Error)> = Vec::new();
+        if elevated {
+            // The admin copy deletes only backup folders of saved tasks; say so here, where it can be explained.
+            let allowed = crate::acl::Allowed::of(&self.store.lock().unwrap().tasks);
+            if let Some(p) = known.iter().find(|p| !allowed.folder(Path::new(p))) {
+                return Err(format!(
+                    "התיקייה {p} כבר לא שייכת לאף משימה שמורה (המשימה נמחקה, או שהיעד או שם תיקיית הגיבוי שלה השתנו), ולכן היא לא נמחקת בהרשאת מנהל. אפשר למחוק אותה ידנית בסייר הקבצים."
+                ));
+            }
+        }
         let result = if elevated {
             crate::acl::delete_elevated(&known)
         } else {
@@ -418,6 +427,10 @@ impl Core {
         let folder = PathBuf::from(src.target_folder.clone().ok_or("לריצה הזאת אין תיקיית גיבוי")?);
         if !folder.is_dir() {
             return Err("תיקיית הגיבוי של הריצה הזאת כבר לא קיימת".into());
+        }
+        // The admin copy writes only into backup folders of saved tasks' sources (`acl::Allowed`).
+        if !crate::acl::Allowed::of(&self.store.lock().unwrap().tasks).backup_of(Path::new(&src.source), &folder) {
+            return Err("המשימה של הריצה הזאת נמחקה, או שהמקור, היעד או שם תיקיית הגיבוי שלה השתנו מאז, ולכן אי אפשר להוסיף את הקבצים הפתוחים לתיקיית הגיבוי של הריצה. הריצו את המשימה שוב - הקבצים הפתוחים יגובו בריצה החדשה.".into());
         }
         let mut errors = src.errors.clone();
         let never = AtomicBool::new(false);

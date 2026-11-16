@@ -164,6 +164,11 @@ fn parse_dated(prefix: &str, name: &str) -> Option<Dated> {
     Some(Dated { at, kind, partial, seconds, old })
 }
 
+/// Whether `name` is a dated backup folder of the source whose folder name is `prefix`.
+pub fn is_dated(prefix: &str, name: &str) -> bool {
+    parse_dated(prefix, name).is_some()
+}
+
 pub fn parse_folder(prefix: &str, name: &str) -> Option<(DateTime<Local>, BackupMode, bool)> {
     let d = parse_dated(prefix, name)?;
     Some((Local.from_local_datetime(&d.at).earliest()?, d.kind, d.partial))

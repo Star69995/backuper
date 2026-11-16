@@ -14,7 +14,7 @@ import { Button, IconButton, Modal, PathText, Segmented, Select, Toggle } from "
 
 /** Permanent admin permission (elevation.rs): VSS and stuck deletes without Windows's prompt. */
 function AdminPermissionCard({ refresh }: { refresh: () => void }) {
-  const { status, busy, revoke } = useAdminPermission();
+  const { status, full, busy, grant, revoke } = useAdminPermission();
   // Read from Windows again: it may have been removed in the Task Scheduler since the app started.
   useEffect(() => {
     api.checkAdminPermission().then(refresh, () => {});
@@ -32,15 +32,23 @@ function AdminPermissionCard({ refresh }: { refresh: () => void }) {
         <div className="flex min-w-48 flex-1 flex-col gap-0.5">
           <span className="text-sm font-medium">הרשאה קבועה לגיבויים</span>
           <span className="text-xs text-muted">{text}</span>
+          {status === "on" && (
+            <span className="text-xs text-muted">
+              {full
+                ? "רמת הגישה: מלאה - גם מקרים חריגים מתבצעים בלי לבקש אישור."
+                : "רמת הגישה: מוגבלת - במקרה חריג (יעד גיבוי דרך קישור או כונן ממופה, קובץ שלחשבון שלכם אין הרשאה לקרוא) Windows עדיין תבקש אישור."}
+            </span>
+          )}
         </div>
         {status === "on" ? (
-          <Button
-            className="shrink-0"
-            disabled={busy}
-            onClick={() => revoke().then(refresh)}
-          >
-            {busy ? "ממתין לאישור של Windows..." : "ביטול ההרשאה הקבועה"}
-          </Button>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button disabled={busy} onClick={() => grant().then(refresh)}>
+              שינוי רמת הגישה
+            </Button>
+            <Button disabled={busy} onClick={() => revoke().then(refresh)}>
+              {busy ? "ממתין לאישור של Windows..." : "ביטול ההרשאה הקבועה"}
+            </Button>
+          </div>
         ) : status === "off" || status === "outdated" ? (
           <GrantButton size="md" onDone={refresh} />
         ) : null}

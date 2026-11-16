@@ -526,8 +526,10 @@ export function installDevMock() {
   let adminPermission = (new URLSearchParams(location.search).get("admin") ?? "off") as Snapshot["adminPermission"];
 
   // Fresh copies each time, like the real backend: the UI memoizes on array identity.
+  let adminFullAccess = false;
   const snapshot = (): Snapshot => ({
     adminPermission,
+    adminFullAccess,
     tasks: [...tasks],
     states: { ...states },
     settings,
@@ -748,9 +750,11 @@ export function installDevMock() {
         return null;
       case "grant_admin_permission":
         adminPermission = "on";
+        adminFullAccess = !!a.full;
         return null;
       case "revoke_admin_permission":
         adminPermission = "off";
+        adminFullAccess = false;
         return null;
       case "check_admin_permission":
         return adminPermission;

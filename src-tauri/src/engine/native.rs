@@ -334,6 +334,11 @@ impl Item {
     pub fn is_dir(&self) -> bool {
         self.attributes & ATTR_DIRECTORY != 0
     }
+
+    /// A link to another place (junction, symlink), not a cloud placeholder.
+    pub fn is_link(&self) -> bool {
+        self.entry().is_link()
+    }
 }
 
 /// The folder or file at `path` as a directory listing reports it (with its 8.3 name), or None.
@@ -718,12 +723,13 @@ pub fn copy_stream(from: &Path, to: &Path) -> io::Result<u64> {
 /// `fs::copy`, and when Windows refuses with an error `stream_retry` knows, the copy by streaming.
 /// The copy never keeps the read-only attribute (CopyFileEx hands it over), like robocopy's /A-:R.
 /// Copies a file out of a shadow copy (`vss.rs`): the destination is replaced, and like every copy
-/// here it doesn't keep the read-only attribute. The snapshot is read with the admin rights this
-/// runs with; everything about the destination (its folders, the file, its attributes) is done as
-/// the signed-in user (`acl::as_user`), so the copy can't write anywhere the user couldn't.
+/// here it doesn't keep the read-only attribute. Everything about the destination (its folders, the
+/// file, its attributes) is done as the signed-in user (`acl::as_user`), so the copy can't write
+/// anywhere the user couldn't. Started without Windows's prompt (`acl::is_bounded`) the snapshot is
+/// read as the user too: Windows checks the file's own permissions, whatever the path leads to.
 pub fn copy_from_snapshot(from: &Path, to: &Path) -> io::Result<u64> {
     use crate::acl::as_user;
-    let mut src = fs::File::open(from)?;
+    let mut src = if crate::acl::is_bounded() { as_user(|| fs::File::open(from))? } else { fs::File::open(from)? };
     let meta = src.metadata()?;
     let mut dst = as_user(|| {
         if let Some(parent) = to.parent() {

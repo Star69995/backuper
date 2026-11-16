@@ -59,7 +59,7 @@ export default function App() {
   ];
 
   return (
-    <AdminPermissionProvider value={snap.adminPermission}>
+    <AdminPermissionProvider value={{ status: snap.adminPermission, full: snap.adminFullAccess }}>
     <div className="flex h-full flex-col md:flex-row">
       <aside className="flex shrink-0 flex-row items-center gap-1 border-b border-line bg-panel px-2 py-2 md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-l md:px-3 md:py-4">
         <div className="me-2 flex items-center gap-2 px-1 md:me-0 md:mb-5 md:px-2">

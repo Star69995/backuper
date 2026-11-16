@@ -285,6 +285,8 @@ export interface Snapshot {
   cobianRenamed: Record<string, number>;
   /** Whether admin work (open files through VSS, stuck deletes) runs without Windows's prompt (model.rs `AdminPermission`). */
   adminPermission: AdminPermission;
+  /** The permission was given with full access: nothing is ever sent back to Windows's prompt. */
+  adminFullAccess: boolean;
 }
 
 /** unknown = not checked yet; outdated = given by an older version, approve again; notAdmin = a standard Windows account. */

@@ -7,7 +7,11 @@
 //! a Task Scheduler task starts it without one): that copy (`elevated_main`) makes the
 //! snapshot, copies the given files out of it, deletes the snapshot and reports per file.
 //! The files to copy travel on the command line (nobody can swap them after the prompt; through
-//! the task, in a request file in the user's temp folder); the copy refuses to write anywhere but into one of our dated backup folders.
+//! the task, in a request file in the user's temp folder). Any program of the user could start the
+//! admin copy with a request of its own, so it checks each file against the saved tasks
+//! (`may_copy`): only a file of a task's source, only into its place in that source's dated backup
+//! folder, never through a link in it. Started by the task (no prompt), it also reads the file
+//! out of the snapshot as the user, so Windows itself refuses what the user may not read.
 //!
 //! The snapshot is taken without the programs' cooperation (Outlook has no VSS writer), like
 //! the one a power cut would leave: a mail file is fine, a database that was in the middle of a
@@ -156,7 +160,7 @@ fn parse_results(text: &str, expected: usize) -> Result<Vec<Copied>, String> {
 
 pub(crate) fn powershell(script: &str) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
-    let out = Command::new("powershell.exe")
+    let out = Command::new(crate::engine::system_tool(r"WindowsPowerShell\v1.0\powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -212,45 +216,85 @@ fn split_drive(p: &Path) -> Option<(String, String)> {
     }
 }
 
-/// The admin copy only ever writes inside one of our dated backup folders.
-fn inside_backup_folder(dst: &Path) -> bool {
-    dst.ancestors().skip(1).any(|a| a.file_name().and_then(|n| n.to_str()).is_some_and(acl::is_backup_folder_name))
+/// The admin copy only copies what a backup would: a file of a task's source into its place in
+/// one of that source's dated backup folders (`acl::Allowed`), and never through a link inside the
+/// folder (a junction there would take the copy anywhere on the computer).
+fn may_copy(allowed: &acl::Allowed, p: &Pair) -> bool {
+    let Some(root) = allowed.copy_root(&p.src, &p.dst) else { return false };
+    !p.dst.ancestors().take_while(|a| a.starts_with(root)).any(|a| native::find(a).is_some_and(|i| i.is_link()))
+}
+
+/// A control path as `control_path` makes them. The admin copy writes its side files next to it,
+/// so it takes no other name.
+fn is_control_path(p: &Path) -> bool {
+    let re = regex::Regex::new(r"^backuper-vss-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$").unwrap();
+    p.is_absolute() && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| re.is_match(n))
+}
+
+/// Writes a side file of the admin copy: a new file only, never over (or through) an existing one.
+pub(crate) fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(text.as_bytes())
 }
 
 /// `args` = the control path, then source and destination of each file. Exit code 0 = a report was written.
 pub fn elevated_main(args: &[String]) -> i32 {
     let Some((control, rest)) = args.split_first() else { return 2 };
     let control = Path::new(control);
+    if !is_control_path(control) {
+        return 2;
+    }
     if side(control, "cancel").exists() {
         return 3;
     }
-    // The files beside the control path are written as the user: the path comes from the request.
-    let _ = acl::as_user(|| std::fs::write(side(control, "started"), ""));
-    acl::enable_backup_privileges();
+    // The files beside the control path are written as the user (the path comes from the request),
+    // and only as new files.
+    let started = side(control, "started");
+    if acl::as_user(|| write_new(&started, "")).is_err() {
+        return 2;
+    }
+    // Refused: the caller asks through Windows's prompt, and that copy starts from nothing.
+    let refuse = || {
+        let _ = acl::as_user(|| std::fs::remove_file(&started));
+        acl::REFUSED
+    };
+    acl::enable_privileges(&["SeRestorePrivilege", "SeBackupPrivilege"]);
+    let allowed = acl::Allowed::load();
+    // Silent, and no task list to check the request against: the user is asked instead.
+    if acl::is_from_task() && allowed.0.is_none() {
+        return refuse();
+    }
     let pairs: Vec<Pair> = rest.chunks_exact(2).map(|c| Pair { src: PathBuf::from(&c[0]), dst: PathBuf::from(&c[1]) }).collect();
-    let report = report_of(control, &pairs);
-    match acl::as_user(|| std::fs::write(side(control, "result"), report)) {
+    let (report, denied) = report_of(control, &pairs, &allowed);
+    // Silent, and Windows refused the user a file: nothing is forced, the user is asked instead.
+    if acl::is_bounded() && denied {
+        return refuse();
+    }
+    match acl::as_user(|| write_new(&side(control, "result"), &report)) {
         Ok(()) => 0,
-        Err(_) => acl::REFUSED,
+        Err(_) => refuse(),
     }
 }
 
-fn report_of(control: &Path, pairs: &[Pair]) -> String {
+/// The report, and whether Windows refused a file ("access denied").
+fn report_of(control: &Path, pairs: &[Pair], allowed: &acl::Allowed) -> (String, bool) {
     let mut shadows: Vec<(String, Result<Shadow, String>)> = Vec::new();
     let mut lines = Vec::new();
+    let mut denied = false;
     for p in pairs {
         if side(control, "cancel").exists() {
             lines.push("ERR\t\tהגיבוי בוטל".to_string());
             continue;
         }
-        let Some((root, rel)) = split_drive(&p.src).filter(|_| acl::plain_absolute(&p.src) && acl::plain_absolute(&p.dst) && inside_backup_folder(&p.dst)) else {
-            lines.push("ERR\t\tגיבוי דרך VSS אפשרי רק לקבצים בכונן מקומי, אל תיקיית גיבוי".to_string());
+        let Some((root, rel)) = split_drive(&p.src).filter(|_| acl::plain_absolute(&p.src) && acl::plain_absolute(&p.dst) && may_copy(allowed, p)) else {
+            lines.push("ERR\t\tגיבוי דרך VSS אפשרי רק לקבצים בכונן מקומי של תיקיית מקור במשימה שמורה, אל תיקיית הגיבוי שלה".to_string());
             continue;
         };
         // Started by the permanent permission, nothing is read that the user couldn't read
         // themselves: only a file another program holds open (what the shadow copy is for) is let through.
         if acl::is_bounded() && !acl::user_can_read(&p.src) {
             lines.push("ERR\t5\tאין לכם הרשאת קריאה לקובץ, ולכן הוא לא גובה בהרשאת מנהל".to_string());
+            denied = true;
             continue;
         }
         if !shadows.iter().any(|(r, _)| *r == root) {
@@ -263,7 +307,10 @@ fn report_of(control: &Path, pairs: &[Pair]) -> String {
                 let from = PathBuf::from(format!("{}\\{rel}", s.device.trim_end_matches('\\')));
                 match native::copy_from_snapshot(&from, &p.dst) {
                     Ok(n) => format!("OK\t{n}"),
-                    Err(e) => format!("ERR\t{}\t{}", e.raw_os_error().map(|c| c.to_string()).unwrap_or_default(), one_line(&e.to_string())),
+                    Err(e) => {
+                        denied |= e.raw_os_error() == Some(5);
+                        format!("ERR\t{}\t{}", e.raw_os_error().map(|c| c.to_string()).unwrap_or_default(), one_line(&e.to_string()))
+                    }
                 }
             }
         };
@@ -276,10 +323,10 @@ fn report_of(control: &Path, pairs: &[Pair]) -> String {
     }
     // Every snapshot failed: the first error says why, and the caller shows it once for the lot.
     if let Some((_, Err(e))) = shadows.first().filter(|_| shadows.iter().all(|(_, s)| s.is_err())) {
-        return format!("FATAL\t{}\n", one_line(e));
+        return (format!("FATAL\t{}\n", one_line(e)), denied);
     }
     lines.push("END".to_string());
-    lines.join("\n") + "\n"
+    (lines.join("\n") + "\n", denied)
 }
 
 fn one_line(s: &str) -> String {
@@ -398,11 +445,44 @@ mod tests {
 
     #[test]
     fn the_admin_copy_writes_only_into_backup_folders() {
-        assert!(inside_backup_folder(Path::new(r"K:\cobian\Docs\Documents 2026-11-12 02h34 אינקרמנטלי.partial\Outlook\a.pst")));
-        assert!(!inside_backup_folder(Path::new(r"C:\Windows\System32\a.dll")));
-        assert!(!inside_backup_folder(Path::new(r"K:\cobian\Docs\Documents 2026-11-12 02h34 אינקרמנטלי")));
-        // The name check reads text: a path that climbs out of the named folder is refused before it.
-        assert!(!acl::plain_absolute(Path::new(r"C:\x\Docs 2026-11-12 02h34 מלא\..\..\Windows\System32\a.dll")));
+        // Without a task list to check against (`acl::Allowed` has the tests with one).
+        let unknown = acl::Allowed(None);
+        let pair = |dst: &str| Pair { src: PathBuf::from(r"C:\Users\x\a.pst"), dst: PathBuf::from(dst) };
+        assert!(may_copy(&unknown, &pair(r"K:\cobian\Docs\Documents 2026-11-12 02h34 אינקרמנטלי.partial\Outlook\a.pst")));
+        assert!(!may_copy(&unknown, &pair(r"C:\Windows\System32\a.dll")));
+        assert!(!may_copy(&unknown, &pair(r"K:\cobian\Docs\Documents 2026-11-12 02h34 אינקרמנטלי")));
+    }
+
+    /// A junction inside the backup folder leads out of it: the admin copy doesn't write through it.
+    #[test]
+    fn the_admin_copy_never_writes_through_a_link() {
+        let root = std::env::temp_dir().join(format!("backuper-vss-test-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("Docs 2026-11-12 02h34 מלא.partial");
+        std::fs::create_dir_all(folder.join("plain")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        let mk = Command::new("cmd").args(["/c", "mklink", "/J"]).arg(folder.join("link")).arg(root.join("outside")).output().unwrap();
+        assert!(mk.status.success());
+        let unknown = acl::Allowed(None);
+        let pair = |rel: &str| Pair { src: PathBuf::from(r"C:\Users\x\a.pst"), dst: folder.join(rel) };
+        assert!(may_copy(&unknown, &pair(r"plain\a.pst")));
+        assert!(may_copy(&unknown, &pair(r"new\deeper\a.pst")));
+        assert!(!may_copy(&unknown, &pair(r"link\a.pst")));
+        assert!(!may_copy(&unknown, &pair(r"link\sub\a.pst")));
+        let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(folder.join("link")).output();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn side_files_go_only_next_to_a_control_path_of_ours() {
+        assert!(is_control_path(&control_path()));
+        assert!(!is_control_path(Path::new(r"C:\Windows\System32\drivers\x")));
+        assert!(!is_control_path(Path::new("backuper-vss-5f0c2a1e-3b4d-4c5e-8f60-718293a4b5c6")));
+        assert!(!is_control_path(Path::new(r"C:\Temp\backuper-vss-5f0c2a1e-3b4d-4c5e-8f60-718293a4b5c6.exe")));
+        // An existing file is never written over.
+        let p = control_path();
+        write_new(&side(&p, "started"), "").unwrap();
+        assert!(write_new(&side(&p, "started"), "x").is_err());
+        cleanup(&p);
     }
 
     #[test]

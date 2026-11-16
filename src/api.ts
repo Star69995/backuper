@@ -108,8 +108,8 @@ export const api = {
   dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
   /** The window went where a clicked notification pointed. */
   dismissNavigate: () => invoke<void>("dismiss_navigate"),
-  /** Permanent admin permission (Windows asks once); rejects with the reason. */
-  grantAdminPermission: () => invoke<void>("grant_admin_permission"),
+  /** Permanent admin permission (Windows asks once), `full` = with full access; also changes that choice later. Rejects with the reason. */
+  grantAdminPermission: (full: boolean) => invoke<void>("grant_admin_permission", { full }),
   revokeAdminPermission: () => invoke<void>("revoke_admin_permission"),
   /** Reads the permission's state from Windows again. */
   checkAdminPermission: () => invoke<AdminPermission>("check_admin_permission"),

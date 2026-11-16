@@ -18,11 +18,21 @@
 //! What the helper may do is bounded, because anything running as the user can start the task
 //! (`acl.rs`, "what the admin copy may do"): it does no more than the user could do themselves,
 //! except what only admin rights allow. Everything beside the request - the control files - is
-//! touched as the user (`acl::as_user`: the path comes from the request), the shadow-copy copy
-//! reads only files the user could read and writes as the user, a delete needs a real (not linked)
-//! backup folder the user may delete inside, and every request is noted in `audit.log` next to the
-//! helper (admin-only folder). A request outside the bounds exits with `acl::REFUSED` and the app
-//! asks Windows for permission instead, so an unusual case costs one prompt, never a silent action.
+//! touched as the user (`acl::as_user`: the path comes from the request) and only made new, the
+//! request is checked against the user's saved tasks like every admin copy (`acl::Allowed`; no
+//! readable task list = refused), the shadow-copy copy reads the snapshot and writes as the user,
+//! a delete needs a real (not linked, not reached through a link) backup folder the user may
+//! delete inside, held open while its permissions change (`acl::pin`), and every request is noted
+//! in `audit.log` next to the helper (admin-only folder). A request outside the bounds exits with
+//! `acl::REFUSED` and the app asks Windows for permission instead, so an unusual case costs one
+//! prompt, never a silent action.
+//!
+//! Full access (`grant(true)`, the user's choice in the same one prompt): the helper is not bounded
+//! and never refuses for the reasons above - it does what an admin copy approved through
+//! Windows's prompt does (the task-list check and the link checks stay), so no backup ever waits
+//! for a prompt. The choice is a marker file beside the helper (`FULL_ACCESS_FILE`, admin-only
+//! folder): nothing running as the user can switch it on. Its price: a program running as the
+//! user can edit the task list and through it read any file of the computer.
 //!
 //! `HELPER_VERSION` = what the helper understands; a helper of another version (`version.txt`
 //! beside it) counts as `Outdated` until the user approves again, which copies this version.
@@ -31,6 +41,7 @@ use crate::acl;
 use crate::model::AdminPermission;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -45,14 +56,23 @@ pub const UNINSTALL_SWITCH: &str = "--admin-uninstall";
 /// A request that only checks the helper really runs as admin (exit code 0).
 const PING: &str = "--admin-ping";
 /// Raise when what the helper understands changes (switches, request format).
-const HELPER_VERSION: &str = "2";
+const HELPER_VERSION: &str = "3";
 /// How long a task that was started may take to pick its request up.
 const START_WAIT: Duration = Duration::from_secs(30);
 /// The helper refreshes `.alive` every few seconds; this long without = it is gone.
 const ALIVE_WAIT: Duration = Duration::from_secs(30);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Beside the helper when the user gave full access (see the module docs).
+const FULL_ACCESS_FILE: &str = "full-access";
+
 static STATUS: Mutex<AdminPermission> = Mutex::new(AdminPermission::Unknown);
+static FULL_ACCESS: AtomicBool = AtomicBool::new(false);
+
+/// Whether the permission was given with full access (as of the last `refresh`).
+pub fn full_access() -> bool {
+    FULL_ACCESS.load(Ordering::SeqCst)
+}
 
 pub const NOT_ADMIN: &str = "חשבון Windows שלכם הוא משתמש רגיל, לא מנהל. הרשאה קבועה אפשרית רק בחשבון מנהל - בחשבון רגיל Windows מבקשת סיסמת מנהל בכל פעם";
 
@@ -64,6 +84,8 @@ pub fn cached() -> AdminPermission {
 /// Reads the state from Windows (the task and the helper; a fraction of a second) and remembers it.
 pub fn refresh() -> AdminPermission {
     let status = check();
+    let full = status == AdminPermission::On && acl::user_sid_string().is_some_and(|sid| helper_dir(&sid).join(FULL_ACCESS_FILE).is_file());
+    FULL_ACCESS.store(full, Ordering::SeqCst);
     *STATUS.lock().unwrap() = status;
     status
 }
@@ -91,7 +113,7 @@ fn hidden(cmd: &mut Command) -> &mut Command {
 
 /// The task's XML as Windows has it, None = no such task (or not readable).
 fn query_task(sid: &str) -> Option<String> {
-    let out = hidden(Command::new("schtasks.exe").args(["/query", "/tn", &task_path(sid), "/xml"])).output().ok()?;
+    let out = hidden(Command::new(crate::engine::system_tool("schtasks.exe")).args(["/query", "/tn", &task_path(sid), "/xml"])).output().ok()?;
     out.status.success().then(|| decode(&out.stdout))
 }
 
@@ -145,7 +167,7 @@ fn side(control: &Path, ext: &str) -> PathBuf {
 }
 
 fn cleanup(control: &Path) {
-    for ext in ["req", "taken", "alive", "exit", "result", "xml"] {
+    for ext in ["req", "taken", "alive", "exit", "exit.tmp", "result"] {
         let _ = std::fs::remove_file(side(control, ext));
     }
 }
@@ -285,25 +307,18 @@ fn start_task(sid: &str, control: &Path) -> Result<(), String> {
         q(&task_name(sid)),
         q(&control.to_string_lossy()),
     );
-    let out = hidden(Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script]))
-        .output()
-        .map_err(|e| format!("לא ניתן להפעיל את PowerShell: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
+    crate::vss::powershell(&script).map(|_| ())
 }
 
 /// Gives the app permanent permission: one Windows prompt, then a check that the task runs as
-/// admin without one. Blocks while the prompt is open.
-pub fn grant() -> Result<(), String> {
+/// admin without one. `full` = full access (see the module docs). Blocks while the prompt is open.
+pub fn grant(full: bool) -> Result<(), String> {
     if !acl::is_admin_account() {
         refresh();
         return Err(NOT_ADMIN.into());
     }
     let sid = acl::user_sid_string().ok_or("לא ניתן לזהות את חשבון Windows")?;
-    admin_step(INSTALL_SWITCH, &sid).inspect_err(|_| {
+    admin_step(INSTALL_SWITCH, &sid, Some(if full { "full" } else { "bounded" })).inspect_err(|_| {
         refresh();
     })?;
     // Proof: a request through the task, no prompt, comes back as admin.
@@ -319,16 +334,17 @@ pub fn grant() -> Result<(), String> {
 /// Takes the permission back (Windows asks: removing an admin task needs admin too).
 pub fn revoke() -> Result<(), String> {
     let sid = acl::user_sid_string().ok_or("לא ניתן לזהות את חשבון Windows")?;
-    let result = admin_step(REMOVE_SWITCH, &sid);
+    let result = admin_step(REMOVE_SWITCH, &sid, None);
     refresh();
     result
 }
 
 /// Runs `switch` as admin through Windows's prompt (never through the task: installing goes
 /// first, and removing must work even when the task is broken) and reads its report.
-fn admin_step(switch: &str, sid: &str) -> Result<(), String> {
+fn admin_step(switch: &str, sid: &str, option: Option<&str>) -> Result<(), String> {
     let control = control_path();
-    let args = [switch.to_string(), control.to_string_lossy().to_string(), sid.to_string()];
+    let mut args = vec![switch.to_string(), control.to_string_lossy().to_string(), sid.to_string()];
+    args.extend(option.map(str::to_string));
     let ran = acl::run_elevated(&args);
     let report = std::fs::read_to_string(side(&control, "result")).unwrap_or_default();
     cleanup(&control);
@@ -344,7 +360,7 @@ fn admin_step(switch: &str, sid: &str) -> Result<(), String> {
 pub fn uninstall_main() -> i32 {
     if let Some(sid) = acl::user_sid_string() {
         if query_task(&sid).is_some() || helper_dir(&sid).exists() {
-            let _ = admin_step(REMOVE_SWITCH, &sid);
+            let _ = admin_step(REMOVE_SWITCH, &sid, None);
         }
     }
     0
@@ -357,23 +373,27 @@ fn report(control: &Path, result: Result<(), String>) -> i32 {
         Ok(()) => ("OK".to_string(), 0),
         Err(e) => (format!("ERR\t{}", e.replace(['\r', '\n', '\t'], " ")), 1),
     };
-    let _ = std::fs::write(side(control, "result"), text);
+    // As the user (the path comes from the command line), and only as a new file.
+    let _ = acl::as_user(|| crate::vss::write_new(&side(control, "result"), &text));
     code
 }
 
-/// `args` = control path, user SID. Copies this exe beside the helper's version file in Program
-/// Files and registers the task.
+/// `args` = control path, user SID, "full" | "bounded". Copies this exe beside the helper's
+/// version file in Program Files and registers the task.
 pub fn install_main(args: &[String]) -> i32 {
-    let [control, sid] = args else { return 2 };
+    let [control, sid, access] = args else { return 2 };
     let control = Path::new(control);
-    report(control, install(control, sid))
+    if !valid_control(control) {
+        return 2;
+    }
+    report(control, install(sid, access == "full"))
 }
 
 fn valid_sid(sid: &str) -> bool {
     sid.starts_with("S-1-") && sid.chars().all(|c| c.is_ascii_digit() || c == '-' || c == 'S')
 }
 
-fn install(control: &Path, sid: &str) -> Result<(), String> {
+fn install(sid: &str, full: bool) -> Result<(), String> {
     if !acl::is_elevated() {
         return Err("הפעולה לא קיבלה הרשאת מנהל".into());
     }
@@ -393,8 +413,16 @@ fn install(control: &Path, sid: &str) -> Result<(), String> {
     }
     std::fs::copy(&me, &exe).map_err(|e| format!("לא ניתן להעתיק את התוכנה אל {}: {e}", dir.display()))?;
     std::fs::write(dir.join("version.txt"), HELPER_VERSION).map_err(|e| e.to_string())?;
+    let marker = dir.join(FULL_ACCESS_FILE);
+    if full {
+        std::fs::write(&marker, "").map_err(|e| e.to_string())?;
+    } else if marker.exists() {
+        std::fs::remove_file(&marker).map_err(|e| e.to_string())?;
+    }
     // Through the Task Scheduler's own API (RegisterTask), which takes the access rules as they are.
-    let xml_path = side(control, "xml");
+    // The XML waits beside the helper (admin-only folder): nothing running as the user can change
+    // what gets registered.
+    let xml_path = dir.join("task.xml");
     let xml = task_xml(sid, &exe);
     let mut bytes = vec![0xFF, 0xFE];
     bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
@@ -419,6 +447,9 @@ fn install(control: &Path, sid: &str) -> Result<(), String> {
 pub fn remove_main(args: &[String]) -> i32 {
     let [control, sid] = args else { return 2 };
     let control = Path::new(control);
+    if !valid_control(control) {
+        return 2;
+    }
     report(control, remove(sid))
 }
 
@@ -431,7 +462,7 @@ fn remove(sid: &str) -> Result<(), String> {
     }
     let mut problem = None;
     if query_task(sid).is_some() {
-        let out = hidden(Command::new("schtasks.exe").args(["/delete", "/tn", &task_path(sid), "/f"])).output();
+        let out = hidden(Command::new(crate::engine::system_tool("schtasks.exe")).args(["/delete", "/tn", &task_path(sid), "/f"])).output();
         if !out.as_ref().is_ok_and(|o| o.status.success()) {
             problem = Some("מתזמן המשימות של Windows לא מחק את ההרשאה".to_string());
         }
@@ -462,11 +493,11 @@ fn delete_at_restart(path: &Path) {
     unsafe { MoveFileExW(w.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
 }
 
-/// What a control path must look like: ours (`control_path`), in a folder that is not a link-following
-/// trick. Anything else is not a request of the app.
+/// What a control path must look like: as `control_path` makes them, with nothing in it that
+/// moves it somewhere else. The admin copy writes its side files next to it, so it takes no other name.
 fn valid_control(control: &Path) -> bool {
-    acl::plain_absolute(control)
-        && control.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(CONTROL_PREFIX) && n.len() > CONTROL_PREFIX.len())
+    let re = regex::Regex::new(&format!("^{CONTROL_PREFIX}[0-9a-f]{{8}}(-[0-9a-f]{{4}}){{3}}-[0-9a-f]{{12}}$")).unwrap();
+    acl::plain_absolute(control) && control.file_name().and_then(|n| n.to_str()).is_some_and(|n| re.is_match(n))
 }
 
 /// One line per request in `audit.log` beside the helper, for whoever wonders what ran as admin.
@@ -487,8 +518,11 @@ fn audit(request: &[String], outcome: &str) {
 
 /// The task: `args` = the control path. Takes the request, runs it, writes the exit code.
 pub fn task_main(args: &[String]) -> i32 {
-    // Silent, so bounded (see the module docs). Nothing below trusts a path of the request.
-    acl::set_bounded(true);
+    // Silent, so bounded (see the module docs), unless the user gave full access: the marker sits
+    // beside this exe, in the admin-only folder. Nothing below trusts a path of the request.
+    acl::set_from_task();
+    let full = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(FULL_ACCESS_FILE).is_file())).unwrap_or(false);
+    acl::set_bounded(!full);
     let Some(control) = args.first() else { return 2 };
     let control = PathBuf::from(control);
     if !valid_control(&control) {
@@ -498,37 +532,38 @@ pub fn task_main(args: &[String]) -> i32 {
     let alive = side(&control, "alive");
     // The control files: touched as the user only. A request to touch someone else's files with the
     // admin's rights (a link in the path, a path into a protected folder) fails here.
-    let request: Vec<String> = match acl::as_user(|| {
+    // The side files are new files only, never written over (or through) something already there.
+    let (request, mut beating): (Vec<String>, std::fs::File) = match acl::as_user(|| {
         // Taken back by the app (it gave up waiting), or someone else's.
         std::fs::rename(side(&control, "req"), &taken)?;
         let text = std::fs::read_to_string(&taken)?;
-        std::fs::write(&alive, "0")?;
-        Ok(serde_json::from_str(&text).unwrap_or_default())
+        let beating = std::fs::OpenOptions::new().write(true).create_new(true).open(&alive)?;
+        Ok((serde_json::from_str(&text).unwrap_or_default(), beating))
     }) {
         Ok(r) => r,
         Err(_) => return 2,
     };
-    {
-        let alive = alive.clone();
-        // The content changes every time: rewriting an empty file with nothing leaves its modified time alone.
-        std::thread::spawn(move || {
-            for beat in 1u64.. {
-                std::thread::sleep(Duration::from_secs(3));
-                let _ = acl::as_user(|| std::fs::write(&alive, beat.to_string()));
-            }
-        });
-    }
+    // The heartbeat goes through the handle opened above, not through the name again.
+    std::thread::spawn(move || {
+        use std::io::{Seek, Write};
+        for beat in 0u64.. {
+            let _ = beating.seek(std::io::SeekFrom::Start(0)).and_then(|_| beating.write_all(beat.to_string().as_bytes()));
+            let _ = beating.set_modified(SystemTime::now());
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    });
     let code = match request.first().map(String::as_str) {
         Some(crate::vss::SWITCH) => crate::vss::elevated_main(&request[1..]),
         Some(acl::DELETE_SWITCH) => acl::elevated_main(&request[1..]),
         Some(PING) => i32::from(!acl::is_elevated()),
         _ => 2,
     };
-    audit(&request, &if code == acl::REFUSED { "refused".to_string() } else { format!("exit {code}") });
+    let access = if full { "full access" } else { "bounded" };
+    audit(&request, &if code == acl::REFUSED { format!("refused ({access})") } else { format!("exit {code} ({access})") });
     let exit = side(&control, "exit");
     let tmp = side(&control, "exit.tmp");
     let _ = acl::as_user(|| {
-        std::fs::write(&tmp, code.to_string())?;
+        crate::vss::write_new(&tmp, &code.to_string())?;
         std::fs::rename(&tmp, &exit)?;
         let _ = std::fs::remove_file(&taken);
         Ok(())
@@ -551,7 +586,9 @@ mod tests {
 
     #[test]
     fn only_the_apps_own_control_paths_are_served() {
-        assert!(valid_control(Path::new(r"C:\Users\a\AppData\Local\Temp\backuper-admin-1234")));
+        assert!(valid_control(&control_path()));
+        assert!(!valid_control(Path::new(r"C:\Users\a\AppData\Local\Temp\backuper-admin-1234")));
+        assert!(!valid_control(Path::new(r"C:\Temp\backuper-admin-5f0c2a1e-3b4d-4c5e-8f60-718293a4b5c6.exe")));
         assert!(!valid_control(Path::new(r"C:\Windows\System32\drivers\etc\hosts")));
         assert!(!valid_control(Path::new(r"C:\Users\a\Temp\..\..\Windows\backuper-admin-1")));
         assert!(!valid_control(Path::new(r"Temp\backuper-admin-1")));

@@ -35,6 +35,8 @@ pub struct Snapshot {
     cobian_renamed: HashMap<String, usize>,
     /// Whether admin work (VSS, stuck deletes) runs without Windows's prompt (`elevation`).
     admin_permission: crate::model::AdminPermission,
+    /// The permission was given with full access: no request is ever refused back to Windows's prompt.
+    admin_full_access: bool,
 }
 
 #[tauri::command]
@@ -56,6 +58,7 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
             m
         }),
         admin_permission: crate::elevation::cached(),
+        admin_full_access: crate::elevation::full_access(),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -65,11 +68,12 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
     }
 }
 
-/// Gives the app permanent admin permission (Windows asks once). Blocks while the prompt is open.
+/// Gives the app permanent admin permission (Windows asks once); `full` = with full access (also
+/// how the choice is changed later). Blocks while the prompt is open.
 #[tauri::command]
-pub async fn grant_admin_permission(core: CoreState<'_>) -> Result<(), String> {
+pub async fn grant_admin_permission(core: CoreState<'_>, full: bool) -> Result<(), String> {
     let core = core.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(crate::elevation::grant).await.map_err(|e| e.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || crate::elevation::grant(full)).await.map_err(|e| e.to_string())?;
     core.changed();
     result
 }
@@ -509,7 +513,11 @@ pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Ve
 
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    // Explorer runs a file it is handed, and a quote would end the argument: folders only.
+    if path.contains('"') || !std::path::Path::new(&path).is_dir() {
+        return Err("התיקייה לא נמצאה - ייתכן שהכונן לא מחובר או שהיא נמחקה".into());
+    }
+    std::process::Command::new(crate::engine::explorer())
         .raw_arg(format!("\"{path}\""))
         .spawn()
         .map(|_| ())
