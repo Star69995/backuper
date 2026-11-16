@@ -6,6 +6,7 @@ import { cacheFolderIn } from "../lib/cacheFolders";
 import { flatRules } from "../lib/filterRules";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
 import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
+import { AdminPermissionOffer, useAdminPermission } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
 import { useResumeTask } from "./resumeTask";
@@ -417,6 +418,7 @@ function SourceCard({
   /** The run was paused and can be continued ("מושהה" instead of "הופסק"). */
   resumable: boolean;
 }) {
+  const admin = useAdminPermission().status;
   const { toast } = useFeedback();
   const openTarget = () =>
     openBackupFolder(src.targetFolder!).catch(() => toast({ tone: "bad", title: "התיקייה כבר לא קיימת" }));
@@ -504,9 +506,13 @@ function SourceCard({
                   </Button>
                 </div>
                 <p className="text-xs leading-relaxed text-muted">
-                  VSS הוא תצלום מצב של הכונן, שממנו Windows מאפשרת לקרוא גם קבצים פתוחים. היא תבקש אישור מנהל.
+                  VSS הוא תצלום מצב של הכונן, שממנו Windows מאפשרת לקרוא גם קבצים פתוחים.
+                  {admin === "on" ? " זה רץ בהרשאה הקבועה שניתנה, בלי לשאול." : " היא תבקש אישור מנהל."}
                   {openFiles.vssOn && " הגיבוי האוטומטי דרך VSS כבר מופעל במשימה הזאת."}
                 </p>
+                <AdminPermissionOffer>
+                  עם הרשאה קבועה Windows לא תבקש אישור בכל פעם, וגיבוי מתוזמן יגבה את הקבצים הפתוחים גם כשאף אחד לא ליד המחשב.
+                </AdminPermissionOffer>
               </div>
             ) : null
           }

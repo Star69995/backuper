@@ -33,6 +33,10 @@ pub struct Snapshot {
     update: crate::model::UpdateStatus,
     /// Per task: how many of its folders a Cobian takeover renamed (recorded, can be put back).
     cobian_renamed: HashMap<String, usize>,
+    /// Whether admin work (VSS, stuck deletes) runs without Windows's prompt (`elevation`).
+    admin_permission: crate::model::AdminPermission,
+    /// The permission was given with full access: no request is ever refused back to Windows's prompt.
+    admin_full_access: bool,
 }
 
 #[tauri::command]
@@ -53,6 +57,8 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
             *m.entry(r.task_id.clone()).or_insert(0) += 1;
             m
         }),
+        admin_permission: crate::elevation::cached(),
+        admin_full_access: crate::elevation::full_access(),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -62,8 +68,41 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
     }
 }
 
+/// Gives the app permanent admin permission (Windows asks once); `full` = with full access (also
+/// how the choice is changed later). Blocks while the prompt is open.
+#[tauri::command]
+pub async fn grant_admin_permission(core: CoreState<'_>, full: bool) -> Result<(), String> {
+    let core = core.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || crate::elevation::grant(full)).await.map_err(|e| e.to_string())?;
+    core.changed();
+    result
+}
+
+/// Takes the permanent admin permission back (Windows asks).
+#[tauri::command]
+pub async fn revoke_admin_permission(core: CoreState<'_>) -> Result<(), String> {
+    let core = core.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(crate::elevation::revoke).await.map_err(|e| e.to_string())?;
+    core.changed();
+    result
+}
+
+/// Reads the permission's state from Windows again (the settings page, on focus: it may have been
+/// removed in the Task Scheduler).
+#[tauri::command]
+pub async fn check_admin_permission(core: CoreState<'_>) -> Result<crate::model::AdminPermission, String> {
+    let core = core.inner().clone();
+    let before = crate::elevation::cached();
+    let now = tauri::async_runtime::spawn_blocking(crate::elevation::refresh).await.map_err(|e| e.to_string())?;
+    if now != before {
+        core.changed();
+    }
+    Ok(now)
+}
+
 fn prepare(mut t: Task) -> Result<Task, String> {
     t.migrate();
+    t.fix_folder_file_rules();
     t.settle_retention();
     // A full schedule only makes sense next to incremental runs (combined mode).
     if t.mode == BackupMode::Full {
@@ -264,8 +303,8 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
 
 /// Answers the "drive connected" question: queues `run`, drops the rest of `ids`.
 #[tauri::command]
-pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>) {
-    core.answer_drive_prompts(&ids, &run);
+pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>, remember: bool) {
+    core.answer_drive_prompts(&ids, &run, remember);
 }
 
 #[tauri::command]
@@ -475,7 +514,11 @@ pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Ve
 
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    // Explorer runs a file it is handed, and a quote would end the argument: folders only.
+    if path.contains('"') || !std::path::Path::new(&path).is_dir() {
+        return Err("התיקייה לא נמצאה - ייתכן שהכונן לא מחובר או שהיא נמחקה".into());
+    }
+    std::process::Command::new(crate::engine::explorer())
         .raw_arg(format!("\"{path}\""))
         .spawn()
         .map(|_| ())

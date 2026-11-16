@@ -206,6 +206,12 @@ impl Core {
         // Sources renamed while their drive wasn't connected, if it is now.
         let me = self.clone();
         std::thread::spawn(move || me.rename_backups_when_idle(None));
+        // Whether admin work needs Windows's prompt (`elevation`): asks Windows, takes a moment.
+        let me = self.clone();
+        std::thread::spawn(move || {
+            crate::elevation::refresh();
+            me.changed();
+        });
     }
 
     /// Tells the UI to refetch its snapshot.
@@ -279,8 +285,21 @@ impl Core {
     }
 
     /// The user's answer to the drive prompt: `run` gets queued, all of `ids` stop waiting.
-    pub fn answer_drive_prompts(&self, ids: &[String], run: &[String]) {
+    /// `remember`: don't ask about these tasks again - the ones in `run` back up on their own the
+    /// next time their drives connect, the others do nothing.
+    pub fn answer_drive_prompts(&self, ids: &[String], run: &[String], remember: bool) {
         self.drive_prompts.lock().unwrap().retain(|id| !ids.contains(id));
+        if remember {
+            let mut s = self.store.lock().unwrap();
+            let mut changed = false;
+            for t in s.tasks.iter_mut().filter(|t| ids.contains(&t.id) && t.on_drive_connect == DriveAction::Ask) {
+                t.on_drive_connect = if run.contains(&t.id) { DriveAction::Run } else { DriveAction::Off };
+                changed = true;
+            }
+            if changed {
+                s.save_tasks();
+            }
+        }
         for id in run {
             self.enqueue(Job {
                 task_id: id.clone(),
@@ -304,6 +323,13 @@ impl Core {
 
     /// `blocking`: the running backup waits for the user's answer (`await_delete_problems`).
     fn report_problem(&self, task: &Task, path: &std::path::Path, e: &std::io::Error, blocking: bool) {
+        // With permanent admin permission, try as admin first, unasked (nobody may be at the computer).
+        if crate::elevation::cached() == crate::model::AdminPermission::On {
+            let p = path.to_string_lossy().to_string();
+            if crate::acl::delete_elevated(std::slice::from_ref(&p)).is_ok() && !path.exists() {
+                return;
+            }
+        }
         let problem = DeleteProblem {
             blocking,
             wait_until: None,
@@ -389,6 +415,15 @@ impl Core {
             .map(|p| p.path.clone())
             .collect();
         let mut failures: Vec<(String, std::io::Error)> = Vec::new();
+        if elevated {
+            // The admin copy deletes only backup folders of saved tasks; say so here, where it can be explained.
+            let allowed = crate::acl::Allowed::of(&self.store.lock().unwrap().tasks);
+            if let Some(p) = known.iter().find(|p| !allowed.folder(Path::new(p))) {
+                return Err(format!(
+                    "התיקייה {p} כבר לא שייכת לאף משימה שמורה (המשימה נמחקה, או שהיעד או שם תיקיית הגיבוי שלה השתנו), ולכן היא לא נמחקת בהרשאת מנהל. אפשר למחוק אותה ידנית בסייר הקבצים."
+                ));
+            }
+        }
         let result = if elevated {
             crate::acl::delete_elevated(&known)
         } else {
@@ -428,6 +463,10 @@ impl Core {
         let folder = PathBuf::from(src.target_folder.clone().ok_or("לריצה הזאת אין תיקיית גיבוי")?);
         if !folder.is_dir() {
             return Err("תיקיית הגיבוי של הריצה הזאת כבר לא קיימת".into());
+        }
+        // The admin copy writes only into backup folders of saved tasks' sources (`acl::Allowed`).
+        if !crate::acl::Allowed::of(&self.store.lock().unwrap().tasks).backup_of(Path::new(&src.source), &folder) {
+            return Err("המשימה של הריצה הזאת נמחקה, או שהמקור, היעד או שם תיקיית הגיבוי שלה השתנו מאז, ולכן אי אפשר להוסיף את הקבצים הפתוחים לתיקיית הגיבוי של הריצה. הריצו את המשימה שוב - הקבצים הפתוחים יגובו בריצה החדשה.".into());
         }
         let mut errors = src.errors.clone();
         let never = AtomicBool::new(false);
@@ -755,7 +794,7 @@ impl Core {
                         }
                         EngineEvent::Phase(p) => {
                             progress.phase = p.into();
-                            if p == "vss" {
+                            if p == "vss" && crate::elevation::cached() != crate::model::AdminPermission::On {
                                 // Windows is about to ask for admin permission, possibly while the window is hidden
                                 // in the tray: say so now, not when the run is over. A scheduled run (nobody may be
                                 // there) only toasts; the window stays hidden.

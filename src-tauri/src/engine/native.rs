@@ -250,15 +250,19 @@ impl Rules {
             max_size: f.max_size,
             min_modified: f.max_age_days.map(|d| now.saturating_sub(d as u64 * 86_400 * TICKS_PER_SEC)),
             skip_attributes: if f.exclude_hidden { ATTR_HIDDEN } else { 0 } | if f.exclude_system { ATTR_SYSTEM } else { 0 },
-            short_names: !(f.include_files.is_empty() && f.exclude_files.is_empty() && f.exclude_dirs.is_empty()),
+            // Path rules are matched on the long path only.
+            short_names: !(f.include_files.is_empty() && file_names.is_empty() && f.exclude_dirs.is_empty()),
         }
     }
 
+    /// A file rule by path (`exclude_file_paths`) skips a folder at that path too: older versions reported an
+    /// unreadable folder without a trailing backslash, so "skip next time" saved it as a file rule. robocopy
+    /// gets those paths in /XD as well (`robocopy::args`).
     fn skip_dir(&self, e: &Entry, rel: &str) -> bool {
         e.matches_any(&self.exclude_dir_names)
-            || (!self.exclude_dir_paths.is_empty() && {
+            || ((!self.exclude_dir_paths.is_empty() || !self.exclude_file_paths.is_empty()) && {
                 let full: Vec<u16> = format!("{}\\{rel}", self.base).encode_utf16().collect();
-                self.exclude_dir_paths.iter().any(|p| p.matches(&full))
+                self.exclude_dir_paths.iter().chain(&self.exclude_file_paths).any(|p| p.matches(&full))
             })
     }
 
@@ -333,6 +337,11 @@ impl Item {
 
     pub fn is_dir(&self) -> bool {
         self.attributes & ATTR_DIRECTORY != 0
+    }
+
+    /// A link to another place (junction, symlink), not a cloud placeholder.
+    pub fn is_link(&self) -> bool {
+        self.entry().is_link()
     }
 }
 
@@ -515,7 +524,8 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
                 out.failed_dirs += 1;
                 if out.errors.len() < MAX_ERRORS {
                     out.errors.push(FileError {
-                        path: format!("{}\\{rel}", rules.base),
+                        // The trailing backslash marks a folder (the UI then offers to skip the folder).
+                        path: format!("{}\\{rel}\\", rules.base),
                         code: e.raw_os_error().map(|c| c as u32),
                         message: e.to_string(),
                         debug: String::new(),
@@ -533,6 +543,7 @@ pub fn list_files(root: &Path, filters: &Filters, cancel: &AtomicBool) -> Result
             if e.attributes & ATTR_DIRECTORY != 0 {
                 if rules.skip_dir(&e, &child) {
                     out.wild_dirs.extend(rules.wild_match(&rules.exclude_dir_wild, &child));
+                    out.wild_dirs.extend(rules.wild_match(&rules.exclude_file_wild, &child));
                     continue;
                 }
                 match rules.regex_skips_dir(&e) {
@@ -718,16 +729,45 @@ pub fn copy_stream(from: &Path, to: &Path) -> io::Result<u64> {
 /// `fs::copy`, and when Windows refuses with an error `stream_retry` knows, the copy by streaming.
 /// The copy never keeps the read-only attribute (CopyFileEx hands it over), like robocopy's /A-:R.
 /// Copies a file out of a shadow copy (`vss.rs`): the destination is replaced, and like every copy
-/// here it doesn't keep the read-only attribute.
+/// here it doesn't keep the read-only attribute. Everything about the destination (its folders, the
+/// file, its attributes) is done as the signed-in user (`acl::as_user`), so the copy can't write
+/// anywhere the user couldn't. Started without Windows's prompt (`acl::is_bounded`) the snapshot is
+/// read as the user too: Windows checks the file's own permissions, whatever the path leads to.
 pub fn copy_from_snapshot(from: &Path, to: &Path) -> io::Result<u64> {
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
+    use crate::acl::as_user;
+    let mut src = if crate::acl::is_bounded() { as_user(|| fs::File::open(from))? } else { fs::File::open(from)? };
+    let meta = src.metadata()?;
+    let mut dst = as_user(|| {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        // An older, read-only copy (a resumed folder) can't be overwritten.
+        drop_readonly(to);
+        fs::File::create(to)
+    })?;
+    let copied = io::copy(&mut src, &mut dst).and_then(|n| {
+        if let Ok(m) = meta.modified() {
+            dst.set_modified(m)?;
+        }
+        Ok(n)
+    });
+    drop(dst);
+    match copied {
+        Ok(n) => {
+            use std::os::windows::fs::MetadataExt;
+            // Hidden, system, archive; never read-only (a backup copy must stay deletable).
+            let attrs = meta.file_attributes() & 0x26;
+            let _ = as_user(|| {
+                crate::tasklist::set_attributes(to, if attrs == 0 { crate::tasklist::NORMAL } else { attrs });
+                Ok(())
+            });
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = as_user(|| fs::remove_file(to));
+            Err(e)
+        }
     }
-    // An older, read-only copy (a resumed folder) can't be overwritten.
-    drop_readonly(to);
-    let n = fs::copy(from, to)?;
-    drop_readonly(to);
-    Ok(n)
 }
 
 fn copy_file(from: &Path, to: &Path, debug: &mut Vec<String>) -> io::Result<u64> {
@@ -880,6 +920,20 @@ extern "system" {
         fs_len: u32,
     ) -> i32;
     fn GetDriveTypeW(root: *const u16) -> u32;
+}
+
+/// A path on a drive of this computer (a lettered, non-network drive). Asking a network path anything
+/// can stall for many seconds while the server is away, so code that only wants to peek at the disk
+/// (the load-time rule migration) skips what this refuses.
+pub fn is_local_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let [d, b':', ..] = s.as_bytes() else { return false };
+    if !d.is_ascii_alphabetic() {
+        return false;
+    }
+    let root: Vec<u16> = format!("{}:\\", *d as char).encode_utf16().chain(Some(0)).collect();
+    // 2 removable, 3 fixed, 5 optical, 6 ram disk; not 0/1 (unknown, no such root) and not 4 (network).
+    matches!(unsafe { GetDriveTypeW(root.as_ptr()) }, 2 | 3 | 5 | 6)
 }
 
 /// The drive of `path` as "D: NTFS, fixed disk" (for the debug text of a run).
@@ -1143,6 +1197,8 @@ mod tests {
             Filters { exclude_files: v(&[&src.join("sub").join("s.htm").display().to_string(), "x.txt"]), ..Default::default() },
             Filters { exclude_dirs: v(&[&format!("{}\\", src.join("sub").join("deep").display()), "hid"]), ..Default::default() },
             Filters { exclude_dirs: v(&[r"sub\deep"]), ..Default::default() },
+            // A file rule by path that names a folder (saved from an unreadable-folder error) skips the folder.
+            Filters { exclude_files: v(&[&src.join("sub").join("deep").display().to_string()]), ..Default::default() },
             Filters { exclude_hidden: true, exclude_system: true, ..Default::default() },
             Filters { max_size: Some(4000), max_age_days: Some(2), ..Default::default() },
         ];

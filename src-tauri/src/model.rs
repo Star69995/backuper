@@ -256,6 +256,38 @@ impl Task {
         }
     }
 
+    /// A "file" rule whose full path is a folder on disk becomes a folder rule. Older versions
+    /// reported an unreadable source folder without a trailing backslash, so "skip next time" in a
+    /// run's details saved it as a file rule (the engine skips such a folder anyway - see
+    /// `native::Rules::skip_dir` - but the editor showed it as a file).
+    pub fn fix_folder_file_rules(&mut self) {
+        fn fix(rules: &mut [FilterRule]) {
+            for r in rules {
+                let folder = match r {
+                    FilterRule::Group { rules, .. } => {
+                        fix(rules);
+                        None
+                    }
+                    FilterRule::File { value } => {
+                        let v = value.trim();
+                        let full = v.len() > 2 && (v.as_bytes()[1] == b':' || v.starts_with(r"\\"));
+                        // Only a drive of this computer is asked: a network path can stall for seconds
+                        // (this runs at load and at every save); such a rule stays a file rule, which
+                        // the engine treats the same.
+                        let path = std::path::Path::new(v);
+                        (full && crate::engine::native::is_local_path(path) && path.is_dir())
+                            .then(|| v.trim_end_matches('\\').to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(value) = folder {
+                    *r = FilterRule::Folder { value };
+                }
+            }
+        }
+        fix(&mut self.filters);
+    }
+
     /// A quick full backup updates the previous full in place, so it needs exactly one full kept.
     pub fn keeps_one_full(&self) -> bool {
         self.keep_mode == KeepMode::Count && self.keep_count == 1
@@ -555,6 +587,23 @@ impl Default for Settings {
     }
 }
 
+/// Whether backups can do what needs admin rights (open files through VSS, stuck deletes) without
+/// Windows's permission prompt: the user approved it once (`elevation`). Not persisted - read from
+/// Windows (the Task Scheduler task and the helper copy in Program Files).
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AdminPermission {
+    /// Not checked yet (the first second after start).
+    #[default]
+    Unknown,
+    Off,
+    On,
+    /// Given by an older version whose helper doesn't match this one: approve again.
+    Outdated,
+    /// A standard Windows account: only someone with an admin password can approve, every time.
+    NotAdmin,
+}
+
 /// Where the app's self-update stands (not persisted).
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -646,6 +695,37 @@ pub struct FullSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_rules_naming_a_folder_become_folder_rules() {
+        let dir = std::env::temp_dir().join(format!("backuper-rules-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.display().to_string();
+        let file = format!(r"{d}\nothing-here.txt");
+        let mut t = Task {
+            filters: vec![
+                FilterRule::File { value: d.clone() },
+                FilterRule::File { value: file.clone() },
+                FilterRule::Group {
+                    name: "g".into(),
+                    enabled: true,
+                    rules: vec![FilterRule::File { value: format!(r"{d}\") }],
+                },
+            ],
+            ..Task::default()
+        };
+        // A network path is not asked about at all (it could stall), so it stays as it is.
+        t.filters.push(FilterRule::File { value: r"\\no-such-server\share\dir".into() });
+        t.fix_folder_file_rules();
+        let _ = std::fs::remove_dir(&dir);
+        assert!(matches!(&t.filters[0], FilterRule::Folder { value } if *value == d));
+        assert!(matches!(&t.filters[1], FilterRule::File { value } if *value == file));
+        let FilterRule::Group { rules, .. } = &t.filters[2] else { panic!() };
+        assert!(matches!(&rules[0], FilterRule::Folder { value } if *value == d));
+        assert!(matches!(&t.filters[3], FilterRule::File { .. }));
+        assert!(crate::engine::native::is_local_path(&dir));
+        assert!(!crate::engine::native::is_local_path(std::path::Path::new(r"\\server\share\x")));
+    }
 
     #[test]
     fn quick_full_needs_one_full_kept_and_rules_out_delete_before() {

@@ -105,6 +105,8 @@ fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
             .filter(|s| !s.trim().is_empty())
             .map(|s| arg_path(Path::new(s.trim()))),
     );
+    // A file rule by full path may name a folder (see `native::Rules::skip_dir`): skip that folder too.
+    a.extend(files.iter().filter(|s| s.contains('\\')).map(|s| arg_path(Path::new(s.trim()))));
     let mut unilog = OsString::from("/UNILOG:");
     unilog.push(log.as_os_str());
     a.push(unilog);
@@ -217,7 +219,7 @@ fn run_process(
 ) -> Result<Exit, String> {
     let _ = std::fs::remove_file(log);
     let stdout = File::create(stdout_path(log)).map_or_else(|_| Stdio::null(), Stdio::from);
-    let mut child = Command::new("robocopy")
+    let mut child = Command::new(crate::engine::system_tool("robocopy.exe"))
         .args(args)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -361,6 +363,12 @@ impl CopyEngine for Robocopy {
             message,
             stats: CopyStats::default(),
         };
+        // Saving a task refuses such a rule (`filters::validate`); this is for tasks saved before that.
+        if let Some(bad) = job.filters.switch_like() {
+            return fail(format!(
+                "כלל הסינון \"{bad}\" מתחיל ב-/ ולכן הגיבוי לא הופעל: robocopy היה מפרש אותו כפקודה ולא כשם. תקנו או מחקו את הכלל בעריכת המשימה (או בכללים הכלליים בהגדרות) והריצו שוב."
+            ));
+        }
 
         let on_event = RefCell::new(on_event);
         // Pass 1 (only when asked for): list-only scan, so progress can show an exact percentage.

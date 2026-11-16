@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
+  AdminPermission,
   AdoptPlan,
   AdoptResult,
   BackupMode,
@@ -42,7 +43,8 @@ export const api = {
   /** Copies a run source's files that were open in another program from a shadow copy into its backup folder (Windows asks for admin permission). Resolves to the updated run. */
   backupOpenFiles: (runId: string, sourceIndex: number) => invoke<RunRecord>("backup_open_files", { runId, sourceIndex }),
   dismissDeleteProblems: (paths: string[]) => invoke<void>("dismiss_delete_problems", { paths }),
-  answerDrivePrompts: (ids: string[], run: string[]) => invoke<void>("answer_drive_prompts", { ids, run }),
+  answerDrivePrompts: (ids: string[], run: string[], remember = false) =>
+    invoke<void>("answer_drive_prompts", { ids, run, remember }),
   /** Pauses a running task (its folder is kept, the next run continues in it); `discard` stops it for good and deletes the half-done folder. */
   cancelTask: (id: string, discard = false) => invoke<void>("cancel_task", { id, discard }),
   /** Makes the task's next automatic run a full backup (once), or takes that back. */
@@ -107,6 +109,11 @@ export const api = {
   dismissUpdatePrompt: () => invoke<void>("dismiss_update_prompt"),
   /** The window went where a clicked notification pointed. */
   dismissNavigate: () => invoke<void>("dismiss_navigate"),
+  /** Permanent admin permission (Windows asks once), `full` = with full access; also changes that choice later. Rejects with the reason. */
+  grantAdminPermission: (full: boolean) => invoke<void>("grant_admin_permission", { full }),
+  revokeAdminPermission: () => invoke<void>("revoke_admin_permission"),
+  /** Reads the permission's state from Windows again. */
+  checkAdminPermission: () => invoke<AdminPermission>("check_admin_permission"),
   saveFile: async (title: string, defaultPath: string, filterName: string, extensions: string[]) => {
     const r = await save({ title, defaultPath, filters: [{ name: filterName, extensions }] });
     return typeof r === "string" ? r : null;
