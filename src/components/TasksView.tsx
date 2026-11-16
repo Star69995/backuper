@@ -67,6 +67,7 @@ import { useFeedback } from "./feedback";
 import { useResumeTask } from "./resumeTask";
 import { useStopTask } from "./stopTask";
 import { useTaskListTransfer } from "./ImportTasksDialog";
+import { AdminPermissionOffer, runsUnattendedWithVss } from "./adminPermission";
 import PausedCard from "./PausedCard";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
@@ -205,6 +206,18 @@ function useActiveGroup() {
     }
   }, [group]);
   return [group, setGroup] as const;
+}
+
+/** Scheduled tasks that back up open files need admin with nobody there: offer the permanent permission. */
+function UnattendedVssOffer({ tasks }: { tasks: Task[] }) {
+  const names = tasks.filter(runsUnattendedWithVss).map((t) => t.name);
+  if (names.length === 0) return null;
+  return (
+    <AdminPermissionOffer>
+      {names.length === 1 ? `המשימה "${names[0]}" מגבה` : `${names.length} משימות מגבות`} קבצים פתוחים דרך VSS ורצות אוטומטית, וזה
+      דורש אישור מנהל. כשאף אחד לא ליד המחשב לאשר, הקבצים הפתוחים ידולגו. הרשאה קבועה ניתנת פעם אחת ונשמרת גם אחרי הפעלה מחדש.
+    </AdminPermissionOffer>
+  );
 }
 
 export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: () => void }) {
@@ -749,6 +762,8 @@ export default function TasksView({ snap, refresh }: { snap: Snapshot; refresh: 
           waitingForDelete={snap.deleteProblems.some((d) => d.blocking && d.taskId === snap.current?.taskId)}
         />
       )}
+
+      <UnattendedVssOffer tasks={snap.tasks} />
 
       <PausedCard
         tasks={pausedTasks}

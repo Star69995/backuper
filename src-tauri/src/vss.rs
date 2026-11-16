@@ -2,13 +2,16 @@
 //! read normally: the program opened them without sharing. A Volume Shadow Copy is a read-only
 //! snapshot of the whole drive that Windows keeps beside it, and files in it aren't locked.
 //!
-//! Making one needs admin rights, so the app starts itself again as admin (`acl::run_elevated`,
-//! Windows shows its permission prompt) with `--vss-copy`: that copy (`elevated_main`) makes the
+//! Making one needs admin rights, so the app starts itself again as admin with `--vss-copy`
+//! (`elevation::run_as_admin`: Windows shows its permission prompt, or with permanent permission
+//! a Task Scheduler task starts it without one): that copy (`elevated_main`) makes the
 //! snapshot, copies the given files out of it, deletes the snapshot and reports per file.
-//! The files to copy travel on the command line (nobody can swap them after the prompt). Any
-//! program of the user could start the admin copy with a command line of its own, so it checks
-//! each file against the saved tasks (`may_copy`): only a file of a task's source, only into its
-//! place in that source's dated backup folder, never through a link in it.
+//! The files to copy travel on the command line (nobody can swap them after the prompt; through
+//! the task, in a request file in the user's temp folder). Any program of the user could start the
+//! admin copy with a request of its own, so it checks each file against the saved tasks
+//! (`may_copy`): only a file of a task's source, only into its place in that source's dated backup
+//! folder, never through a link in it. Started by the task (no prompt), it also reads the file
+//! out of the snapshot as the user, so Windows itself refuses what the user may not read.
 //!
 //! The snapshot is taken without the programs' cooperation (Outlook has no VSS writer), like
 //! the one a power cut would leave: a mail file is fine, a database that was in the middle of a
@@ -58,10 +61,6 @@ fn side(control: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn quoted(p: &Path) -> String {
-    format!(" \"{}\"", p.to_string_lossy().trim_end_matches('\\'))
-}
-
 /// Copies the files from a shadow copy of their drives, one result per pair (same order). Err =
 /// nothing was copied: the permission prompt was declined, nobody answered it in `wait` (unattended
 /// runs; None waits for as long as it takes), the run was cancelled, or the snapshot failed.
@@ -71,14 +70,17 @@ pub fn copy_open_files(pairs: &[Pair], wait: Option<Duration>, cancel: &AtomicBo
         return Ok(Vec::new());
     }
     let control = control_path();
-    let mut params = format!("{SWITCH}{}", quoted(&control));
+    let mut args = vec![SWITCH.to_string(), control.to_string_lossy().to_string()];
+    let mut len = acl::command_line(&args).len();
     let mut sent = 0;
     for p in pairs {
-        let next = format!("{}{}", quoted(&p.src), quoted(&p.dst));
-        if params.len() + next.len() > MAX_PARAMS {
+        let next = [p.src.to_string_lossy().to_string(), p.dst.to_string_lossy().to_string()];
+        let more = acl::command_line(&next).len() + 1;
+        if len + more > MAX_PARAMS {
             break;
         }
-        params.push_str(&next);
+        len += more;
+        args.extend(next);
         sent += 1;
     }
     if sent == 0 {
@@ -86,7 +88,7 @@ pub fn copy_open_files(pairs: &[Pair], wait: Option<Duration>, cancel: &AtomicBo
     }
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(acl::run_elevated(&params));
+        let _ = tx.send(crate::elevation::run_as_admin(&args));
     });
     let started = Instant::now();
     let (started_file, cancel_file) = (side(&control, "started"), side(&control, "cancel"));
@@ -156,7 +158,7 @@ fn parse_results(text: &str, expected: usize) -> Result<Vec<Copied>, String> {
 
 // ---- the admin copy ----
 
-fn powershell(script: &str) -> Result<String, String> {
+pub(crate) fn powershell(script: &str) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     let out = Command::new(crate::engine::system_tool(r"WindowsPowerShell\v1.0\powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
@@ -230,7 +232,7 @@ fn is_control_path(p: &Path) -> bool {
 }
 
 /// Writes a side file of the admin copy: a new file only, never over (or through) an existing one.
-fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(text.as_bytes())
 }
@@ -245,29 +247,56 @@ pub fn elevated_main(args: &[String]) -> i32 {
     if side(control, "cancel").exists() {
         return 3;
     }
-    if write_new(&side(control, "started"), "").is_err() {
+    // The files beside the control path are written as the user (the path comes from the request),
+    // and only as new files.
+    let started = side(control, "started");
+    if acl::as_user(|| write_new(&started, "")).is_err() {
         return 2;
     }
+    // Refused: the caller asks through Windows's prompt, and that copy starts from nothing.
+    let refuse = || {
+        let _ = acl::as_user(|| std::fs::remove_file(&started));
+        acl::REFUSED
+    };
     acl::enable_privileges(&["SeRestorePrivilege", "SeBackupPrivilege"]);
     let allowed = acl::Allowed::load();
+    // Silent, and no task list to check the request against: the user is asked instead.
+    if acl::is_from_task() && allowed.0.is_none() {
+        return refuse();
+    }
     let pairs: Vec<Pair> = rest.chunks_exact(2).map(|c| Pair { src: PathBuf::from(&c[0]), dst: PathBuf::from(&c[1]) }).collect();
-    let report = report_of(control, &pairs, &allowed);
-    let _ = write_new(&side(control, "result"), &report);
-    0
+    let (report, denied) = report_of(control, &pairs, &allowed);
+    // Silent, and Windows refused the user a file: nothing is forced, the user is asked instead.
+    if acl::is_bounded() && denied {
+        return refuse();
+    }
+    match acl::as_user(|| write_new(&side(control, "result"), &report)) {
+        Ok(()) => 0,
+        Err(_) => refuse(),
+    }
 }
 
-fn report_of(control: &Path, pairs: &[Pair], allowed: &acl::Allowed) -> String {
+/// The report, and whether Windows refused a file ("access denied").
+fn report_of(control: &Path, pairs: &[Pair], allowed: &acl::Allowed) -> (String, bool) {
     let mut shadows: Vec<(String, Result<Shadow, String>)> = Vec::new();
     let mut lines = Vec::new();
+    let mut denied = false;
     for p in pairs {
         if side(control, "cancel").exists() {
             lines.push("ERR\t\tהגיבוי בוטל".to_string());
             continue;
         }
-        let Some((root, rel)) = split_drive(&p.src).filter(|_| may_copy(allowed, p)) else {
+        let Some((root, rel)) = split_drive(&p.src).filter(|_| acl::plain_absolute(&p.src) && acl::plain_absolute(&p.dst) && may_copy(allowed, p)) else {
             lines.push("ERR\t\tגיבוי דרך VSS אפשרי רק לקבצים בכונן מקומי של תיקיית מקור במשימה שמורה, אל תיקיית הגיבוי שלה".to_string());
             continue;
         };
+        // Started by the permanent permission, nothing is read that the user couldn't read
+        // themselves: only a file another program holds open (what the shadow copy is for) is let through.
+        if acl::is_bounded() && !acl::user_can_read(&p.src) {
+            lines.push("ERR\t5\tאין לכם הרשאת קריאה לקובץ, ולכן הוא לא גובה בהרשאת מנהל".to_string());
+            denied = true;
+            continue;
+        }
         if !shadows.iter().any(|(r, _)| *r == root) {
             let s = Shadow::create(&root);
             shadows.push((root.clone(), s));
@@ -278,7 +307,10 @@ fn report_of(control: &Path, pairs: &[Pair], allowed: &acl::Allowed) -> String {
                 let from = PathBuf::from(format!("{}\\{rel}", s.device.trim_end_matches('\\')));
                 match native::copy_from_snapshot(&from, &p.dst) {
                     Ok(n) => format!("OK\t{n}"),
-                    Err(e) => format!("ERR\t{}\t{}", e.raw_os_error().map(|c| c.to_string()).unwrap_or_default(), one_line(&e.to_string())),
+                    Err(e) => {
+                        denied |= e.raw_os_error() == Some(5);
+                        format!("ERR\t{}\t{}", e.raw_os_error().map(|c| c.to_string()).unwrap_or_default(), one_line(&e.to_string()))
+                    }
                 }
             }
         };
@@ -291,10 +323,10 @@ fn report_of(control: &Path, pairs: &[Pair], allowed: &acl::Allowed) -> String {
     }
     // Every snapshot failed: the first error says why, and the caller shows it once for the lot.
     if let Some((_, Err(e))) = shadows.first().filter(|_| shadows.iter().all(|(_, s)| s.is_err())) {
-        return format!("FATAL\t{}\n", one_line(e));
+        return (format!("FATAL\t{}\n", one_line(e)), denied);
     }
     lines.push("END".to_string());
-    lines.join("\n") + "\n"
+    (lines.join("\n") + "\n", denied)
 }
 
 fn one_line(s: &str) -> String {

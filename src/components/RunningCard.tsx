@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useEta } from "../lib/eta";
 import { fmtBytes, fmtDuration, fmtFinishAt, fmtNumber, fmtRemaining, MODE_LABEL } from "../lib/format";
 import type { Job, Progress, Task } from "../types";
+import { AdminPermissionOffer, useAdminPermission } from "./adminPermission";
 import { useStopTask } from "./stopTask";
 import { Button, PathText, ProgressBar, SkipIcon, Spinner } from "./ui";
 
@@ -20,6 +21,7 @@ export default function RunningCard({
   waitingForDelete?: boolean;
 }) {
   const stopTask = useStopTask();
+  const admin = useAdminPermission().status;
   // Re-render every second for the elapsed timer.
   const [, tick] = useState(0);
   useEffect(() => {
@@ -32,7 +34,7 @@ export default function RunningCard({
     scanning: "סורק את הקבצים...",
     deleting: waitingForDelete ? "ממתין להחלטה: גיבוי ישן לא נמחק" : "מוחק גיבויים קודמים לפני ההעתקה...",
     pruning: "מנקה מהגיבוי קבצים שכללי הסינון מדלגים עליהם...",
-    vss: "מגבה קבצים פתוחים דרך VSS (ייתכן ש-Windows מבקשת אישור)...",
+    vss: admin === "on" ? "מגבה קבצים פתוחים דרך VSS (בהרשאה הקבועה)..." : "מגבה קבצים פתוחים דרך VSS (ייתכן ש-Windows מבקשת אישור)...",
     copying: "מעתיק קבצים",
   }[waitingForDelete ? "deleting" : p.phase];
   // No totals while copying = the pre-scan was skipped and nothing could estimate the work: counters only.
@@ -216,6 +218,11 @@ export default function RunningCard({
           <div className="text-xs text-muted">
             מחכה לקובץ הראשון להעתקה. אם התיקייה כבר מכילה קבצים מהעתקה קודמת, הם נבדקים קודם והבדיקה יכולה לקחת כמה דקות
           </div>
+        )}
+        {p.phase === "vss" && (
+          <AdminPermissionOffer>
+            Windows מבקשת עכשיו אישור מנהל. עם הרשאה קבועה הגיבויים הבאים לא יחכו לאישור - גם כשאף אחד לא ליד המחשב.
+          </AdminPermissionOffer>
         )}
         {queuedNames.length > 0 && <div className="text-xs text-muted">ממתינים בתור: {queuedNames.join(", ")}</div>}
       </div>

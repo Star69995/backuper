@@ -13,7 +13,9 @@ use crate::model::Task;
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 /// The command-line switch of the admin copy that deletes the folders given after it.
 pub const DELETE_SWITCH: &str = "--delete-elevated";
@@ -39,6 +41,21 @@ const SEE_MASK_NOCLOSEPROCESS: u32 = 0x40;
 const SEE_MASK_NOASYNC: u32 = 0x100;
 const INFINITE: u32 = 0xFFFF_FFFF;
 const ERROR_CANCELLED: i32 = 1223;
+const TOKEN_DUPLICATE: u32 = 0x2;
+const TOKEN_IMPERSONATE: u32 = 0x4;
+/// SECURITY_IMPERSONATION_LEVEL / TOKEN_TYPE: an impersonation token that can open files.
+const SECURITY_IMPERSONATION: i32 = 2;
+const TOKEN_TYPE_IMPERSONATION: i32 = 2;
+const FILE_LIST_DIRECTORY: u32 = 0x1;
+const FILE_DELETE_CHILD: u32 = 0x40;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_SHARE_READ: u32 = 0x1;
+const FILE_SHARE_WRITE: u32 = 0x2;
+/// Exit code of an admin copy that started through the permanent permission and refused the request
+/// (outside what the user could do themselves): the caller then asks Windows for permission instead.
+pub const REFUSED: i32 = 250;
 
 #[repr(C)]
 struct TokenPrivileges {
@@ -92,6 +109,14 @@ extern "system" {
     fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut u32) -> i32;
     fn AdjustTokenPrivileges(token: isize, disable_all: i32, new: *const TokenPrivileges, len: u32, prev: *mut c_void, ret: *mut u32) -> i32;
     fn ConvertSidToStringSidW(sid: *const c_void, out: *mut *mut u16) -> i32;
+    fn DuplicateTokenEx(token: isize, access: u32, attrs: *const c_void, level: i32, kind: i32, new: *mut isize) -> i32;
+    fn SetThreadToken(thread: *const isize, token: isize) -> i32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetShellWindow() -> isize;
+    fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
 }
 
 #[link(name = "ntdll")]
@@ -107,6 +132,7 @@ extern "system" {
     fn CloseHandle(h: isize) -> i32;
     fn WaitForSingleObject(h: isize, ms: u32) -> u32;
     fn GetExitCodeProcess(h: isize, code: *mut u32) -> i32;
+    fn GetFinalPathNameByHandleW(file: *mut c_void, buf: *mut u16, len: u32, flags: u32) -> u32;
 }
 
 #[link(name = "shell32")]
@@ -146,6 +172,13 @@ impl Token {
         Some(out)
     }
 
+    /// A `u32` piece of token information (TokenElevationType, TokenElevation).
+    fn info_u32(&self, class: i32) -> Option<u32> {
+        let mut v = 0u32;
+        let mut len = 0;
+        (unsafe { GetTokenInformation(self.0, class, (&mut v as *mut u32).cast(), 4, &mut len) } != 0).then_some(v)
+    }
+
     fn enable(&self, privilege: &str) -> bool {
         let name = wide(std::ffi::OsStr::new(privilege));
         let mut luid = [0u32; 2];
@@ -160,6 +193,31 @@ impl Token {
 impl Drop for Token {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.0) };
+    }
+}
+
+const TOKEN_ELEVATION_TYPE: i32 = 18;
+const TOKEN_ELEVATION: i32 = 20;
+
+/// The account the app runs as, as "S-1-5-21-...".
+pub fn user_sid_string() -> Option<String> {
+    sid_string(&Token::open(TOKEN_QUERY)?.user_sid()?)
+}
+
+/// Whether the app runs with admin rights right now (an elevated token).
+pub fn is_elevated() -> bool {
+    Token::open(TOKEN_QUERY).and_then(|t| t.info_u32(TOKEN_ELEVATION)).is_some_and(|v| v != 0)
+}
+
+/// Whether the account can become admin by itself, with a yes in Windows's prompt (an admin
+/// account), rather than needing someone else's password (a standard account).
+pub fn is_admin_account() -> bool {
+    let Some(t) = Token::open(TOKEN_QUERY) else { return false };
+    match t.info_u32(TOKEN_ELEVATION_TYPE) {
+        // TokenElevationTypeFull / Limited: an admin account (elevated now, or able to).
+        Some(2 | 3) => true,
+        // Default: no split token - UAC is off, or a standard account. Only the first is elevated.
+        _ => t.info_u32(TOKEN_ELEVATION).is_some_and(|v| v != 0),
     }
 }
 
@@ -229,14 +287,20 @@ pub fn is_backup_folder_name(name: &str) -> bool {
     re.is_match(name)
 }
 
-/// Starts the app again as admin with `params` as its command line (Windows shows its permission
-/// prompt) and returns once that copy has finished, with its exit code. Err = the prompt was
-/// declined or the copy couldn't start. Blocks while the prompt is open.
-pub fn run_elevated(params: &str) -> Result<u32, String> {
+/// A command line from `args`. Ours never end in a backslash or hold quotes, so plain quoting is enough.
+pub fn command_line(args: &[String]) -> String {
+    args.iter().map(|a| format!("\"{}\"", a.trim_end_matches('\\'))).collect::<Vec<_>>().join(" ")
+}
+
+/// Starts the app again as admin with `args` (Windows shows its permission prompt) and returns once
+/// that copy has finished, with its exit code. Err = the prompt was declined or the copy couldn't
+/// start. Blocks while the prompt is open. Use `elevation::run_as_admin`, which skips the prompt
+/// when the user gave the app permanent permission.
+pub fn run_elevated(args: &[String]) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let verb = wide(std::ffi::OsStr::new("runas"));
     let file = wide(exe.as_os_str());
-    let params = wide(std::ffi::OsStr::new(params));
+    let params = wide(std::ffi::OsStr::new(&command_line(args)));
     let mut info = ShellExecuteInfoW {
         cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
         f_mask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
@@ -273,14 +337,12 @@ pub fn run_elevated(params: &str) -> Result<u32, String> {
     Ok(code)
 }
 
-/// Starts the app again as admin to delete `paths`. Returns once that copy has finished.
+/// Deletes `paths` as admin (Windows asks first, unless the user gave permanent permission).
+/// Returns once that copy has finished.
 pub fn delete_elevated(paths: &[String]) -> Result<(), String> {
-    // Our paths never end in a backslash or hold quotes, so plain quoting is enough.
-    let mut params = DELETE_SWITCH.to_string();
-    for p in paths {
-        params.push_str(&format!(" \"{}\"", p.trim_end_matches('\\')));
-    }
-    run_elevated(&params).map(|_| ()).map_err(|e| {
+    let mut args = vec![DELETE_SWITCH.to_string()];
+    args.extend(paths.iter().cloned());
+    crate::elevation::run_as_admin(&args).map(|_| ()).map_err(|e| {
         if e.contains("בוטל") {
             "האישור של Windows בוטל - התיקיות לא נמחקו".into()
         } else {
@@ -297,6 +359,123 @@ pub fn enable_privileges(names: &[&str]) {
             t.enable(p);
         }
     }
+}
+
+// ---- what the admin copy may do ----
+//
+// Started through the permanent permission (the Task Scheduler task, `elevation.rs`) the admin copy
+// runs silently, so anything running as the user could ask it for things. It is therefore bounded:
+// it does no more than the user could do themselves, except what only admin rights allow (reading a
+// file another program holds open through a shadow copy, deleting a folder whose permissions are
+// wrong). Every file operation that doesn't need admin rights is done as the user (`as_user`), so a
+// path in a request is never trusted: the user's own permissions decide. Asked through Windows's
+// prompt the user has agreed to this very request, so only the safety checks apply (`BOUNDED` off).
+
+static BOUNDED: AtomicBool = AtomicBool::new(false);
+
+/// Turns the bounds on (the admin copy started by the task does this first thing).
+pub fn set_bounded(on: bool) {
+    BOUNDED.store(on, Ordering::SeqCst);
+}
+
+pub fn is_bounded() -> bool {
+    BOUNDED.load(Ordering::SeqCst)
+}
+
+static FROM_TASK: AtomicBool = AtomicBool::new(false);
+
+/// The admin copy was started by the permanent permission's task, with no prompt. It is bounded
+/// too, unless the user gave full access (`elevation`): then it does what a copy approved through
+/// Windows's prompt does.
+pub fn set_from_task() {
+    FROM_TASK.store(true, Ordering::SeqCst);
+}
+
+pub fn is_from_task() -> bool {
+    FROM_TASK.load(Ordering::SeqCst)
+}
+
+/// The signed-in user's own (not elevated) token, copied from the desktop shell - an impersonation
+/// token, closed never (the admin copy is short-lived). None = no shell is running.
+fn shell_user_token() -> Option<isize> {
+    static TOKEN: OnceLock<Option<isize>> = OnceLock::new();
+    *TOKEN.get_or_init(|| unsafe {
+        let hwnd = GetShellWindow();
+        if hwnd == 0 {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process == 0 {
+            return None;
+        }
+        let mut shell = 0isize;
+        let ok = OpenProcessToken(process, TOKEN_DUPLICATE | TOKEN_QUERY, &mut shell) != 0;
+        CloseHandle(process);
+        if !ok {
+            return None;
+        }
+        let mut copy = 0isize;
+        let ok = DuplicateTokenEx(shell, TOKEN_IMPERSONATE | TOKEN_QUERY, std::ptr::null(), SECURITY_IMPERSONATION, TOKEN_TYPE_IMPERSONATION, &mut copy) != 0;
+        CloseHandle(shell);
+        ok.then_some(copy)
+    })
+}
+
+/// Reverts the thread to the process's own token when dropped.
+struct Impersonating;
+
+impl Drop for Impersonating {
+    fn drop(&mut self) {
+        unsafe { SetThreadToken(std::ptr::null(), 0) };
+    }
+}
+
+/// Runs `f` as the signed-in user (their rights, not the admin's). Without a shell to take the
+/// user from: refused when bounded, run as is otherwise (asked through Windows's prompt).
+pub fn as_user<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    match shell_user_token() {
+        Some(token) => {
+            if unsafe { SetThreadToken(std::ptr::null(), token) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let _back = Impersonating;
+            f()
+        }
+        None if is_bounded() => Err(io::Error::new(io::ErrorKind::PermissionDenied, "לא נמצא משתמש מחובר שאפשר לפעול בשמו")),
+        None => f(),
+    }
+}
+
+/// A path the admin copy accepts: absolute, and nothing in it that moves it somewhere else (`..`, `.`).
+/// A name check on the text of a path means nothing when the path can climb out of the folder named.
+pub fn plain_absolute(p: &Path) -> bool {
+    p.is_absolute() && p.components().all(|c| !matches!(c, Component::ParentDir | Component::CurDir))
+}
+
+/// Whether the user could read `path` themselves: opening it as them is allowed, or fails only
+/// because another program has it open (the case the shadow copy is for).
+pub fn user_can_read(path: &Path) -> bool {
+    match as_user(|| std::fs::File::open(path).map(drop)) {
+        Ok(()) => true,
+        // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: the permission check passed, the lock didn't.
+        Err(e) => matches!(e.raw_os_error(), Some(32 | 33)),
+    }
+}
+
+/// Whether the user may delete things inside `dir` (the right to delete a child, the one a delete
+/// of a backup folder in it needs).
+fn user_can_delete_in(dir: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    as_user(|| {
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_DELETE_CHILD)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .map(drop)
+    })
+    .is_ok()
 }
 
 /// The account that started this process, as a SID: for an admin copy, the user who asked for it
@@ -339,7 +518,9 @@ fn sid_string(sid: &[u32]) -> Option<String> {
 fn launcher_data_dir() -> Option<PathBuf> {
     let own = Token::open(TOKEN_QUERY)?.user_sid()?;
     let roaming = match launcher_sid() {
-        Some(sid) if sid != own => {
+        // Started by the permanent permission's task: the parent is Windows's Task Scheduler, and
+        // the task runs as the user it belongs to.
+        Some(sid) if sid != own && !is_from_task() => {
             let key = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
                 .open_subkey(format!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{}", sid_string(&sid)?))
                 .ok()?;
@@ -420,23 +601,98 @@ impl Allowed {
     }
 }
 
-/// The admin copy: `args` = the folders to delete. Takes ownership, grants full control, deletes.
-/// Exit code = how many folders are left.
+/// What a delete request asks for, judged. `Ok(true)` = go ahead, `Ok(false)` = not ours / not
+/// there (skipped quietly, as before), `Err` = the bounds refuse it.
+fn judge_delete(allowed: &Allowed, path: &Path) -> Result<bool, ()> {
+    // A link (junction, symlink) named like a backup folder would send the ownership change and
+    // the delete somewhere else; a path with `..` in it names something other than it says.
+    let ours = allowed.folder(path) && plain_absolute(path) && crate::engine::native::find(path).is_some_and(|i| i.is_dir() && !i.is_link());
+    if !ours {
+        return Ok(false);
+    }
+    if is_bounded() && !path.parent().is_some_and(user_can_delete_in) {
+        return Err(());
+    }
+    Ok(true)
+}
+
+/// Opens the folder at `path` so that it stays what it is while the handle is open: Windows lets
+/// nobody rename or delete it, or a folder above it, meanwhile - so no program can put a link in
+/// its place between the checks and the permission change that follows (which goes by name, with
+/// admin rights). Refuses a link. Bounded, it also refuses a path that reaches the folder through
+/// a link higher up (the folder's real path is another one): such a link could be pointed
+/// somewhere else at any moment.
+fn pin(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    let refused = || io::Error::new(io::ErrorKind::PermissionDenied, "not a plain folder");
+    let dir = std::fs::OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let meta = dir.metadata()?;
+    if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(refused());
+    }
+    if is_bounded() {
+        let mut buf = vec![0u16; 4096];
+        let n = unsafe { GetFinalPathNameByHandleW(dir.as_raw_handle().cast(), buf.as_mut_ptr(), buf.len() as u32, 0) } as usize;
+        if n == 0 || n >= buf.len() {
+            return Err(refused());
+        }
+        let real = String::from_utf16_lossy(&buf[..n]);
+        let plain = |p: &str| p.replace('/', "\\").trim_start_matches(r"\\?\").trim_end_matches('\\').to_lowercase();
+        if plain(&real) != plain(&path.to_string_lossy()) {
+            return Err(refused());
+        }
+    }
+    Ok(dir)
+}
+
+/// Deletes one backup folder with the admin's rights: becomes its owner, grants itself full control, deletes.
+fn delete_owned(path: &Path) -> io::Result<()> {
+    let pinned = pin(path)?;
+    let _ = reset_tree(path, true);
+    // FAT32 / exFAT have no permissions, but refuse to delete read-only items.
+    crate::engine::native::clear_readonly(path);
+    drop(pinned);
+    // The reset gave the account full control, so a program of the user can change the tree from
+    // here on. This delete goes by handle and never through a link: whatever stands at `path` now
+    // (and anything put inside it) is removed as it is, and a link is removed as a link.
+    std::fs::remove_dir_all(path)
+}
+
+/// The admin copy: `args` = the folders to delete. Exit code = how many folders are left,
+/// `REFUSED` when the bounds refused a folder (nothing is deleted then).
 pub fn elevated_main(args: &[String]) -> i32 {
     enable_privileges(&["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"]);
     let allowed = Allowed::load();
-    let mut left = 0;
+    // Silent, and no task list to check the request against: the user is asked instead.
+    if is_from_task() && allowed.0.is_none() {
+        return REFUSED;
+    }
+    let mut todo = Vec::new();
     for a in args {
-        let path = Path::new(a);
-        // A link named like a backup folder leads somewhere else: never through it.
-        let ours = allowed.folder(path) && crate::engine::native::find(path).is_some_and(|i| i.is_dir() && !i.is_link());
-        if !ours {
-            continue;
+        match judge_delete(&allowed, Path::new(a)) {
+            Ok(true) => todo.push(Path::new(a)),
+            Ok(false) => {}
+            Err(()) => return REFUSED,
         }
-        let _ = reset_tree(path, true);
-        if crate::engine::native::remove_tree(path).is_err() && path.exists() {
-            left += 1;
+    }
+    let mut left = 0;
+    let mut refused = false;
+    for path in todo {
+        if let Err(e) = delete_owned(path) {
+            if path.exists() {
+                left += 1;
+                refused |= e.kind() == io::ErrorKind::PermissionDenied;
+            }
         }
+    }
+    // Bounded, a folder that was refused or wouldn't go gets one more chance through Windows's prompt.
+    if is_bounded() && refused {
+        return REFUSED;
     }
     left
 }
@@ -458,6 +714,96 @@ mod tests {
         for bad in ["Docs", "Windows", "Docs 2026-11-10", "2026-11-10 14-25 מלא", "Docs 2026-11-10 14-25 other"] {
             assert!(!is_backup_folder_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn paths_that_climb_out_are_not_plain() {
+        assert!(plain_absolute(Path::new(r"C:\Backups\Docs 2026-11-10 14-25 מלא")));
+        assert!(!plain_absolute(Path::new(r"C:\Backups\Docs 2026-11-10 14-25 מלא\..\..\Windows\x.dll")));
+        assert!(!plain_absolute(Path::new(r"Backups\Docs 2026-11-10 14-25 מלא")));
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let ok = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(target).output().unwrap().status.success();
+        assert!(ok, "mklink /J");
+    }
+
+    #[test]
+    fn a_link_named_like_a_backup_folder_is_not_deleted_through() {
+        let root = std::env::temp_dir().join(format!("backuper-acl-{}", uuid::Uuid::new_v4()));
+        let target = root.join("precious");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), "x").unwrap();
+        let link = root.join("Docs 2026-11-10 14-25 מלא");
+        junction(&link, &target);
+        let unknown = Allowed(None);
+        assert_eq!(judge_delete(&unknown, &link), Ok(false));
+        assert!(pin(&link).is_err());
+        assert!(delete_owned(&link).is_err());
+        assert!(target.join("keep.txt").exists());
+        // The same name as a real folder is fine.
+        let real = root.join("Docs 2026-11-11 14-25 מלא");
+        std::fs::create_dir_all(&real).unwrap();
+        assert_eq!(judge_delete(&unknown, &real), Ok(true));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// While the admin copy changes a folder's permissions by name, nobody can swap the folder
+    /// (or one above it) for a link to somewhere else.
+    #[test]
+    fn a_pinned_folder_cannot_be_swapped() {
+        let root = std::env::temp_dir().join(format!("backuper-acl-{}", uuid::Uuid::new_v4()));
+        let parent = root.join("dest");
+        let folder = parent.join("Docs 2026-11-10 14h25 מלא");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::write(folder.join("sub").join("a.txt"), "x").unwrap();
+        let pinned = pin(&folder).unwrap();
+        assert!(std::fs::rename(&folder, parent.join("moved")).is_err());
+        assert!(std::fs::remove_dir(&folder).is_err() && folder.is_dir());
+        assert!(std::fs::rename(&parent, root.join("moved")).is_err());
+        drop(pinned);
+        // Reached through a link higher up, the folder's real path is another one: refused when bounded.
+        junction(&root.join("via"), &parent);
+        let through = root.join("via").join("Docs 2026-11-10 14h25 מלא");
+        set_bounded(true);
+        let (direct, linked) = (pin(&folder).map(drop), pin(&through).map(drop));
+        set_bounded(false);
+        assert!(direct.is_ok(), "{direct:?}");
+        assert!(linked.is_err());
+        let _ = std::fs::remove_dir(root.join("via"));
+        // Read-only items go too.
+        let ro = folder.join("sub").join("a.txt");
+        let mut perm = std::fs::metadata(&ro).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&ro, perm).unwrap();
+        delete_owned(&folder).unwrap();
+        assert!(!folder.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The permission reset of a backup folder must not reach through a junction inside it into
+    /// whatever the junction points at (the admin copy runs it with ownership rights).
+    #[test]
+    fn the_permission_reset_does_not_follow_a_junction_inside() {
+        let root = std::env::temp_dir().join(format!("backuper-acl-{}", uuid::Uuid::new_v4()));
+        let outside = root.join("outside");
+        let backup = root.join("Docs 2026-11-10 14-25 מלא");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&backup).unwrap();
+        junction(&backup.join("link"), &outside);
+        // `outside`: no inherited rights, read only for the user - a file can't be created in it.
+        let me = format!("{}:(OI)(CI)R", std::env::var("USERNAME").unwrap());
+        let ok = std::process::Command::new("icacls").arg(&outside).args(["/inheritance:r", "/grant:r", &me]).output().unwrap().status.success();
+        assert!(ok, "icacls");
+        assert!(std::fs::write(outside.join("probe.txt"), "x").is_err(), "outside should be read only before");
+        grant_own_tree(&backup).unwrap();
+        let reached = std::fs::write(outside.join("probe.txt"), "x").is_ok();
+        // Put the folder back in a state the cleanup can remove.
+        let _ = std::process::Command::new("icacls").arg(&outside).args(["/reset", "/T"]).output();
+        let _ = std::fs::remove_dir(backup.join("link"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!reached, "the reset followed the junction");
     }
 
     fn allowed() -> Allowed {
