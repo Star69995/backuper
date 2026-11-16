@@ -59,7 +59,10 @@ impl Store {
             dir,
         };
         store.load_tasks();
-        store.tasks.iter_mut().for_each(Task::migrate);
+        store.tasks.iter_mut().for_each(|t| {
+            t.migrate();
+            t.fix_folder_file_rules();
+        });
         store.fill_last_backups();
         // The list as it was before this version kept snapshots.
         if !store.tasks.is_empty() {

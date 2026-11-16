@@ -105,6 +105,8 @@ fn build_args(x: &Args, log: &Path) -> Vec<OsString> {
             .filter(|s| !s.trim().is_empty())
             .map(|s| arg_path(Path::new(s.trim()))),
     );
+    // A file rule by full path may name a folder (see `native::Rules::skip_dir`): skip that folder too.
+    a.extend(files.iter().filter(|s| s.contains('\\')).map(|s| arg_path(Path::new(s.trim()))));
     let mut unilog = OsString::from("/UNILOG:");
     unilog.push(log.as_os_str());
     a.push(unilog);
