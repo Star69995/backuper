@@ -250,7 +250,8 @@ impl Rules {
             max_size: f.max_size,
             min_modified: f.max_age_days.map(|d| now.saturating_sub(d as u64 * 86_400 * TICKS_PER_SEC)),
             skip_attributes: if f.exclude_hidden { ATTR_HIDDEN } else { 0 } | if f.exclude_system { ATTR_SYSTEM } else { 0 },
-            short_names: !(f.include_files.is_empty() && f.exclude_files.is_empty() && f.exclude_dirs.is_empty()),
+            // Path rules are matched on the long path only.
+            short_names: !(f.include_files.is_empty() && file_names.is_empty() && f.exclude_dirs.is_empty()),
         }
     }
 
