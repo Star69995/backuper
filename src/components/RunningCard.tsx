@@ -2,7 +2,7 @@ import { Pause, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useEta } from "../lib/eta";
-import { fmtBytes, fmtDuration, fmtFinishAt, fmtNumber, fmtRemaining, MODE_LABEL } from "../lib/format";
+import { fmtBytes, fmtDuration, fmtFinishAt, fmtNumber, fmtRemaining, fmtSmart, MODE_LABEL } from "../lib/format";
 import type { Job, Progress, Task } from "../types";
 import { AdminPermissionOffer, useAdminPermission } from "./adminPermission";
 import { useStopTask } from "./stopTask";
@@ -13,12 +13,15 @@ export default function RunningCard({
   queue,
   tasks,
   waitingForDelete = false,
+  deleteWaitUntil = null,
 }: {
   progress: Progress;
   queue: Job[];
   tasks: Task[];
   /** A delete-before failed and the run waits for the user's answer (DeleteProblemDialog). */
   waitingForDelete?: boolean;
+  /** A scheduled run goes on without the delete at this time. */
+  deleteWaitUntil?: string | null;
 }) {
   const stopTask = useStopTask();
   const admin = useAdminPermission().status;
@@ -69,7 +72,9 @@ export default function RunningCard({
   const counts = scanning ? (
     <span>
       {waitingForDelete
-        ? "הגיבוי ימשיך אחרי שתבחרו בחלון שנפתח"
+        ? deleteWaitUntil
+          ? `הגיבוי ימשיך אחרי שתבחרו בחלון שנפתח, או לבד בלי המחיקה ב-${fmtSmart(deleteWaitUntil).replace("היום ", "")}`
+          : "הגיבוי ימשיך אחרי שתבחרו בחלון שנפתח"
         : p.phase === "deleting"
           ? "מפנה מקום ביעד"
           : p.phase === "pruning"
