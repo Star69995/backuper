@@ -687,10 +687,18 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       const rec = await api.backupOpenFiles(r.id, sourceIndex);
       setUpdated(rec);
       const left = rec.sources[sourceIndex]?.errors.length ?? 0;
+      // This saves this run only: offer the task option, or the next run leaves the same files out again.
+      const offerAuto = task !== null && !task.vssOpenFiles;
       toast({
         tone: left > 0 ? "warn" : "ok",
         title: left > 0 ? "חלק מהקבצים עדיין לא גובו" : "הקבצים הפתוחים גובו דרך VSS",
-        message: left > 0 ? "פרטים ברשימת השגיאות" : undefined,
+        message:
+          left > 0
+            ? "פרטים ברשימת השגיאות"
+            : offerAuto
+              ? "רק בריצה הזאת. כדי שזה יקרה מעצמו בכל הרצה, הפעילו את הגיבוי האוטומטי דרך VSS."
+              : undefined,
+        action: offerAuto ? { label: "הפעלה בכל הרצה", onClick: () => void enableAutoVss() } : undefined,
       });
     } catch (e) {
       toast({ tone: "bad", title: "הגיבוי דרך VSS לא הצליח", message: errorText(e) });

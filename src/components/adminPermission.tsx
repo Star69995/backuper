@@ -20,6 +20,26 @@ export const NOT_ADMIN_TEXT =
 export const runsUnattendedWithVss = (t: Task) =>
   t.enabled && t.vssOpenFiles && (t.schedule.kind !== "manual" || t.onDriveConnect === "run");
 
+/** ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: a file another program holds open (vss.rs `is_in_use`). */
+const IN_USE = new Set([32, 33]);
+
+/**
+ * Tasks whose latest run left files another program held open and that don't back them up through VSS:
+ * the permission alone doesn't make a task use VSS, the task's own option does.
+ */
+async function tasksMissingVss(): Promise<Task[]> {
+  const [snap, history] = await Promise.all([api.snapshot(), api.history()]);
+  const latest = new Map<string, (typeof history)[number]>();
+  for (const r of history) {
+    const seen = latest.get(r.taskId);
+    if (!seen || r.finishedAt > seen.finishedAt) latest.set(r.taskId, r);
+  }
+  return snap.tasks.filter((t) => {
+    const r = latest.get(t.id);
+    return !t.vssOpenFiles && !!r && r.sources.some((s) => s.errors.some((e) => e.code != null && IN_USE.has(e.code)));
+  });
+}
+
 /**
  * The choice inside the grant dialog. Full access = the admin helper never hands a request back to
  * Windows's prompt (elevation.rs); the choice is kept in an admin-only folder, so only this
@@ -93,12 +113,53 @@ export function useAdminPermission() {
           ? "גיבויים יבצעו פעולות מנהל בלי לבקש אישור, גם במקרים חריגים."
           : "גיבויים יבצעו פעולות מנהל בלי לבקש אישור. במקרה חריג Windows עדיין תשאל.",
       });
-      return true;
     } catch (e) {
       toast({ tone: "bad", title: "ההרשאה הקבועה לא הופעלה", message: errorText(e) });
       return false;
     } finally {
       setBusy(false);
+    }
+    await offerVss();
+    return true;
+  };
+
+  /** After the grant: the tasks that had open files not backed up get the VSS option offered (the permission alone doesn't switch it on). */
+  const offerVss = async () => {
+    let tasks: Task[];
+    try {
+      tasks = await tasksMissingVss();
+    } catch {
+      return;
+    }
+    if (tasks.length === 0) return;
+    const one = tasks.length === 1;
+    const ok = await confirm({
+      title: "הפעלת גיבוי קבצים פתוחים דרך VSS",
+      message: (
+        <div className="flex flex-col gap-2">
+          <p>
+            {one ? "בגיבוי האחרון של המשימה הזאת היו קבצים" : "בגיבוי האחרון של המשימות האלה היו קבצים"} שפתוחים בתוכנה אחרת (למשל
+            Outlook) ולא הועתקו. ההרשאה מאפשרת לגבות אותם בלי לשאול, אבל רק משימה שמופעל בה גיבוי דרך VSS משתמשת בה.
+          </p>
+          <ul className="list-inside list-disc">
+            {tasks.map((t) => (
+              <li key={t.id}>
+                <bdi>{t.name}</bdi>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ),
+      confirmLabel: one ? "הפעלה במשימה" : "הפעלה במשימות",
+    });
+    if (!ok) return;
+    try {
+      // Fresh copies: the list may have changed while the dialog was open.
+      const now = (await api.snapshot()).tasks.filter((t) => tasks.some((x) => x.id === t.id));
+      await api.saveTasks(now.map((t) => ({ ...t, vssOpenFiles: true })));
+      toast({ tone: "ok", title: "הגיבוי דרך VSS הופעל", message: "קבצים פתוחים יגובו דרך VSS בכל הרצה, בלי לבקש אישור." });
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לעדכן את המשימות", message: errorText(e) });
     }
   };
 
