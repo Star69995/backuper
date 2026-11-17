@@ -226,6 +226,8 @@ export interface Settings {
   /** Walk the whole tree once before a full copy, just for an exact percentage (slow on big drives). */
   exactProgress: boolean;
   backgroundTotals: boolean;
+  /** Every task backs up open files through VSS, whatever its own `vssOpenFiles` says. */
+  vssAllTasks: boolean;
 }
 
 /** Where the app's self-update stands. */

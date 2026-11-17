@@ -13,7 +13,7 @@ import { useUnsaved } from "../lib/unsaved";
 import { Button, IconButton, Modal, PathText, Segmented, Select, Toggle } from "./ui";
 
 /** Permanent admin permission (elevation.rs): VSS and stuck deletes without Windows's prompt. */
-function AdminPermissionCard({ refresh }: { refresh: () => void }) {
+function AdminPermissionCard({ refresh, vssAll, setVssAll }: { refresh: () => void; vssAll: boolean; setVssAll: (v: boolean) => void }) {
   const { status, full, busy, grant, revoke } = useAdminPermission();
   // Read from Windows again: it may have been removed in the Task Scheduler since the app started.
   useEffect(() => {
@@ -53,6 +53,17 @@ function AdminPermissionCard({ refresh }: { refresh: () => void }) {
           <GrantButton size="md" onDone={refresh} />
         ) : null}
       </div>
+      <Toggle
+        checked={vssAll}
+        onChange={setVssAll}
+        label="גיבוי קבצים פתוחים דרך VSS בכל המשימות"
+        description={
+          "קובץ שתוכנה אחרת מחזיקה פתוח (כמו קובץ הדואר של Outlook) מגובה מתצלום מצב של הכונן בכל משימה, גם אם האפשרות כבויה בה - כולל משימות שיובאו ומשימות שיתווספו בהמשך." +
+          (status === "on"
+            ? " ההרשאה הקבועה מאפשרת את זה בלי לבקש אישור."
+            : " בלי הרשאה קבועה Windows תבקש אישור מנהל בכל פעם, ובהרצה מתוזמנת שאף אחד לא מאשר הקבצים הפתוחים ידולגו אחרי 3 דקות.")
+        }
+      />
     </Card>
   );
 }
@@ -133,7 +144,7 @@ export default function SettingsView({ snap, refresh }: { snap: Snapshot; refres
         />
       </Card>
 
-      <AdminPermissionCard refresh={refresh} />
+      <AdminPermissionCard refresh={refresh} vssAll={s.vssAllTasks} setVssAll={(vssAllTasks) => update({ vssAllTasks })} />
 
       <Card title="ביצועים" icon={<Gauge size={18} />}>
         <Toggle

@@ -664,7 +664,11 @@ impl Core {
             let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next, estimates) = {
                 let s = self.store.lock().unwrap();
                 (
-                    s.task(&job.task_id).cloned(),
+                    // `Settings.vss_all_tasks`: open files through VSS in every task, whatever its own switch says.
+                    s.task(&job.task_id).cloned().map(|mut t| {
+                        t.vss_open_files |= s.settings.vss_all_tasks;
+                        t
+                    }),
                     s.logs_dir(),
                     s.settings.global_filters.clone(),
                     s.settings.exact_progress,

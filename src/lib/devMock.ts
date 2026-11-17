@@ -282,6 +282,7 @@ export function installDevMock() {
     updateIdleMinutes: 2,
     exactProgress: false,
     backgroundTotals: true,
+    vssAllTasks: false,
   };
   // Open with a newer version available (?update in the URL).
   const update: UpdateStatus = new URLSearchParams(location.search).has("update")

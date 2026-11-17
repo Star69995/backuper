@@ -6,7 +6,7 @@ import { cacheFolderIn } from "../lib/cacheFolders";
 import { flatRules } from "../lib/filterRules";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
 import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
-import { AdminPermissionOffer, useAdminPermission } from "./adminPermission";
+import { AdminPermissionOffer, useAdminPermission, usesVss, useVssAll } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
 import { useResumeTask } from "./resumeTask";
@@ -681,6 +681,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
     }
   };
+  const vssAll = useVssAll();
   const backupOpenFiles = async (sourceIndex: number) => {
     setVssBusy(true);
     try {
@@ -688,7 +689,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       setUpdated(rec);
       const left = rec.sources[sourceIndex]?.errors.length ?? 0;
       // This saves this run only: offer the task option, or the next run leaves the same files out again.
-      const offerAuto = task !== null && !task.vssOpenFiles;
+      const offerAuto = task !== null && !usesVss(task, vssAll);
       toast({
         tone: left > 0 ? "warn" : "ok",
         title: left > 0 ? "חלק מהקבצים עדיין לא גובו" : "הקבצים הפתוחים גובו דרך VSS",
@@ -741,7 +742,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     }
   };
   const openFiles: OpenFilesActions | null = task && {
-    vssOn: task.vssOpenFiles,
+    vssOn: usesVss(task, vssAll),
     busy: vssBusy,
     backupNow: backupOpenFiles,
     enableAuto: enableAutoVss,

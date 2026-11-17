@@ -1,7 +1,7 @@
 import { ShieldAlert, ShieldCheck } from "lucide-react";
 import { createContext, type ReactNode, useContext, useState } from "react";
 import { api, errorText } from "../api";
-import type { AdminPermission, Task } from "../types";
+import type { AdminPermission, Snapshot, Task } from "../types";
 import { useFeedback } from "./feedback";
 import { Button, Checkbox, cx } from "./ui";
 
@@ -9,16 +9,25 @@ import { Button, Checkbox, cx } from "./ui";
 // run as admin without Windows's prompt - a scheduled backup has nobody there to answer it. Every
 // place that may end in that prompt offers it (`AdminPermissionOffer`) until it is on.
 
-const Ctx = createContext<{ status: AdminPermission; full: boolean }>({ status: "unknown", full: false });
-/** App.tsx provides `snap.adminPermission` and `snap.adminFullAccess`, so any component can read them. */
+const Ctx = createContext<{ status: AdminPermission; full: boolean; vssAll: boolean }>({ status: "unknown", full: false, vssAll: false });
+/**
+ * App.tsx provides `snap.adminPermission`, `snap.adminFullAccess` and `settings.vssAllTasks`, so any
+ * component can read them.
+ */
 export const AdminPermissionProvider = Ctx.Provider;
 
 export const NOT_ADMIN_TEXT =
   "חשבון Windows שלכם הוא משתמש רגיל, לא מנהל, ולכן אי אפשר לתת הרשאה קבועה: Windows תבקש סיסמת מנהל בכל פעם. כדי לגבות בלי לבקש, אפשר להפוך את החשבון לחשבון מנהל בהגדרות של Windows.";
 
+/** `settings.vssAllTasks`: every task backs up open files through VSS, whatever its own switch says. */
+export const useVssAll = () => useContext(Ctx).vssAll;
+
+/** Whether a run of the task backs up open files through VSS (its own switch, or the general setting). */
+export const usesVss = (t: Task, vssAll: boolean) => vssAll || t.vssOpenFiles;
+
 /** A task that may run with nobody at the computer and may need admin then (open files through VSS). */
-export const runsUnattendedWithVss = (t: Task) =>
-  t.enabled && t.vssOpenFiles && (t.schedule.kind !== "manual" || t.onDriveConnect === "run");
+export const runsUnattendedWithVss = (t: Task, vssAll: boolean) =>
+  t.enabled && usesVss(t, vssAll) && (t.schedule.kind !== "manual" || t.onDriveConnect === "run");
 
 /** ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: a file another program holds open (vss.rs `is_in_use`). */
 const IN_USE = new Set([32, 33]);
@@ -78,8 +87,8 @@ function FullAccessChoice({ initial, onChange }: { initial: boolean; onChange: (
 }
 
 export function useAdminPermission() {
-  const { status, full } = useContext(Ctx);
-  const { toast, confirm } = useFeedback();
+  const { status, full, vssAll } = useContext(Ctx);
+  const { toast, confirm, choose } = useFeedback();
   const [busy, setBusy] = useState(false);
 
   const grant = async () => {
@@ -123,43 +132,62 @@ export function useAdminPermission() {
     return true;
   };
 
-  /** After the grant: the tasks that had open files not backed up get the VSS option offered (the permission alone doesn't switch it on). */
+  /**
+   * After the grant: the permission only says how admin work runs, not that a task backs up open files - that is
+   * each task's switch, or the general setting. Offers the general setting, or only the tasks whose latest run
+   * left open files behind.
+   */
   const offerVss = async () => {
-    let tasks: Task[];
+    if (vssAll) return;
+    let snap: Snapshot;
+    let missing: Task[];
     try {
-      tasks = await tasksMissingVss();
+      [snap, missing] = await Promise.all([api.snapshot(), tasksMissingVss()]);
     } catch {
       return;
     }
-    if (tasks.length === 0) return;
-    const one = tasks.length === 1;
-    const ok = await confirm({
-      title: "הפעלת גיבוי קבצים פתוחים דרך VSS",
+    if (snap.settings.vssAllTasks || snap.tasks.every((t) => t.vssOpenFiles)) return;
+    const one = missing.length === 1;
+    const answer = await choose<"all" | "these">({
+      title: "גיבוי קבצים פתוחים דרך VSS",
       message: (
         <div className="flex flex-col gap-2">
           <p>
-            {one ? "בגיבוי האחרון של המשימה הזאת היו קבצים" : "בגיבוי האחרון של המשימות האלה היו קבצים"} שפתוחים בתוכנה אחרת (למשל
-            Outlook) ולא הועתקו. ההרשאה מאפשרת לגבות אותם בלי לשאול, אבל רק משימה שמופעל בה גיבוי דרך VSS משתמשת בה.
+            ההרשאה מאפשרת לגבות קבצים שפתוחים בתוכנה אחרת (למשל קובץ הדואר של Outlook) בלי לשאול, אבל משימה משתמשת בה רק כשמופעל
+            בה גיבוי דרך VSS. אפשר להפעיל אותו בכל המשימות בבת אחת, כולל משימות שיתווספו בהמשך.
           </p>
-          <ul className="list-inside list-disc">
-            {tasks.map((t) => (
-              <li key={t.id}>
-                <bdi>{t.name}</bdi>
-              </li>
-            ))}
-          </ul>
+          {missing.length > 0 && (
+            <>
+              <p>{one ? "בגיבוי האחרון של המשימה הזאת" : "בגיבוי האחרון של המשימות האלה"} היו קבצים פתוחים שלא הועתקו:</p>
+              <ul className="list-inside list-disc">
+                {missing.map((t) => (
+                  <li key={t.id}>
+                    <bdi>{t.name}</bdi>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </div>
       ),
-      confirmLabel: one ? "הפעלה במשימה" : "הפעלה במשימות",
+      options: [
+        ...(missing.length > 0 ? [{ value: "these" as const, label: one ? "רק במשימה הזאת" : "רק במשימות האלה" }] : []),
+        { value: "all" as const, label: "הפעלה בכל המשימות" },
+      ],
     });
-    if (!ok) return;
+    if (!answer) return;
     try {
       // Fresh copies: the list may have changed while the dialog was open.
-      const now = (await api.snapshot()).tasks.filter((t) => tasks.some((x) => x.id === t.id));
-      await api.saveTasks(now.map((t) => ({ ...t, vssOpenFiles: true })));
-      toast({ tone: "ok", title: "הגיבוי דרך VSS הופעל", message: "קבצים פתוחים יגובו דרך VSS בכל הרצה, בלי לבקש אישור." });
+      const now = await api.snapshot();
+      if (answer === "all") await api.saveSettings({ ...now.settings, vssAllTasks: true });
+      else await api.saveTasks(now.tasks.filter((t) => missing.some((x) => x.id === t.id)).map((t) => ({ ...t, vssOpenFiles: true })));
+      toast({
+        tone: "ok",
+        title: answer === "all" ? "הגיבוי דרך VSS הופעל בכל המשימות" : "הגיבוי דרך VSS הופעל",
+        message: "קבצים פתוחים יגובו דרך VSS בכל הרצה, בלי לבקש אישור.",
+      });
     } catch (e) {
-      toast({ tone: "bad", title: "לא ניתן לעדכן את המשימות", message: errorText(e) });
+      toast({ tone: "bad", title: "לא ניתן לשמור את השינוי", message: errorText(e) });
     }
   };
 
@@ -183,7 +211,7 @@ export function useAdminPermission() {
     }
   };
 
-  return { status, full, busy, grant, revoke };
+  return { status, full, vssAll, busy, grant, revoke };
 }
 
 /** `onDone`: after an attempt (the snapshot also refreshes by itself; the dev mock doesn't). */
