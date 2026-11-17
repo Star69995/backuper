@@ -723,7 +723,8 @@ mod tests {
         };
         // A network path is not asked about at all (it could stall), so it stays as it is.
         t.filters.push(FilterRule::File { value: r"\\no-such-server\share\dir".into() });
-        t.fix_folder_file_rules();
+        assert!(t.fix_folder_file_rules(), "a rule changed");
+        assert!(!t.fix_folder_file_rules(), "nothing left to fix the second time");
         let _ = std::fs::remove_dir(&dir);
         assert!(matches!(&t.filters[0], FilterRule::Folder { value } if *value == d));
         assert!(matches!(&t.filters[1], FilterRule::File { value } if *value == file));

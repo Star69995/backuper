@@ -168,6 +168,9 @@ export default function HistoryView({
   );
 }
 
+/** How many failed paths `RunDetails` asks the backend about (see `folders_among`). */
+const FOLDER_LOOKUPS = 300;
+
 /** The source's errors with the paths in `folders` marked as folders (a trailing backslash). */
 function withFolders(src: SourceRun, folders: Set<string>): SourceRun {
   if (!src.errors.some((e) => folders.has(e.path))) return src;
@@ -181,6 +184,16 @@ const NOT_SKIPPABLE = new Set(["diskFull", "disconnected"]);
 const LOG_LINES = 3000;
 
 const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
+
+/** The rules without the file rules for `path` (also inside groups; a group left empty goes too). */
+function withoutFileRule(rules: FilterRule[], path: string): FilterRule[] {
+  return rules.flatMap((f): FilterRule[] => {
+    if (f.kind === "file") return norm(f.value) === norm(path) ? [] : [f];
+    if (f.kind !== "group") return [f];
+    const inner = withoutFileRule(f.rules, path);
+    return inner.length === f.rules.length ? [f] : inner.length ? [{ ...f, rules: inner }] : [];
+  });
+}
 
 /**
  * Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it).
@@ -675,8 +688,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
       if (!now) throw new Error("המשימה נמחקה");
       // A file rule an older version saved for this folder: the folder rule takes its place.
-      const kept =
-        rule.kind === "folder" ? now.filters.filter((f) => !(f.kind === "file" && norm(f.value) === norm(rule.value))) : now.filters;
+      const kept = rule.kind === "folder" ? withoutFileRule(now.filters, rule.value) : now.filters;
       const [saved] = await api.saveTasks([{ ...now, filters: [...kept, rule] }]);
       setTask(saved);
       toast({
@@ -791,7 +803,11 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
   // are folders, so they show (and "skip next time" offers them) as folders.
   const [folders, setFolders] = useState<Set<string>>(new Set());
   useEffect(() => {
-    const paths = [...new Set(r.sources.flatMap((s) => s.errors.map((e) => e.path)).filter((p) => p && !p.endsWith("\\")))];
+    // Each path is one directory lookup, so a run with thousands of errors only asks about the first ones.
+    const paths = [...new Set(r.sources.flatMap((s) => s.errors.map((e) => e.path)).filter((p) => p && !p.endsWith("\\")))].slice(
+      0,
+      FOLDER_LOOKUPS,
+    );
     if (!paths.length) return;
     let alive = true;
     api
