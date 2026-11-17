@@ -1,7 +1,7 @@
 import { CalendarClock, CircleHelp, Download, HardDriveDownload, History, ListChecks, Settings as SettingsIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { api } from "./api";
-import { AdminPermissionProvider, AdminPermissionSideOffer } from "./components/adminPermission";
+import { AdminPermissionProvider, AdminPermissionSideOffer, VssSideOffer } from "./components/adminPermission";
 import DeleteProblemDialog from "./components/DeleteProblemDialog";
 import DrivePromptDialog from "./components/DrivePromptDialog";
 import HelpView from "./components/HelpView";
@@ -89,6 +89,7 @@ export default function App() {
         </nav>
         <div className="flex gap-1 md:mt-auto md:flex-col">
           <AdminPermissionSideOffer onDone={refresh} />
+          <VssSideOffer snap={snap} onDone={refresh} />
           {updateFound && (
             <button
               type="button"

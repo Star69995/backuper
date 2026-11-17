@@ -204,6 +204,8 @@ interface OpenFilesActions {
   backupNow: (sourceIndex: number) => void;
   /** Turns on VSS for the task's next runs. */
   enableAuto: () => void;
+  /** Turns on VSS in every task (`settings.vssAllTasks`). */
+  enableAll: () => void;
   skipAll: (paths: string[]) => void;
 }
 
@@ -492,9 +494,14 @@ function SourceCard({
                     {openFiles.busy ? "מגבה דרך VSS..." : "גיבוי הקבצים עכשיו דרך VSS"}
                   </Button>
                   {!openFiles.vssOn && (
-                    <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAuto}>
-                      גיבוי אוטומטי דרך VSS בכל הרצה
-                    </Button>
+                    <>
+                      <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAuto}>
+                        גיבוי אוטומטי דרך VSS בכל הרצה
+                      </Button>
+                      <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAll}>
+                        VSS בכל המשימות
+                      </Button>
+                    </>
                   )}
                   <Button
                     size="sm"
@@ -718,6 +725,15 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
     }
   };
+  const enableAllVss = async () => {
+    try {
+      const now = await api.snapshot();
+      await api.saveSettings({ ...now.settings, vssAllTasks: true });
+      toast({ tone: "ok", title: "הגיבוי דרך VSS הופעל בכל המשימות", message: "אפשר לשנות את זה בהגדרות - הרשאת מנהל." });
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לשמור את ההגדרה", message: errorText(e) });
+    }
+  };
   const skipAll = async (paths: string[]) => {
     try {
       const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
@@ -746,6 +762,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     busy: vssBusy,
     backupNow: backupOpenFiles,
     enableAuto: enableAutoVss,
+    enableAll: enableAllVss,
     skipAll,
   };
   const askSkip = (path: string, source: string, all: string[]) => {
