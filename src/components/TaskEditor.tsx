@@ -327,7 +327,7 @@ export default function TaskEditor({
   onClose: () => void;
   onSaved: (t: Task, isNew: boolean) => void;
 }) {
-  const admin = useAdminPermission().status;
+  const { status: admin, vssAll } = useAdminPermission();
   const isNew = !task.id;
   const [t, setT] = useState<Task>(task);
   const [error, setError] = useState<string | null>(null);
@@ -679,16 +679,19 @@ export default function TaskEditor({
               description="כברירת מחדל תיקיות ריקות לא מועתקות לגיבוי."
             />
             <Toggle
-              checked={t.vssOpenFiles}
+              checked={t.vssOpenFiles || vssAll}
+              disabled={vssAll}
               onChange={(v) => set("vssOpenFiles", v)}
               label="גיבוי קבצים שפתוחים בתוכנה אחרת (VSS)"
               description={
-                admin === "on"
+                vssAll
+                  ? "מופעל בכל המשימות לפי ההגדרות (הרשאת מנהל - \"גיבוי קבצים פתוחים דרך VSS בכל המשימות\"). קובץ שתוכנה אחרת מחזיקה פתוח (כמו קובץ הדואר של Outlook) מועתק מתצלום מצב של הכונן (Volume Shadow Copy)."
+                  : admin === "on"
                   ? "קובץ שתוכנה אחרת מחזיקה פתוח (כמו קובץ הדואר של Outlook או מסד נתונים) לא נכשל בגיבוי: הוא מועתק מתצלום מצב של הכונן (Volume Shadow Copy). זה דורש הרשאת מנהל, וההרשאה הקבועה שניתנה מאפשרת את זה בלי לשאול."
                   : "קובץ שתוכנה אחרת מחזיקה פתוח (כמו קובץ הדואר של Outlook או מסד נתונים) לא נכשל בגיבוי: הוא מועתק מתצלום מצב של הכונן (Volume Shadow Copy). Windows מבקשת אישור מנהל בכל פעם (אלא אם נותנים הרשאה קבועה). בהרצה מתוזמנת שאף אחד לא מאשר, הקובץ מדולג אחרי 3 דקות והגיבוי ממשיך."
               }
             />
-            {t.vssOpenFiles && (
+            {(t.vssOpenFiles || vssAll) && (
               <AdminPermissionOffer>
                 הרשאה קבועה: Windows מאשרת פעם אחת, ומאז הגיבוי של קבצים פתוחים לא מחכה לאישור - גם בגיבוי מתוזמן כשאף אחד לא ליד המחשב.
               </AdminPermissionOffer>

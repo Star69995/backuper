@@ -531,6 +531,9 @@ pub struct Settings {
     /// While a full copy runs, scan the source beside it to find how much there is to copy (the
     /// percentage and the finish time). Off: counters only, plus the estimate from the last backup.
     pub background_totals: bool,
+    /// Every task backs up files another program holds open through VSS, as if its own
+    /// `vss_open_files` were on (the user's general choice, usually beside the permanent admin permission).
+    pub vss_all_tasks: bool,
 }
 
 /// A backup folder that should have been deleted (retention, a stopped copy, the user) but wasn't.
@@ -590,6 +593,7 @@ impl Default for Settings {
             update_idle_minutes: 2,
             exact_progress: false,
             background_totals: true,
+            vss_all_tasks: false,
         }
     }
 }

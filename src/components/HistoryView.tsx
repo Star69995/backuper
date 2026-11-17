@@ -6,7 +6,7 @@ import { cacheFolderIn } from "../lib/cacheFolders";
 import { flatRules } from "../lib/filterRules";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
 import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
-import { AdminPermissionOffer, useAdminPermission } from "./adminPermission";
+import { AdminPermissionOffer, useAdminPermission, usesVss, useVssAll } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
 import { useResumeTask } from "./resumeTask";
@@ -228,6 +228,8 @@ interface OpenFilesActions {
   backupNow: (sourceIndex: number) => void;
   /** Turns on VSS for the task's next runs. */
   enableAuto: () => void;
+  /** Turns on VSS in every task (`settings.vssAllTasks`). */
+  enableAll: () => void;
   skipAll: (paths: string[]) => void;
 }
 
@@ -516,9 +518,14 @@ function SourceCard({
                     {openFiles.busy ? "מגבה דרך VSS..." : "גיבוי הקבצים עכשיו דרך VSS"}
                   </Button>
                   {!openFiles.vssOn && (
-                    <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAuto}>
-                      גיבוי אוטומטי דרך VSS בכל הרצה
-                    </Button>
+                    <>
+                      <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAuto}>
+                        גיבוי אוטומטי דרך VSS בכל הרצה
+                      </Button>
+                      <Button size="sm" disabled={openFiles.busy} onClick={openFiles.enableAll}>
+                        VSS בכל המשימות
+                      </Button>
+                    </>
                   )}
                   <Button
                     size="sm"
@@ -707,16 +714,25 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
     }
   };
+  const vssAll = useVssAll();
   const backupOpenFiles = async (sourceIndex: number) => {
     setVssBusy(true);
     try {
       const rec = await api.backupOpenFiles(r.id, sourceIndex);
       setUpdated(rec);
       const left = rec.sources[sourceIndex]?.errors.length ?? 0;
+      // This saves this run only: offer the task option, or the next run leaves the same files out again.
+      const offerAuto = task !== null && !usesVss(task, vssAll);
       toast({
         tone: left > 0 ? "warn" : "ok",
         title: left > 0 ? "חלק מהקבצים עדיין לא גובו" : "הקבצים הפתוחים גובו דרך VSS",
-        message: left > 0 ? "פרטים ברשימת השגיאות" : undefined,
+        message:
+          left > 0
+            ? "פרטים ברשימת השגיאות"
+            : offerAuto
+              ? "רק בריצה הזאת. כדי שזה יקרה מעצמו בכל הרצה, הפעילו את הגיבוי האוטומטי דרך VSS."
+              : undefined,
+        action: offerAuto ? { label: "הפעלה בכל הרצה", onClick: () => void enableAutoVss() } : undefined,
       });
     } catch (e) {
       toast({ tone: "bad", title: "הגיבוי דרך VSS לא הצליח", message: errorText(e) });
@@ -733,6 +749,15 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
       toast({ tone: "ok", title: "הגיבוי האוטומטי דרך VSS הופעל", message: "קבצים פתוחים יגובו דרך VSS בכל הרצה של המשימה." });
     } catch (e) {
       toast({ tone: "bad", title: "לא ניתן לעדכן את המשימה", message: errorText(e) });
+    }
+  };
+  const enableAllVss = async () => {
+    try {
+      const now = await api.snapshot();
+      await api.saveSettings({ ...now.settings, vssAllTasks: true });
+      toast({ tone: "ok", title: "הגיבוי דרך VSS הופעל בכל המשימות", message: "אפשר לשנות את זה בהגדרות - הרשאת מנהל." });
+    } catch (e) {
+      toast({ tone: "bad", title: "לא ניתן לשמור את ההגדרה", message: errorText(e) });
     }
   };
   const skipAll = async (paths: string[]) => {
@@ -759,10 +784,11 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     }
   };
   const openFiles: OpenFilesActions | null = task && {
-    vssOn: task.vssOpenFiles,
+    vssOn: usesVss(task, vssAll),
     busy: vssBusy,
     backupNow: backupOpenFiles,
     enableAuto: enableAutoVss,
+    enableAll: enableAllVss,
     skipAll,
   };
   const askSkip = (path: string, source: string, all: string[]) => {

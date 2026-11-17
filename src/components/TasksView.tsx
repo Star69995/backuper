@@ -67,7 +67,7 @@ import { useFeedback } from "./feedback";
 import { useResumeTask } from "./resumeTask";
 import { useStopTask } from "./stopTask";
 import { useTaskListTransfer } from "./ImportTasksDialog";
-import { AdminPermissionOffer, runsUnattendedWithVss } from "./adminPermission";
+import { AdminPermissionOffer, runsUnattendedWithVss, useVssAll } from "./adminPermission";
 import PausedCard from "./PausedCard";
 import RunningCard from "./RunningCard";
 import TaskEditor from "./TaskEditor";
@@ -210,7 +210,8 @@ function useActiveGroup() {
 
 /** Scheduled tasks that back up open files need admin with nobody there: offer the permanent permission. */
 function UnattendedVssOffer({ tasks }: { tasks: Task[] }) {
-  const names = tasks.filter(runsUnattendedWithVss).map((t) => t.name);
+  const vssAll = useVssAll();
+  const names = tasks.filter((t) => runsUnattendedWithVss(t, vssAll)).map((t) => t.name);
   if (names.length === 0) return null;
   return (
     <AdminPermissionOffer>
