@@ -33,6 +33,10 @@ pub struct Snapshot {
     update: crate::model::UpdateStatus,
     /// Per task: how many of its folders a Cobian takeover renamed (recorded, can be put back).
     cobian_renamed: HashMap<String, usize>,
+    /// Whether admin work (VSS, stuck deletes) runs without Windows's prompt (`elevation`).
+    admin_permission: crate::model::AdminPermission,
+    /// The permission was given with full access: no request is ever refused back to Windows's prompt.
+    admin_full_access: bool,
 }
 
 #[tauri::command]
@@ -53,6 +57,8 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
             *m.entry(r.task_id.clone()).or_insert(0) += 1;
             m
         }),
+        admin_permission: crate::elevation::cached(),
+        admin_full_access: crate::elevation::full_access(),
         // Dev builds never register; show the saved choice there.
         autostart: if cfg!(debug_assertions) {
             s.settings.start_with_windows
@@ -60,6 +66,38 @@ pub fn get_snapshot(core: CoreState, updates: UpdatesState, app: tauri::AppHandl
             app.autolaunch().is_enabled().unwrap_or(false)
         },
     }
+}
+
+/// Gives the app permanent admin permission (Windows asks once); `full` = with full access (also
+/// how the choice is changed later). Blocks while the prompt is open.
+#[tauri::command]
+pub async fn grant_admin_permission(core: CoreState<'_>, full: bool) -> Result<(), String> {
+    let core = core.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || crate::elevation::grant(full)).await.map_err(|e| e.to_string())?;
+    core.changed();
+    result
+}
+
+/// Takes the permanent admin permission back (Windows asks).
+#[tauri::command]
+pub async fn revoke_admin_permission(core: CoreState<'_>) -> Result<(), String> {
+    let core = core.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(crate::elevation::revoke).await.map_err(|e| e.to_string())?;
+    core.changed();
+    result
+}
+
+/// Reads the permission's state from Windows again (the settings page, on focus: it may have been
+/// removed in the Task Scheduler).
+#[tauri::command]
+pub async fn check_admin_permission(core: CoreState<'_>) -> Result<crate::model::AdminPermission, String> {
+    let core = core.inner().clone();
+    let before = crate::elevation::cached();
+    let now = tauri::async_runtime::spawn_blocking(crate::elevation::refresh).await.map_err(|e| e.to_string())?;
+    if now != before {
+        core.changed();
+    }
+    Ok(now)
 }
 
 fn prepare(mut t: Task) -> Result<Task, String> {
@@ -265,8 +303,8 @@ pub fn resume_task(core: CoreState, id: String) -> bool {
 
 /// Answers the "drive connected" question: queues `run`, drops the rest of `ids`.
 #[tauri::command]
-pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>) {
-    core.answer_drive_prompts(&ids, &run);
+pub fn answer_drive_prompts(core: CoreState, ids: Vec<String>, run: Vec<String>, remember: bool) {
+    core.answer_drive_prompts(&ids, &run, remember);
 }
 
 #[tauri::command]
@@ -419,13 +457,17 @@ pub async fn folder_size(path: String) -> Result<u64, String> {
 
 /// The paths that are folders on disk (read from the parent's listing, so a folder we may not open counts too).
 /// Runs from older versions list an unreadable folder without a trailing backslash; `RunDetails` asks this so
-/// "skip next time" offers the folder.
+/// "skip next time" offers the folder. Network paths are left out.
 #[tauri::command]
 pub async fn folders_among(paths: Vec<String>) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         paths
             .into_iter()
-            .filter(|p| crate::engine::native::find(std::path::Path::new(p.trim_end_matches('\\'))).is_some_and(|i| i.is_dir()))
+            .filter(|p| {
+                // A network path can stall for seconds; only drives of this computer are asked.
+                let path = std::path::Path::new(p.trim_end_matches('\\'));
+                crate::engine::native::is_local_path(path) && crate::engine::native::find(path).is_some_and(|i| i.is_dir())
+            })
             .collect()
     })
     .await
@@ -491,7 +533,11 @@ pub async fn full_space(core: CoreState<'_>, task_ids: Vec<String>) -> Result<Ve
 
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    // Explorer runs a file it is handed, and a quote would end the argument: folders only.
+    if path.contains('"') || !std::path::Path::new(&path).is_dir() {
+        return Err("התיקייה לא נמצאה - ייתכן שהכונן לא מחובר או שהיא נמחקה".into());
+    }
+    std::process::Command::new(crate::engine::explorer())
         .raw_arg(format!("\"{path}\""))
         .spawn()
         .map(|_| ())

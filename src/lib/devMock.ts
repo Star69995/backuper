@@ -29,7 +29,8 @@ import { newTask } from "../types";
 
 /** A mock task without the hidden / system rules a new task starts with, so the mock tasks show only the rules they list. */
 // Like a task saved before VSS existed: no rules, open files not backed up through VSS.
-const plainTask = (): Task => ({ ...newTask(), filters: [], vssOpenFiles: false });
+// ?vssTasks: the mock tasks back up open files (VSS), as in the "permanent admin permission" offer.
+const plainTask = (): Task => ({ ...newTask(), filters: [], vssOpenFiles: new URLSearchParams(location.search).has("vssTasks") });
 
 const mockCopyStart = Date.now() - 60_000;
 
@@ -505,6 +506,7 @@ export function installDevMock() {
           message: "Access is denied. (os error 5)",
           at: new Date().toISOString(),
           blocking: true,
+          waitUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
         },
       ]
     : [];
@@ -521,8 +523,14 @@ export function installDevMock() {
       }
     : null;
 
+  // `?admin=on|outdated|notAdmin` shows the other states of the permanent admin permission.
+  let adminPermission = (new URLSearchParams(location.search).get("admin") ?? "off") as Snapshot["adminPermission"];
+
   // Fresh copies each time, like the real backend: the UI memoizes on array identity.
+  let adminFullAccess = false;
   const snapshot = (): Snapshot => ({
+    adminPermission,
+    adminFullAccess,
     tasks: [...tasks],
     states: { ...states },
     settings,
@@ -732,6 +740,10 @@ export function installDevMock() {
         return cmd === "retry_delete" ? [] : null;
       case "answer_drive_prompts":
         drivePrompts = drivePrompts.filter((id) => !(a.ids as string[]).includes(id));
+        if (a.remember)
+          for (const t of tasks)
+            if ((a.ids as string[]).includes(t.id) && t.onDriveConnect === "ask")
+              t.onDriveConnect = (a.run as string[]).includes(t.id) ? "run" : "off";
         return null;
       case "check_updates":
         update.checkedAt = new Date().toISOString();
@@ -744,6 +756,16 @@ export function installDevMock() {
       case "dismiss_navigate":
         navigate = null;
         return null;
+      case "grant_admin_permission":
+        adminPermission = "on";
+        adminFullAccess = !!a.full;
+        return null;
+      case "revoke_admin_permission":
+        adminPermission = "off";
+        adminFullAccess = false;
+        return null;
+      case "check_admin_permission":
+        return adminPermission;
       case "dismiss_update_prompt":
         update.prompt = false;
         return null;

@@ -283,7 +283,14 @@ export interface Snapshot {
   update: UpdateStatus;
   /** Per task id: how many of its folders a Cobian takeover renamed (their names can be put back). */
   cobianRenamed: Record<string, number>;
+  /** Whether admin work (open files through VSS, stuck deletes) runs without Windows's prompt (model.rs `AdminPermission`). */
+  adminPermission: AdminPermission;
+  /** The permission was given with full access: nothing is ever sent back to Windows's prompt. */
+  adminFullAccess: boolean;
 }
+
+/** unknown = not checked yet; outdated = given by an older version, approve again; notAdmin = a standard Windows account. */
+export type AdminPermission = "unknown" | "off" | "on" | "outdated" | "notAdmin";
 
 /** A backup folder that should have been deleted but wasn't (model.rs `DeleteProblem`). */
 export interface DeleteProblem {
@@ -297,6 +304,8 @@ export interface DeleteProblem {
   at: string;
   /** The running backup waits for the answer before it copies (a delete-before failed). */
   blocking: boolean;
+  /** A scheduled run waits only until then, and then goes on without the delete. */
+  waitUntil: string | null;
 }
 
 export interface Notice {

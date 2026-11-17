@@ -1,9 +1,10 @@
 import { AlertTriangle, FolderOpen, RotateCw, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api";
-import { fmtBytes } from "../lib/format";
+import { fmtBytes, fmtSmart } from "../lib/format";
 import { useDiskSpace, useFullSpace } from "../lib/useDiskSpace";
 import type { DeleteProblem, Snapshot } from "../types";
+import { AdminPermissionOffer } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import { Button, Modal, PathText, SkipIcon } from "./ui";
 
@@ -113,6 +114,8 @@ export default function DeleteProblemDialog({ snap, refresh }: { snap: Snapshot;
   if (problems.length === 0) return null;
   // A backup waits for the answer (its delete-before failed).
   const waiting = problems.some((p) => p.blocking);
+  // A scheduled run doesn't wait for ever: it goes on without the delete at this time.
+  const waitUntil = problems.find((p) => p.blocking && p.waitUntil)?.waitUntil ?? null;
 
   const needsAdmin = problems.some((p) => p.reason === "access");
   const close = () => {
@@ -148,7 +151,8 @@ export default function DeleteProblemDialog({ snap, refresh }: { snap: Snapshot;
       }
       subtitle={
         waiting
-          ? "הגיבוי ממתין להחלטה שלכם לפני שהוא מתחיל להעתיק: בלי המחיקה ייתכן שלא יהיה לו מספיק מקום."
+          ? "הגיבוי ממתין להחלטה שלכם לפני שהוא מתחיל להעתיק: בלי המחיקה ייתכן שלא יהיה לו מספיק מקום." +
+            (waitUntil ? ` בלי החלטה עד ${fmtSmart(waitUntil).replace("היום ", "")} הוא ימשיך לבד בלי המחיקה.` : "")
           : "כל עוד הוא לא נמחק הוא תופס מקום בכונן הגיבוי, והגיבויים הבאים עלולים להיכשל כשהכונן יתמלא."
       }
       onClose={close}
@@ -175,6 +179,11 @@ export default function DeleteProblemDialog({ snap, refresh }: { snap: Snapshot;
       }
     >
       <div className="flex flex-col gap-4">
+        {needsAdmin && (
+          <AdminPermissionOffer>
+            עם הרשאה קבועה, גיבוי שלא מצליח למחוק גיבוי ישן ימחק אותו בהרשאת מנהל מעצמו, בלי לחכות לכם - גם כשאף אחד לא ליד המחשב.
+          </AdminPermissionOffer>
+        )}
         {taskIds.map((id) => {
           const mine = problems.filter((p) => p.taskId === id);
           const known = mine.map((p) => sizes[p.path]);

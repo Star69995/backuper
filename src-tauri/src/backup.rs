@@ -22,6 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 
+/// How long a scheduled run waits for an answer about a backup folder its delete-before couldn't
+/// delete, before it goes on without the delete.
+pub const UNATTENDED_DELETE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// "03h15" (not "03;15" or "03_15", which show as "15;03" inside Hebrew text: only "-", "." and
 /// "," keep the two numbers together; a letter does too).
 const DATE_FMT: &str = "%Y-%m-%d %Hh%M";
@@ -162,6 +166,11 @@ fn parse_dated(prefix: &str, name: &str) -> Option<Dated> {
         }
     };
     Some(Dated { at, kind, partial, seconds, old })
+}
+
+/// Whether `name` is a dated backup folder of the source whose folder name is `prefix`.
+pub fn is_dated(prefix: &str, name: &str) -> bool {
+    parse_dated(prefix, name).is_some()
 }
 
 pub fn parse_folder(prefix: &str, name: &str) -> Option<(DateTime<Local>, BackupMode, bool)> {
@@ -695,11 +704,32 @@ fn skip_done(folder: &Path, changed: Vec<ListedFile>) -> (Vec<ListedFile>, u64) 
     (left, count)
 }
 
+/// The file that gives a Windows folder its look: in a special folder (Documents, Pictures,
+/// Desktop...) it holds the name Explorer shows ("מסמכים") instead of the folder's real name.
+const FOLDER_LOOK: &str = "desktop.ini";
+
+/// The task's filters for one source, plus the source's own `desktop.ini` (only the one directly in
+/// it): copied to the top of the backup folder, it made Explorer show the dated backup folder as
+/// "מסמכים" instead of its name, so the backups seemed to be gone. Those in subfolders stay.
+fn source_filters(filters: &Filters, source: &Path) -> Filters {
+    let mut f = filters.clone();
+    let base = source.to_string_lossy().replace('/', "\\");
+    f.exclude_files.push(format!("{}\\{FOLDER_LOOK}", base.trim_end_matches('\\')));
+    f
+}
+
 /// robocopy gives the backup folder the attributes of the source folder, and a drive root is
-/// hidden + system: Explorer would not show the backup folder at all. Clear them.
+/// hidden + system: Explorer would not show the backup folder at all. Clear them. Also removes a
+/// `desktop.ini` at the top of the folder (see `source_filters`; backups written before that
+/// have one), so Explorer shows the folder under its own name.
 fn unhide(folder: &Path) {
     if folder.is_dir() {
         crate::tasklist::set_attributes(folder, crate::tasklist::NORMAL);
+        let ini = folder.join(FOLDER_LOOK);
+        if ini.is_file() {
+            crate::tasklist::set_attributes(&ini, crate::tasklist::NORMAL);
+            let _ = fs::remove_file(&ini);
+        }
     }
 }
 
@@ -771,8 +801,9 @@ pub struct RunContext<'a> {
     /// `blocking` = the run waits for the answer (`await_deletes`) before it copies.
     pub delete_failed: &'a (dyn Fn(&Path, &std::io::Error, bool) + Sync),
     /// Waits until the user has dealt with the blocking reports of this run (deleted, or skipped
-    /// the delete to go on), or the run is cancelled.
-    pub await_deletes: &'a (dyn Fn() + Sync),
+    /// the delete to go on), or the run is cancelled, or - given a limit - that long has passed.
+    /// Returns true when it gave up waiting.
+    pub await_deletes: &'a (dyn Fn(Option<std::time::Duration>) -> bool + Sync),
 }
 
 /// What a background scan compares the source with, to find how much a full copy will do.
@@ -957,6 +988,11 @@ pub fn backup_source(
 
     modernize_names(&dest, &prefix);
     let backups = list_backups(&task.destination, &prefix);
+    // Backups written before `source_filters` may show under the source's display name.
+    for b in &backups {
+        unhide(Path::new(&b.path));
+    }
+    let src_filters = source_filters(ctx.filters, &source);
     let (mode, note) = effective_mode(&backups, requested);
     run.mode = Some(mode);
     let mut notes: Vec<String> = note.into_iter().collect();
@@ -1026,8 +1062,15 @@ pub fn backup_source(
                     notes.push("הגיבויים הקודמים נמחקו לפני תחילת הגיבוי (לפי הגדרות המשימה)".into());
                 }
                 // The point of deleting first is room for this copy: let the user deal with what
-                // wouldn't go (delete as admin, close a program, or skip it) before copying.
-                (ctx.await_deletes)();
+                // wouldn't go (delete as admin, close a program, or skip it) before copying. A scheduled
+                // run may have nobody to answer: it goes on without the delete after a while, rather
+                // than hold every other backup in the queue until someone comes by.
+                if (ctx.await_deletes)(ctx.scheduled.then_some(UNATTENDED_DELETE_WAIT)) {
+                    notes.push(format!(
+                        "גיבוי ישן לא נמחק ואף אחד לא החליט מה לעשות בו תוך {} דקות, ולכן הגיבוי המשיך בלי המחיקה",
+                        UNATTENDED_DELETE_WAIT.as_secs() / 60
+                    ));
+                }
             }
             if !reused {
                 if let Err(e) = fs::create_dir_all(&work) {
@@ -1041,7 +1084,7 @@ pub fn backup_source(
             // items the rules skip now; robocopy's mirror leaves those alone, so remove them here.
             if (reused || resume.is_some()) && *ctx.filters != Filters::default() {
                 on_event(EngineEvent::Phase("pruning"));
-                match native::prune_filtered(&source, &work, ctx.filters, ctx.cancel) {
+                match native::prune_filtered(&source, &work, &src_filters, ctx.cancel) {
                     Ok(Some(p)) => {
                         if p.files > 0 {
                             notes.push(format!("נמחקו {} קבצים שלא נכללים עוד בסינון (לפי כללי הסינון הנוכחיים)", p.files));
@@ -1060,7 +1103,7 @@ pub fn backup_source(
                 }
             }
             on_event(EngineEvent::Phase("scanning"));
-            let filters = match native::resolve_regex(&source, ctx.filters, ctx.cancel) {
+            let filters = match native::resolve_regex(&source, &src_filters, ctx.cancel) {
                 Ok(Some(f)) => f,
                 Ok(None) => {
                     run.status = Some(RunStatus::Cancelled);
@@ -1127,7 +1170,7 @@ pub fn backup_source(
         }
         BackupMode::Incremental => {
             on_event(EngineEvent::Phase("scanning"));
-            let listing = match native::list_files(&source, ctx.filters, ctx.cancel) {
+            let listing = match native::list_files(&source, &src_filters, ctx.cancel) {
                 Ok(Some(l)) => l,
                 Ok(None) => {
                     run.status = Some(RunStatus::Cancelled);
@@ -1472,7 +1515,7 @@ mod tests {
                 skip_scan: &self.skip_scan,
                 exact_progress: false,
                 delete_failed: &|_, _, _| {},
-                await_deletes: &|| {},
+                await_deletes: &|_| false,
             };
             let logs = self.root.clone();
             run_task(
@@ -2499,6 +2542,41 @@ mod tests {
         assert!(!hidden_or_system(full), "finished folder: {full:#x}");
         assert!(during.is_some_and(|a| !hidden_or_system(a)), "folder during the copy: {during:?}");
         let _ = std::process::Command::new("attrib").args(["-H", "-S"]).arg(&src).status();
+    }
+
+    /// A special folder (Documents) has a desktop.ini that names it "מסמכים" in Explorer: the one at
+    /// the top of the source never reaches the backup folder (full and incremental), deeper ones do,
+    /// and one already in an older backup folder is removed.
+    #[test]
+    fn source_desktop_ini_is_not_copied_to_the_backup_folder() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        let ini = "[.ShellClassInfo]\r\nLocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-21770\r\n";
+        fs::write(src.join("desktop.ini"), ini).unwrap();
+        fs::write(src.join("sub").join("desktop.ini"), ini).unwrap();
+        // An older backup folder that already has one.
+        let old = dst.join("Src 2026-09-01 03h00 מלא");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("desktop.ini"), ini).unwrap();
+        let t = task(&[src.to_str().unwrap()], dst.to_str().unwrap());
+
+        let r = env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        let full = dst.join("Src 2026-10-01 03h00 מלא");
+        assert!(full.join("a.txt").is_file());
+        assert!(!full.join("desktop.ini").exists());
+        assert!(full.join("sub").join("desktop.ini").is_file());
+        assert!(!old.join("desktop.ini").exists());
+
+        fs::write(src.join("desktop.ini"), format!("{ini}; changed\r\n")).unwrap();
+        fs::write(src.join("b.txt"), "b").unwrap();
+        let r = env.run(&t, BackupMode::Incremental, "2026-10-02 03:00");
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
+        let inc = dst.join("Src 2026-10-02 03h00 אינקרמנטלי");
+        assert!(inc.join("b.txt").is_file());
+        assert!(!inc.join("desktop.ini").exists());
     }
 
     /// A partial full folder is finished by the next full run: robocopy skips what is already there.
