@@ -102,7 +102,7 @@ pub async fn check_admin_permission(core: CoreState<'_>) -> Result<crate::model:
 
 fn prepare(mut t: Task) -> Result<Task, String> {
     t.migrate();
-    t.fix_folder_file_rules();
+    let _ = t.fix_folder_file_rules();
     t.settle_retention();
     // A full schedule only makes sense next to incremental runs (combined mode).
     if t.mode == BackupMode::Full {
@@ -453,6 +453,25 @@ pub async fn folder_size(path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || dir_size(std::path::Path::new(&path)))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// The paths that are folders on disk (read from the parent's listing, so a folder we may not open counts too).
+/// Runs from older versions list an unreadable folder without a trailing backslash; `RunDetails` asks this so
+/// "skip next time" offers the folder. Network paths are left out.
+#[tauri::command]
+pub async fn folders_among(paths: Vec<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter(|p| {
+                // A network path can stall for seconds; only drives of this computer are asked.
+                let path = std::path::Path::new(p.trim_end_matches('\\'));
+                crate::engine::native::is_local_path(path) && crate::engine::native::find(path).is_some_and(|i| i.is_dir())
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Free and total bytes of the drive a path is on.

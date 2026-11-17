@@ -59,10 +59,15 @@ impl Store {
             dir,
         };
         store.load_tasks();
-        store.tasks.iter_mut().for_each(|t| {
-            t.migrate();
-            t.fix_folder_file_rules();
-        });
+        store.tasks.iter_mut().for_each(Task::migrate);
+        // Rules an older version saved as file rules for folders: fixed in tasks.json too.
+        let mut fixed = false;
+        for t in &mut store.tasks {
+            fixed |= t.fix_folder_file_rules();
+        }
+        if fixed {
+            store.save_tasks();
+        }
         store.fill_last_backups();
         // The list as it was before this version kept snapshots.
         if !store.tasks.is_empty() {

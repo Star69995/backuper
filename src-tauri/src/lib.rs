@@ -193,6 +193,7 @@ pub fn run() {
             commands::list_backups,
             commands::delete_backup,
             commands::folder_size,
+            commands::folders_among,
             commands::disk_space,
             commands::full_space,
             commands::open_path,

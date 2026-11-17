@@ -642,6 +642,9 @@ export function installDevMock() {
           needed: 20_000_000_000,
           freed: tasks.find((t) => t.id === id)?.deleteBefore ? 12_000_000_000 : 0,
         }));
+      case "folders_among":
+        // A failed path with no extension is taken for a folder.
+        return (a.paths as string[]).filter((p) => !/\.[^\\]+$/.test(p));
       case "folder_size":
         return String(a.path).endsWith("מלא") ? 12_345_678_901 : 48_200_000;
       case "read_log":

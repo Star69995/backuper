@@ -168,6 +168,12 @@ export default function HistoryView({
   );
 }
 
+/** The source's errors with the paths in `folders` marked as folders (a trailing backslash). */
+function withFolders(src: SourceRun, folders: Set<string>): SourceRun {
+  if (!src.errors.some((e) => folders.has(e.path))) return src;
+  return { ...src, errors: src.errors.map((e) => (folders.has(e.path) ? { ...e, path: e.path + "\\" } : e)) };
+}
+
 /** Error kinds where skipping the path next time makes no sense (the problem is the drive, not the file). */
 const NOT_SKIPPABLE = new Set(["diskFull", "disconnected"]);
 
@@ -176,13 +182,18 @@ const LOG_LINES = 3000;
 
 const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 
-/** Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it). */
+/**
+ * Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it).
+ * A folder (trailing backslash) counts only with a folder rule: older versions saved "skip next time" on an unreadable
+ * folder as a file rule, and that one should be offered again (as a folder rule, which replaces it - see `skip`).
+ */
 function isSkipped(task: Task, path: string) {
+  const dir = path.trim().endsWith("\\");
   const p = norm(path);
   const parts = p.split("\\");
   return flatRules(task.filters).some(
     (r) =>
-      (r.kind === "file" && norm(r.value) === p) ||
+      (r.kind === "file" && !dir && norm(r.value) === p) ||
       (r.kind === "folder" &&
         (r.value.includes("\\") ? p === norm(r.value) || p.startsWith(norm(r.value) + "\\") : parts.includes(norm(r.value)))),
   );
@@ -663,7 +674,10 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     try {
       const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
       if (!now) throw new Error("המשימה נמחקה");
-      const [saved] = await api.saveTasks([{ ...now, filters: [...now.filters, rule] }]);
+      // A file rule an older version saved for this folder: the folder rule takes its place.
+      const kept =
+        rule.kind === "folder" ? now.filters.filter((f) => !(f.kind === "file" && norm(f.value) === norm(rule.value))) : now.filters;
+      const [saved] = await api.saveTasks([{ ...now, filters: [...kept, rule] }]);
       setTask(saved);
       toast({
         tone: "ok",
@@ -773,6 +787,21 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     }
   };
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
+  // Runs from older versions list an unreadable folder without a trailing backslash: find which failed paths
+  // are folders, so they show (and "skip next time" offers them) as folders.
+  const [folders, setFolders] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const paths = [...new Set(r.sources.flatMap((s) => s.errors.map((e) => e.path)).filter((p) => p && !p.endsWith("\\")))];
+    if (!paths.length) return;
+    let alive = true;
+    api
+      .foldersAmong(paths)
+      .then((found) => alive && setFolders(new Set(found)))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [r]);
 
   const showLog = (index: number) =>
     api
@@ -855,7 +884,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
           <SourceCard
             key={i}
             run={r}
-            src={src}
+            src={withFolders(src, folders)}
             index={i}
             onShowLog={showLog}
             skipper={skipper}
