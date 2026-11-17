@@ -181,13 +181,18 @@ const LOG_LINES = 3000;
 
 const norm = (p: string) => p.trim().replace(/\\+$/, "").toLowerCase();
 
-/** Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it). */
+/**
+ * Whether the task's own rules already leave this path out (a file rule for it, or a folder rule by full path above it).
+ * A folder (trailing backslash) counts only with a folder rule: older versions saved "skip next time" on an unreadable
+ * folder as a file rule, and that one should be offered again (as a folder rule, which replaces it - see `skip`).
+ */
 function isSkipped(task: Task, path: string) {
+  const dir = path.trim().endsWith("\\");
   const p = norm(path);
   const parts = p.split("\\");
   return flatRules(task.filters).some(
     (r) =>
-      (r.kind === "file" && norm(r.value) === p) ||
+      (r.kind === "file" && !dir && norm(r.value) === p) ||
       (r.kind === "folder" &&
         (r.value.includes("\\") ? p === norm(r.value) || p.startsWith(norm(r.value) + "\\") : parts.includes(norm(r.value)))),
   );
@@ -663,7 +668,10 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     try {
       const now = (await api.snapshot()).tasks.find((t) => t.id === r.taskId);
       if (!now) throw new Error("המשימה נמחקה");
-      const [saved] = await api.saveTasks([{ ...now, filters: [...now.filters, rule] }]);
+      // A file rule an older version saved for this folder: the folder rule takes its place.
+      const kept =
+        rule.kind === "folder" ? now.filters.filter((f) => !(f.kind === "file" && norm(f.value) === norm(rule.value))) : now.filters;
+      const [saved] = await api.saveTasks([{ ...now, filters: [...kept, rule] }]);
       setTask(saved);
       toast({
         tone: "ok",
