@@ -59,6 +59,7 @@ export const api = {
   listBackups: (taskId: string) => invoke<SourceBackups[]>("list_backups", { taskId }),
   deleteBackup: (taskId: string, folderName: string, name: string) => invoke<void>("delete_backup", { taskId, folderName, name }),
   folderSize: (path: string) => invoke<number>("folder_size", { path }),
+  foldersAmong: (paths: string[]) => invoke<string[]>("folders_among", { paths }),
   /** Free space on the drive of each path (null = drive not connected), same order. */
   diskSpace: (paths: string[]) => invoke<(DiskSpace | null)[]>("disk_space", { paths }),
   fullSpace: (taskIds: string[]) => invoke<(FullSpace | null)[]>("full_space", { taskIds }),

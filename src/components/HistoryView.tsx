@@ -167,6 +167,12 @@ export default function HistoryView({
   );
 }
 
+/** The source's errors with the paths in `folders` marked as folders (a trailing backslash). */
+function withFolders(src: SourceRun, folders: Set<string>): SourceRun {
+  if (!src.errors.some((e) => folders.has(e.path))) return src;
+  return { ...src, errors: src.errors.map((e) => (folders.has(e.path) ? { ...e, path: e.path + "\\" } : e)) };
+}
+
 /** Error kinds where skipping the path next time makes no sense (the problem is the drive, not the file). */
 const NOT_SKIPPABLE = new Set(["diskFull", "disconnected"]);
 
@@ -767,6 +773,21 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
     }
   };
   const [log, setLog] = useState<{ index: number; text: string } | null>(null);
+  // Runs from older versions list an unreadable folder without a trailing backslash: find which failed paths
+  // are folders, so they show (and "skip next time" offers them) as folders.
+  const [folders, setFolders] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const paths = [...new Set(r.sources.flatMap((s) => s.errors.map((e) => e.path)).filter((p) => p && !p.endsWith("\\")))];
+    if (!paths.length) return;
+    let alive = true;
+    api
+      .foldersAmong(paths)
+      .then((found) => alive && setFolders(new Set(found)))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [r]);
 
   const showLog = (index: number) =>
     api
@@ -849,7 +870,7 @@ export function RunDetails({ run: shown, onClose }: { run: RunRecord; onClose: (
           <SourceCard
             key={i}
             run={r}
-            src={src}
+            src={withFolders(src, folders)}
             index={i}
             onShowLog={showLog}
             skipper={skipper}

@@ -260,27 +260,33 @@ impl Task {
     /// reported an unreadable source folder without a trailing backslash, so "skip next time" in a
     /// run's details saved it as a file rule (the engine skips such a folder anyway - see
     /// `native::Rules::skip_dir` - but the editor showed it as a file).
-    pub fn fix_folder_file_rules(&mut self) {
-        fn fix(rules: &mut [FilterRule]) {
+    /// The folder is read from its parent's listing (`native::find`), not opened: these are mostly folders
+    /// we may not open (access denied), where `Path::is_dir` fails. Returns whether a rule changed.
+    pub fn fix_folder_file_rules(&mut self) -> bool {
+        fn fix(rules: &mut [FilterRule]) -> bool {
+            let mut changed = false;
             for r in rules {
                 let folder = match r {
                     FilterRule::Group { rules, .. } => {
-                        fix(rules);
+                        changed |= fix(rules);
                         None
                     }
                     FilterRule::File { value } => {
-                        let v = value.trim();
+                        let v = value.trim().trim_end_matches('\\');
                         let full = v.len() > 2 && (v.as_bytes()[1] == b':' || v.starts_with(r"\\"));
-                        (full && std::path::Path::new(v).is_dir()).then(|| v.trim_end_matches('\\').to_string())
+                        (full && crate::engine::native::find(std::path::Path::new(v)).is_some_and(|i| i.is_dir()))
+                            .then(|| v.to_string())
                     }
                     _ => None,
                 };
                 if let Some(value) = folder {
                     *r = FilterRule::Folder { value };
+                    changed = true;
                 }
             }
+            changed
         }
-        fix(&mut self.filters);
+        fix(&mut self.filters)
     }
 
     /// A quick full backup updates the previous full in place, so it needs exactly one full kept.
