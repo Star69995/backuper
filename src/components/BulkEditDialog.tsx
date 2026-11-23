@@ -15,7 +15,7 @@ import FilterRulesEditor, { describeFilter } from "./FilterRulesEditor";
 import { GENERAL_GROUP, GroupInput } from "./groups";
 import ScheduleEditor from "./ScheduleEditor";
 import { PathPicker, RetentionEditor } from "./TaskEditor";
-import { Button, Checkbox, cx, Modal, PathText, Segmented, Toggle } from "./ui";
+import { Button, Checkbox, cx, Modal, NumberInput, PathText, Segmented, Toggle } from "./ui";
 
 type Key =
   | "group"
@@ -29,19 +29,28 @@ type Key =
   | "deleteBefore"
   | "deleteEmptyIncrementals"
   | "reusePrevious"
+  | "verifyContent"
   | "copyEmptyDirs"
   | "filters"
   | "useGlobalFilters";
-type Values = Pick<Task, Key | "fullSchedule" | "keepCount" | "keepDays">;
+type Values = Pick<Task, Key | "fullSchedule" | "keepCount" | "keepDays" | "verifyEvery">;
 type Retention = Pick<Task, "keepMode" | "keepCount" | "keepDays">;
 
-/** "mode" covers mode + fullSchedule (full / incremental / combined); "keepMode" covers all retention fields. */
+/** "mode" covers mode + fullSchedule (full / incremental / combined); "keepMode" covers all retention fields;
+ * "verifyContent" covers verifyEvery too. */
 const valueOf = (k: Key, t: Values) =>
   k === "mode"
     ? { mode: t.mode, fullSchedule: t.fullSchedule }
     : k === "keepMode"
       ? { keepMode: t.keepMode, keepCount: t.keepCount, keepDays: t.keepDays }
-      : t[k];
+      : k === "verifyContent"
+        ? { verifyContent: t.verifyContent, verifyEvery: t.verifyEvery }
+        : t[k];
+
+function showVerify({ verifyContent, verifyEvery }: Pick<Task, "verifyContent" | "verifyEvery">) {
+  if (!verifyContent) return "לא";
+  return verifyEvery > 1 ? `פעם בכל ${verifyEvery} גיבויים מלאים מהירים` : "בכל גיבוי מלא מהיר";
+}
 
 function showKind(v: Pick<Task, "mode" | "fullSchedule">) {
   const kind = taskKind(v);
@@ -62,6 +71,11 @@ const FIELDS: { key: Key; label: string; show: (v: ReturnType<typeof valueOf>) =
   { key: "deleteBefore", label: "מחיקת גיבויים לפני גיבוי מלא", show: (v) => yesNo(v as boolean) },
   { key: "deleteEmptyIncrementals", label: "מחיקת תיקיות אינקרמנטליות ריקות", show: (v) => yesNo(v as boolean) },
   { key: "reusePrevious", label: "גיבוי מלא מהיר", show: (v) => yesNo(v as boolean) },
+  {
+    key: "verifyContent",
+    label: "בדיקת תקינות הגיבוי",
+    show: (v) => showVerify(v as Pick<Task, "verifyContent" | "verifyEvery">),
+  },
   { key: "copyEmptyDirs", label: "העתקת תיקיות ריקות", show: (v) => yesNo(v as boolean) },
   {
     key: "filters",
@@ -101,6 +115,8 @@ export default function BulkEditDialog({
     deleteBefore: first.deleteBefore,
     deleteEmptyIncrementals: first.deleteEmptyIncrementals,
     reusePrevious: first.reusePrevious,
+    verifyContent: first.verifyContent,
+    verifyEvery: first.verifyEvery,
     copyEmptyDirs: first.copyEmptyDirs,
     filters: [],
     useGlobalFilters: first.useGlobalFilters,
@@ -127,7 +143,7 @@ export default function BulkEditDialog({
       tasks.map((t) => {
         const n = { ...t };
         active.forEach((k) =>
-          Object.assign(n, k === "mode" || k === "keepMode" ? valueOf(k, values) : { [k]: values[k] }),
+          Object.assign(n, k === "mode" || k === "keepMode" || k === "verifyContent" ? valueOf(k, values) : { [k]: values[k] }),
         );
         if (active.has("filters") && filterMode === "add") {
           const extra = values.filters.filter((f) => !t.filters.some((x) => same(x, f)));
@@ -198,6 +214,47 @@ export default function BulkEditDialog({
             options={(["off", "run", "ask"] as const).map((v) => ({ value: v, label: DRIVE_ACTION_LABEL[v] }))}
           />
         );
+      case "verifyContent": {
+        const choice = !values.verifyContent ? "off" : values.verifyEvery > 1 ? "some" : "each";
+        return (
+          <div className="flex flex-col gap-2">
+            <Segmented<"off" | "each" | "some">
+              value={choice}
+              onChange={(c) => {
+                setValues((x) => ({
+                  ...x,
+                  verifyContent: c !== "off",
+                  verifyEvery: c === "each" ? 1 : c === "some" ? Math.max(2, x.verifyEvery) : x.verifyEvery,
+                }));
+                setActive((a) => new Set(a).add("verifyContent"));
+              }}
+              options={[
+                { value: "off", label: "כבויה" },
+                { value: "each", label: "בכל גיבוי מלא מהיר" },
+                { value: "some", label: "רק בחלק מהגיבויים" },
+              ]}
+            />
+            {choice === "some" && (
+              <span className="flex items-center gap-2 text-[13px]">
+                פעם בכל
+                <NumberInput
+                  className="w-20"
+                  min={2}
+                  max={100}
+                  value={values.verifyEvery}
+                  onChange={(n) => {
+                    setValues((x) => ({ ...x, verifyEvery: n }));
+                    setActive((a) => new Set(a).add("verifyContent"));
+                  }}
+                  aria-label="מספר הגיבויים המלאים המהירים בין בדיקה לבדיקה"
+                />
+                גיבויים מלאים מהירים
+              </span>
+            )}
+            <p className="text-xs text-muted">חלה רק על משימות עם גיבוי מלא מהיר.</p>
+          </div>
+        );
+      }
       case "keepMode":
         return (
           <RetentionEditor

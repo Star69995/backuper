@@ -5,7 +5,7 @@ import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, fmtSmart, MODE_LABEL, ST
 import { cacheFolderIn } from "../lib/cacheFolders";
 import { flatRules } from "../lib/filterRules";
 import { type ErrorKind, groupFileErrors } from "../lib/fileErrors";
-import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task } from "../types";
+import type { FileError, FilterRule, RunRecord, RunStatus, Snapshot, SourceRun, Task, VerifyReport } from "../types";
 import { AdminPermissionOffer, useAdminPermission, usesVss, useVssAll } from "./adminPermission";
 import { useFeedback } from "./feedback";
 import { describeFilter } from "./FilterRulesEditor";
@@ -361,6 +361,11 @@ async function errorsText(run: RunRecord, src: SourceRun, index: number, task: T
     `started ${run.startedAt}, finished ${run.finishedAt}`,
   );
   if (src.targetFolder) lines.push(`target folder ${src.targetFolder}`);
+  if (src.verify) {
+    const v = src.verify;
+    lines.push(`content check: ${v.files} files (${v.bytes} bytes), mismatched ${v.mismatched}, unfixed ${v.unfixed}, skipped ${v.skipped}`);
+    lines.push(...v.paths.map((p) => `    mismatched: ${p}`));
+  }
   lines.push(...(src.debug ?? []));
   if (task) {
     lines.push(
@@ -421,6 +426,44 @@ function CopyErrorsButton({ text }: { text: () => Promise<string> }) {
   );
 }
 
+/** What the content check of a quick full backup found (`SourceRun.verify`). */
+function VerifyBlock({ report: v }: { report: VerifyReport }) {
+  const bad = v.mismatched > 0;
+  return (
+    <div className={`flex flex-col gap-1.5 rounded-lg px-3 py-2 text-[13px] ${bad ? "bg-warn-soft text-warn" : "bg-hover/50"}`}>
+      <div className="flex items-start gap-2">
+        {bad ? <CircleAlert size={16} className="mt-0.5 shrink-0" /> : <ShieldCheck size={16} className="mt-0.5 shrink-0 text-ok" />}
+        <span>
+          {bad ? (
+            <>
+              בדיקת התקינות: {fmtNumber(v.mismatched)} מתוך {fmtNumber(v.files)} קבצים בגיבוי לא היו זהים למקור (או שלא ניתן היה לקרוא
+              אותם), והם הועתקו מחדש בריצה הזו.
+              {v.unfixed > 0 && ` ${fmtNumber(v.unfixed)} מהם לא הוחלפו: מחקו אותם מתיקיית הגיבוי והריצו את הגיבוי שוב.`} אם זה חוזר,
+              ייתכן שכונן הגיבוי או החיבור אליו לא תקינים: בדקו את הכונן ונסו כבל או חיבור USB אחר.
+            </>
+          ) : (
+            <>
+              בדיקת התקינות: התוכן של {fmtNumber(v.files)} קבצים בגיבוי (<bdi dir="ltr">{fmtBytes(v.bytes)}</bdi>) זהה למקור.
+            </>
+          )}
+          {v.skipped > 0 &&
+            ` ${fmtNumber(v.skipped)} קבצים לא נבדקו (בשימוש בתוכנה אחרת, קבצי ענן שלא נמצאים במחשב, או שהשתנו בזמן הבדיקה).`}
+        </span>
+      </div>
+      {v.paths.length > 0 && (
+        <ul className="flex max-h-40 flex-col gap-0.5 overflow-y-auto ps-6 text-xs">
+          {v.paths.map((p) => (
+            <li key={p} className="truncate">
+              <PathText path={p} />
+            </li>
+          ))}
+          {v.mismatched > v.paths.length && <li>ועוד {fmtNumber(v.mismatched - v.paths.length)}</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function SourceCard({
   run,
   src,
@@ -477,6 +520,7 @@ function SourceCard({
         {src.filesFailed > 0 && <span className="text-bad">נכשלו {fmtNumber(src.filesFailed)}</span>}
         {src.exitCode !== null && <span>קוד robocopy: {src.exitCode}</span>}
       </div>
+      {src.verify && <VerifyBlock report={src.verify} />}
       {src.targetFolder && (
         <div className="flex min-w-0 items-center gap-2 text-xs">
           <span className="shrink-0 text-muted">תיקיית הגיבוי:</span>

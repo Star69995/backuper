@@ -45,7 +45,8 @@ export interface Eta {
 
 export function useEta(p: Progress, now = Date.now()): Eta {
   const ref = useRef<{ key: string; samples: Sample[] }>({ key: "", samples: [] });
-  const key = `${p.runId}/${p.sourceIndex}`;
+  // The content check before a quick full backup counts its own bytes: start over when the copy begins.
+  const key = `${p.runId}/${p.sourceIndex}/${p.phase === "verifying" ? "verify" : "copy"}`;
   if (ref.current.key !== key) ref.current = { key, samples: [] };
   const { samples } = ref.current;
   samples.push({ t: now, bytes: p.bytesDone });

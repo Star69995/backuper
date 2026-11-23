@@ -13,8 +13,8 @@
 
 use crate::engine::{native, CopyEngine, CopyJob, CopyStats, EngineEvent, Filters, ListedFile, Outcome, TotalsSource};
 use crate::manifest;
-use crate::vss;
-use crate::model::{BackupFolder, BackupMode, FullSpace, KeepMode, RunRecord, RunStatus, Source, SourceBackups, SourceRun, Task};
+use crate::{verify, vss};
+use crate::model::{BackupFolder, BackupMode, FullSpace, KeepMode, RunRecord, RunStatus, Source, SourceBackups, SourceRun, Task, VerifyReport};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -598,7 +598,7 @@ fn prune(
 /// A full backup renames the previous full folder and updates it in place (when no include
 /// filter stands in the way, which the run checks) instead of copying everything again.
 fn reuses_previous_full(task: &Task) -> bool {
-    task.reuse_previous && task.keeps_one_full()
+    task.reuses_previous_full()
 }
 
 /// The space the task's next full backup needs on the destination, to compare with what is free
@@ -704,6 +704,64 @@ fn skip_done(folder: &Path, changed: Vec<ListedFile>) -> (Vec<ListedFile>, u64) 
     (left, count)
 }
 
+/// The content check of a quick full backup, in the previous full (already renamed to `work`): the
+/// source files whose copy there has the same size and modified time (those the update would leave
+/// alone) are compared byte by byte. None = cancelled; Err = the source couldn't be listed.
+fn verify_reused(
+    source: &Path,
+    work: &Path,
+    filters: &Filters,
+    cancel: &AtomicBool,
+    on_event: &mut dyn FnMut(EngineEvent),
+) -> Option<Result<VerifyReport, String>> {
+    // Usually two different drives: read both at once.
+    let (listing, present) = std::thread::scope(|scope| {
+        let present = scope.spawn(|| manifest::scan_until(work, cancel));
+        let listing = native::list_files(source, filters, cancel);
+        (listing, present.join().ok().flatten())
+    });
+    let listing = match listing {
+        Ok(Some(l)) => l,
+        Ok(None) => return None,
+        Err(e) => return Some(Err(e)),
+    };
+    let (present, _) = present?;
+    let mut index = HashMap::new();
+    add_to_index(&mut index, present);
+    let files: Vec<ListedFile> = listing.files.into_iter().filter(|f| !differs(f, &index)).collect();
+    let (files_total, bytes_total) = (files.len() as u64, files.iter().map(|f| f.size).sum());
+    let report = verify::check(source, work, &files, cancel, &mut |path, files_done, bytes_done| {
+        on_event(EngineEvent::Verifying { path: path.to_string(), files_done, files_total, bytes_done, bytes_total })
+    })?;
+    Some(Ok(report))
+}
+
+/// The run's notes about the content check.
+fn verify_notes(r: &VerifyReport) -> Vec<String> {
+    let mut notes = Vec::new();
+    if r.mismatched == 0 {
+        notes.push(format!("בדיקת התקינות: התוכן של {} קבצים בגיבוי ({}) זהה למקור", r.files, fmt_bytes(r.bytes)));
+    } else {
+        notes.push(format!(
+            "בדיקת התקינות מצאה {} קבצים בגיבוי שהתוכן שלהם לא היה זהה למקור (או שלא ניתן היה לקרוא אותם), והם הועתקו מחדש (מתוך {} קבצים שנבדקו). אם זה חוזר, ייתכן שכונן הגיבוי או החיבור אליו לא תקינים: בדקו את הכונן ונסו כבל או חיבור USB אחר",
+            r.mismatched, r.files
+        ));
+        if r.unfixed > 0 {
+            notes.push(format!(
+                "{} מהקבצים האלה לא הוחלפו (אין הרשאה לשנות אותם בגיבוי). מחקו אותם מתיקיית הגיבוי והריצו את הגיבוי שוב",
+                r.unfixed
+            ));
+        }
+    }
+    if r.skipped > 0 {
+        notes.push(format!(
+            "{} קבצים לא נבדקו: לא ניתן היה לקרוא אותם במקור (בשימוש בתוכנה אחרת, או קבצי ענן שלא נמצאים במחשב), או שהם השתנו בזמן הבדיקה",
+            r.skipped
+        ));
+    }
+    notes
+}
+
 /// The file that gives a Windows folder its look: in a special folder (Documents, Pictures,
 /// Desktop...) it holds the name Explorer shows ("מסמכים") instead of the folder's real name.
 const FOLDER_LOOK: &str = "desktop.ini";
@@ -804,6 +862,9 @@ pub struct RunContext<'a> {
     /// the delete to go on), or the run is cancelled, or - given a limit - that long has passed.
     /// Returns true when it gave up waiting.
     pub await_deletes: &'a (dyn Fn(Option<std::time::Duration>) -> bool + Sync),
+    /// A quick full backup compares the previous full's content with the source before updating it
+    /// (`Task::verifies_next`, decided per run by the caller).
+    pub verify: bool,
 }
 
 /// What a background scan compares the source with, to find how much a full copy will do.
@@ -1043,7 +1104,7 @@ pub fn backup_source(
             // Not safe when `work` is the previous full, updated in place, or may be (a resumed
             // folder with no complete full next to it).
             discard_safe = !reused && (resume.is_none() || latest_full.is_some());
-            let (totals, late) = full_totals(ctx, previous_files, !reused && resume.is_none(), &work);
+            let (totals, mut late) = full_totals(ctx, previous_files, !reused && resume.is_none(), &work);
             // Not with a quick full backup (tasks saved before `Task::settle_retention` may hold both):
             // it copies only the differences, so there is no second copy to make room for.
             if task.delete_before && !reuses_previous_full(task) {
@@ -1100,6 +1161,27 @@ pub fn backup_source(
                         return run;
                     }
                     Err(e) => notes.push(format!("לא ניתן לנקות מהגיבוי פריטים שסוננו החוצה: {e}")),
+                }
+            }
+            // The update below leaves alone what matches the source by size and time: check that
+            // those copies really hold the source's content, and have the update copy the others again.
+            if reused && ctx.verify {
+                on_event(EngineEvent::Phase("verifying"));
+                match verify_reused(&source, &work, &src_filters, ctx.cancel, on_event) {
+                    None => {
+                        run.status = Some(RunStatus::Cancelled);
+                        run.message = stopped_message(&work, discard_stopped(ctx, &work, discard_safe));
+                        return run;
+                    }
+                    Some(Err(e)) => notes.push(format!("בדיקת התקינות של הגיבוי לא בוצעה: {e}")),
+                    Some(Ok(report)) => {
+                        notes.extend(verify_notes(&report));
+                        // The previous index no longer says what is in the folder.
+                        if report.mismatched > 0 && matches!(late, Some(Late::Index(_))) {
+                            late = Some(Late::Folder(work.clone()));
+                        }
+                        run.verify = Some(report);
+                    }
                 }
             }
             on_event(EngineEvent::Phase("scanning"));
@@ -1244,6 +1326,10 @@ pub fn backup_source(
 
     unhide(&work);
     let mut status = status_of(result.outcome);
+    // Damaged copies were replaced, but the user should know: the drive or its cable may be failing.
+    if status == RunStatus::Success && run.verify.as_ref().is_some_and(|v| v.mismatched > 0) {
+        status = RunStatus::Warning;
+    }
     let mut message = if result.outcome == Outcome::Cancelled {
         stopped_message(&work, discard_stopped(ctx, &work, discard_safe))
     } else {
@@ -1516,6 +1602,7 @@ mod tests {
                 exact_progress: false,
                 delete_failed: &|_, _, _| {},
                 await_deletes: &|_| false,
+                verify: t.verifies_next(0),
             };
             let logs = self.root.clone();
             run_task(
@@ -2051,6 +2138,67 @@ mod tests {
         assert_eq!(env.names(&t, 0), ["Src 2026-10-02 03h00 מלא"]);
         let index = manifest::read(&dst.join("Src 2026-10-02 03h00 מלא")).unwrap();
         assert_eq!(index.len(), 2, "the reused folder gets a fresh index");
+    }
+
+    /// A copy damaged with the right size and time stays damaged through quick full backups, unless
+    /// the content check is on: then it is found and copied again, and the run warns.
+    #[test]
+    fn content_check_replaces_a_damaged_copy() {
+        let env = Env::new();
+        let (src, dst) = (env.root.join("Src"), env.root.join("dst"));
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "original").unwrap();
+        fs::write(src.join("sub").join("b.txt"), "fine").unwrap();
+        // Bigger than one read, so the two sides are read side by side.
+        let big: Vec<u8> = (0..(9u32 << 20)).map(|i| (i % 251) as u8).collect();
+        fs::write(src.join("big.bin"), &big).unwrap();
+        let mut t = Task {
+            reuse_previous: true,
+            ..task(&[src.to_str().unwrap()], dst.to_str().unwrap())
+        };
+        env.run(&t, BackupMode::Full, "2026-10-01 03:00");
+        let damage = |folder: &str, name: &str, at: usize| {
+            let copy = dst.join(folder).join(name);
+            let time = fs::metadata(&copy).unwrap().modified().unwrap();
+            let mut bytes = fs::read(&copy).unwrap();
+            bytes[at] ^= 0x55;
+            fs::write(&copy, bytes).unwrap();
+            fs::File::options().write(true).open(&copy).unwrap().set_modified(time).unwrap();
+            copy
+        };
+        let first = "Src 2026-10-01 03h00 מלא";
+        damage(first, "a.txt", 0);
+        damage(first, "big.bin", (9 << 20) - 1);
+
+        // Without the check, the damaged copies look up to date.
+        let r = env.run(&t, BackupMode::Full, "2026-10-02 03:00");
+        assert_eq!(r[0].files_copied, 0, "{r:?}");
+        assert!(r[0].verify.is_none());
+        let second = "Src 2026-10-02 03h00 מלא";
+        assert_ne!(fs::read(dst.join(second).join("a.txt")).unwrap(), b"original");
+
+        t.verify_content = true;
+        let mut phases = Vec::new();
+        let r = env.run_with(&t, BackupMode::Full, "2026-10-03 03:00", &mut |_, e| {
+            if let EngineEvent::Phase(p) = e {
+                phases.push(p);
+            }
+        });
+        assert!(phases.contains(&"verifying"), "{phases:?}");
+        let v = r[0].verify.as_ref().expect("the check ran");
+        assert_eq!((v.files, v.mismatched, v.unfixed, v.skipped), (3, 2, 0, 0), "{v:?}");
+        assert_eq!(v.paths.len(), 2);
+        assert_eq!(r[0].files_copied, 2, "the damaged copies are copied again: {r:?}");
+        assert_eq!(r[0].status, Some(RunStatus::Warning), "{r:?}");
+        let third = dst.join("Src 2026-10-03 03h00 מלא");
+        assert_eq!(fs::read(third.join("a.txt")).unwrap(), b"original");
+        assert_eq!(fs::read(third.join("big.bin")).unwrap(), big);
+
+        // Nothing wrong: the check passes quietly.
+        let r = env.run(&t, BackupMode::Full, "2026-10-04 03:00");
+        let v = r[0].verify.as_ref().unwrap();
+        assert_eq!((v.files, v.mismatched), (3, 0));
+        assert_eq!(r[0].status, Some(RunStatus::Success), "{r:?}");
     }
 
     /// A task saved by an older version may hold a quick full and delete-before together: nothing is

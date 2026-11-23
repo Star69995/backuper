@@ -159,7 +159,8 @@ pub struct ListedFile {
 pub enum EngineEvent {
     /// The run moved on to the next source folder.
     SourceStarted,
-    /// "scanning" | "deleting" (old backups, before a full) | "pruning" (items the rules skip, removed from a reused folder) | "copying"
+    /// "scanning" | "deleting" (old backups, before a full) | "pruning" (items the rules skip, removed from a reused folder)
+    /// | "verifying" (the content check of a quick full backup, `verify.rs`) | "copying"
     Phase(&'static str),
     /// How much work the copy will do. `exact` = counted (a scan), not estimated from an older backup.
     Totals { files: u64, bytes: u64, exact: bool },
@@ -172,6 +173,9 @@ pub enum EngineEvent {
     /// How much of the file that started last has been written so far (an estimate from the engine's
     /// own I/O, so a huge file moves the progress instead of freezing it until it is done).
     FileBytes(u64),
+    /// Where the content check of a quick full backup stands (phase "verifying"): `path` = the file
+    /// being compared, relative to the source.
+    Verifying { path: String, files_done: u64, files_total: u64, bytes_done: u64, bytes_total: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

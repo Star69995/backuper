@@ -20,6 +20,7 @@ mod store;
 mod tasklist;
 mod tray;
 mod updater;
+mod verify;
 mod vss;
 
 use crate::core::Core;

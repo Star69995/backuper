@@ -32,11 +32,14 @@ export default function RunningCard({
     return () => clearInterval(t);
   }, []);
 
-  const scanning = p.phase !== "copying";
+  // The content check of a quick full backup: its own counters (files compared), exact from the start.
+  const verifying = p.phase === "verifying";
+  const scanning = p.phase !== "copying" && !verifying;
   const phaseText = {
     scanning: "סורק את הקבצים...",
     deleting: waitingForDelete ? "ממתין להחלטה: גיבוי ישן לא נמחק" : "מוחק גיבויים קודמים לפני ההעתקה...",
     pruning: "מנקה מהגיבוי קבצים שכללי הסינון מדלגים עליהם...",
+    verifying: "בודק את תקינות הגיבוי: משווה את התוכן למקור",
     vss: admin === "on" ? "מגבה קבצים פתוחים דרך VSS (בהרשאה הקבועה)..." : "מגבה קבצים פתוחים דרך VSS (ייתכן ש-Windows מבקשת אישור)...",
     copying: "מעתיק קבצים",
   }[waitingForDelete ? "deleting" : p.phase];
@@ -63,7 +66,7 @@ export default function RunningCard({
   // earlier runs to go by (their size comes from those), else the bar has one part per folder.
   const later = after === 0 ? 0 : p.laterBytes;
   const whole =
-    multi && pct !== null && later !== null && p.bytesTotal > 0
+    multi && !verifying && pct !== null && later !== null && p.bytesTotal > 0
       ? {
           pct: Math.min(99, ((p.earlierBytes + p.bytesDone) / (p.earlierBytes + p.bytesTotal + later)) * 100),
           eta: eta === null ? null : etaRaw.total,
@@ -82,6 +85,11 @@ export default function RunningCard({
             : p.phase === "vss"
               ? "הקבצים נקראים מתצלום מצב של הכונן"
               : "מחשב את כמות השינויים"}
+    </span>
+  ) : verifying ? (
+    <span>
+      נבדקו {fmtNumber(p.filesDone)} מתוך {fmtNumber(p.filesTotal)} קבצים, <bdi dir="ltr">{fmtBytes(p.bytesDone)}</bdi> מתוך{" "}
+      <bdi dir="ltr">{fmtBytes(p.bytesTotal)}</bdi>. ההעתקה מתחילה אחרי הבדיקה
     </span>
   ) : unknownTotal ? (
     <span>
@@ -219,7 +227,7 @@ export default function RunningCard({
             <PathText path={p.currentFile} />
           </div>
         )}
-        {!scanning && !p.currentFile && (
+        {!scanning && !verifying && !p.currentFile && (
           <div className="text-xs text-muted">
             מחכה לקובץ הראשון להעתקה. אם התיקייה כבר מכילה קבצים מהעתקה קודמת, הם נבדקים קודם והבדיקה יכולה לקחת כמה דקות
           </div>

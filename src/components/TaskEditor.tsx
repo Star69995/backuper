@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  ShieldCheck,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
@@ -82,6 +83,95 @@ const KEEP_HINT: Record<KeepMode, string> = {
 };
 
 /** How long old backups are kept: by count, by days, or forever. */
+/** The content check of a quick full backup: on/off, and on every quick full backup or every N-th. */
+function VerifyEditor({
+  task: t,
+  quickFull,
+  set,
+}: {
+  task: Task;
+  quickFull: boolean;
+  set: <K extends keyof Task>(k: K, v: Task[K]) => void;
+}) {
+  // The last "every N" typed, so switching to "every backup" and back keeps it.
+  const lastEvery = useRef(t.verifyEvery > 1 ? t.verifyEvery : 4);
+  if (t.verifyEvery > 1) lastEvery.current = t.verifyEvery;
+  const on = quickFull && t.verifyContent;
+  return (
+    <div className="flex flex-col gap-2">
+      <Toggle
+        checked={on}
+        onChange={(v) => set("verifyContent", v)}
+        disabled={!quickFull}
+        label={
+          <span className="flex items-center gap-1.5">
+            <ShieldCheck size={14} /> בדיקת תקינות הגיבוי
+          </span>
+        }
+        description={
+          !quickFull
+            ? "זמינה רק עם גיבוי מלא מהיר. גיבוי מלא רגיל מעתיק כל קובץ מחדש בכל פעם."
+            : "משווה את התוכן של הקבצים בגיבוי לתוכן במקור, ומעתיק מחדש קובץ שנפגם. הגיבוי שבו היא רצה לוקח יותר זמן."
+        }
+        help={
+          quickFull && (
+            <div className="flex flex-col gap-2">
+              <p>
+                גיבוי מלא מהיר לא מעתיק שוב קובץ שהגודל ושעת השינוי שלו זהים למקור. אם העותק בגיבוי נפגם בלי שהגודל והשעה
+                השתנו (תקלה נדירה בדיסק, בכבל או בזיכרון של המחשב), הוא היה נשאר פגום. הבדיקה סוגרת את הפער הזה.
+              </p>
+              <ul className="list-disc ps-5 flex flex-col gap-1">
+                <li>
+                  לפני העדכון, כל קובץ שלא היה מועתק נקרא גם מהמקור וגם מהגיבוי, והתוכן מושווה בית אחרי בית. הגיבוי נקרא
+                  ישירות מהדיסק ולא מהזיכרון של Windows.
+                </li>
+                <li>
+                  קובץ שהתוכן שלו שונה, או שאי אפשר לקרוא אותו בגיבוי, מועתק מחדש באותה ריצה. הריצה מסתיימת באזהרה, ובפרטי
+                  הריצה מופיעה רשימת הקבצים.
+                </li>
+                <li>
+                  לא נבדקים קבצים שתוכנה אחרת מחזיקה פתוחים, קבצי ענן שנמצאים רק בענן (OneDrive), וקבצים שהשתנו בזמן
+                  הבדיקה.
+                </li>
+                <li>
+                  הבדיקה קוראת את כל הקבצים פעמיים, מהמקור ומהגיבוי, ולכן גיבוי שבו היא רצה לוקח בערך כמו העתקה מלאה. כדי
+                  לחסוך זמן אפשר להריץ אותה רק בחלק מהגיבויים.
+                </li>
+              </ul>
+            </div>
+          )
+        }
+      />
+      {on && (
+        <div className="flex flex-wrap items-center gap-2 ps-1 text-[13px]">
+          <Segmented<"each" | "some">
+            value={t.verifyEvery > 1 ? "some" : "each"}
+            onChange={(v) => set("verifyEvery", v === "each" ? 1 : lastEvery.current)}
+            options={[
+              { value: "each", label: "בכל גיבוי מלא מהיר" },
+              { value: "some", label: "רק בחלק מהגיבויים" },
+            ]}
+          />
+          {t.verifyEvery > 1 && (
+            <span className="flex items-center gap-2">
+              פעם בכל
+              <NumberInput
+                className="w-20"
+                min={2}
+                max={100}
+                value={t.verifyEvery}
+                onChange={(n) => set("verifyEvery", n)}
+                aria-label="מספר הגיבויים המלאים המהירים בין בדיקה לבדיקה"
+              />
+              גיבויים מלאים מהירים
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RetentionEditor({ value, onChange }: { value: Retention; onChange: (v: Retention) => void }) {
   const { keepMode, keepCount, keepDays } = value;
   const set = (patch: Partial<Retention>) => onChange({ keepMode, keepCount, keepDays, ...patch });
@@ -583,7 +673,7 @@ export default function TaskEditor({
                       </li>
                       <li>
                         אם גודל ושעת השינוי זהים בדיוק, הקובץ לא יועתק גם אם התוכן שונה. זה קורה רק כשתוכנה משחזרת במכוון את
-                        שעת השינוי המקורית.
+                        שעת השינוי המקורית, או כשהעותק בגיבוי נפגם (נדיר מאוד). בדיקת התקינות שלמטה תופסת את המקרים האלה.
                       </li>
                       <li>קבצים שנמחקו מהמקור נמחקים גם מהתיקייה.</li>
                       <li>
@@ -595,6 +685,7 @@ export default function TaskEditor({
                 )
               }
             />
+            {keepsOne && <VerifyEditor task={t} quickFull={quickFull} set={set} />}
             {t.keepMode !== "all" && (
               <Toggle
                 checked={t.deleteBefore && !quickFull}

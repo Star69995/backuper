@@ -120,6 +120,10 @@ export interface Task {
   keepDays: number;
   deleteBefore: boolean;
   reusePrevious: boolean;
+  /** Quick full backup: compare the copies it would leave alone with the source, byte by byte, and copy again those that differ. */
+  verifyContent: boolean;
+  /** 1 = on every quick full backup, N = on every N-th. */
+  verifyEvery: number;
   deleteEmptyIncrementals: boolean;
   copyEmptyDirs: boolean;
   /** Files another program holds open (Outlook mail, databases) are copied from a Volume Shadow Copy of the drive (needs admin permission). */
@@ -147,6 +151,8 @@ export interface TaskState {
   lastBackup?: LastBackup | null;
   /** The next automatic run (scheduled, catch-up, drive connected) is a full backup, once. */
   fullNext?: boolean;
+  /** Quick full backups since the last one that checked the backup's content (`Task.verifyEvery`). */
+  quickFullsSinceVerify?: number;
 }
 
 /** Size of a task's newest backup (all its sources). Full if any source made a full one. */
@@ -175,7 +181,7 @@ export interface Progress {
   taskId: string;
   taskName: string;
   mode: BackupMode;
-  phase: "scanning" | "deleting" | "pruning" | "vss" | "copying";
+  phase: "scanning" | "deleting" | "pruning" | "verifying" | "vss" | "copying";
   startedAt: string;
   sourceIndex: number;
   sourceCount: number;
@@ -346,6 +352,23 @@ export interface SourceRun {
   logFile: string | null;
   /** How the source was copied (engine command line, volumes...); only in the copied error text. */
   debug?: string[];
+  /** The content check of a quick full backup, when it ran. */
+  verify?: VerifyReport;
+}
+
+/** What the content check of a quick full backup found. */
+export interface VerifyReport {
+  /** Files compared with the source, and their size. */
+  files: number;
+  bytes: number;
+  /** Not checked: unreadable in the source (in use, cloud only) or changed while being read. */
+  skipped: number;
+  /** Copies whose content differed or couldn't be read: copied again in the same run. */
+  mismatched: number;
+  /** Of those, copies that couldn't be replaced. */
+  unfixed: number;
+  /** Source paths of the first mismatched files. */
+  paths: string[];
 }
 
 export interface RunRecord {
@@ -516,6 +539,8 @@ export const newTask = (): Task => ({
   keepDays: 30,
   deleteBefore: false,
   reusePrevious: false,
+  verifyContent: false,
+  verifyEvery: 1,
   deleteEmptyIncrementals: true,
   copyEmptyDirs: false,
   vssOpenFiles: true,

@@ -356,6 +356,23 @@ export function installDevMock() {
         filesFailed: 5,
       });
     }
+    // A quick full backup whose content check found damaged copies.
+    if (i === 4) {
+      Object.assign(sources[0], {
+        status: "warning",
+        message:
+          "הועתקו 2 קבצים. בדיקת התקינות מצאה 2 קבצים בגיבוי שהתוכן שלהם לא היה זהה למקור (או שלא ניתן היה לקרוא אותם), והם הועתקו מחדש (מתוך 118 קבצים שנבדקו)",
+        filesCopied: 2,
+        verify: {
+          files: 118,
+          bytes: 478_000_000,
+          skipped: 1,
+          mismatched: 2,
+          unfixed: 0,
+          paths: [`${sources[0].source}\\2024\\חשבוניות.xlsx`, `${sources[0].source}\\סריקות\\תעודת זהות.pdf`],
+        },
+      });
+    }
     // Matches the "warning" last status of task 2 in `states`.
     if (i === 2) {
       Object.assign(sources[0], {
@@ -549,7 +566,12 @@ export function installDevMock() {
       taskName: "מסמכים ותמונות",
       mode: "incremental",
       // ?vss: the copy is done and Windows is asking for admin permission for the open files.
-      phase: new URLSearchParams(location.search).has("vss") ? "vss" : "copying",
+      // ?verify: the content check of a quick full backup, before the copy.
+      phase: new URLSearchParams(location.search).has("vss")
+        ? "vss"
+        : new URLSearchParams(location.search).has("verify")
+          ? "verifying"
+          : "copying",
       startedAt: iso(-2),
       sourceIndex: 2,
       sourceCount: 3,

@@ -661,7 +661,7 @@ impl Core {
     fn worker_loop(&self) {
         loop {
             let job = self.next_job();
-            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next, estimates) = {
+            let (task, logs_dir, global_filters, exact_progress, background_totals, expected_rate, full_next, estimates, verify) = {
                 let s = self.store.lock().unwrap();
                 (
                     // `Settings.vss_all_tasks`: open files through VSS in every task, whatever its own switch says.
@@ -681,6 +681,10 @@ impl Core {
                             backup::source_estimates(&s.history, t, requested_mode(&job, t, full_next))
                         })
                         .unwrap_or_default(),
+                    // The content check, on every `verify_every`-th quick full backup.
+                    s.task(&job.task_id).is_some_and(|t| {
+                        t.verifies_next(s.states.get(&job.task_id).map_or(0, |st| st.quick_fulls_since_verify))
+                    }),
                 )
             };
             let Some(task) = task else { continue };
@@ -762,6 +766,7 @@ impl Core {
                 exact_progress,
                 delete_failed: &|p, e, blocking| self.report_problem(&task, p, e, blocking),
                 await_deletes: &|wait| self.await_delete_problems(&task.id, wait),
+                verify,
             };
             // The bytes of the files finished so far, and the size of the one in progress (counted when it ends).
             let mut done_before = 0u64;
@@ -797,6 +802,17 @@ impl Core {
                             force = true;
                         }
                         EngineEvent::Phase(p) => {
+                            // The content check's counters aren't the copy's.
+                            if progress.phase == "verifying" && p != "verifying" {
+                                (
+                                    progress.files_done,
+                                    progress.files_total,
+                                    progress.bytes_done,
+                                    progress.bytes_total,
+                                ) = (0, 0, 0, 0);
+                                progress.totals = "unknown".into();
+                                progress.current_file.clear();
+                            }
                             progress.phase = p.into();
                             if p == "vss" && crate::elevation::cached() != crate::model::AdminPermission::On {
                                 // Windows is about to ask for admin permission, possibly while the window is hidden
@@ -846,6 +862,15 @@ impl Core {
                             progress.current_file = path;
                         }
                         EngineEvent::FileBytes(n) => progress.bytes_done = done_before + n.min(pending_size),
+                        EngineEvent::Verifying { path, files_done, files_total, bytes_done, bytes_total } => {
+                            progress.phase = "verifying".into();
+                            progress.files_done = files_done;
+                            progress.files_total = files_total;
+                            progress.bytes_done = bytes_done;
+                            progress.bytes_total = bytes_total;
+                            progress.totals = "exact".into();
+                            progress.current_file = path;
+                        }
                     }
                     if force || last_emit.elapsed() >= Duration::from_millis(200) {
                         last_emit = Instant::now();
@@ -887,6 +912,15 @@ impl Core {
                     st.full_next = false;
                 }
                 st.last_backup = Some(b);
+            }
+            // Count quick full backups towards the next content check (`Task.verify_every`).
+            if record.sources.iter().any(|s| s.verify.is_some()) {
+                st.quick_fulls_since_verify = 0;
+            } else if task.reuses_previous_full()
+                && matches!(record.status, RunStatus::Success | RunStatus::Warning)
+                && record.sources.iter().any(|s| s.mode == Some(BackupMode::Full))
+            {
+                st.quick_fulls_since_verify = st.quick_fulls_since_verify.saturating_add(1);
             }
             s.save_states();
             s.add_history(record.clone());

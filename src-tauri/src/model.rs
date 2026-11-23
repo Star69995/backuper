@@ -192,6 +192,13 @@ pub struct Task {
     pub delete_before: bool,
     /// Full backup: rename the previous full folder and mirror into it instead of copying everything again.
     pub reuse_previous: bool,
+    /// Quick full backup: before updating the previous full, read the files it would leave alone
+    /// (same size and modified time as the source) and compare their content with the source
+    /// (`verify.rs`); a copy that differs or can't be read is replaced. Every `verify_every`-th
+    /// quick full backup (`TaskState.quick_fulls_since_verify`).
+    pub verify_content: bool,
+    /// 1 = every quick full backup, N = every N-th.
+    pub verify_every: u32,
     /// On a full backup, delete incremental folders that ended up empty (no changes at that run).
     pub delete_empty_incrementals: bool,
     pub copy_empty_dirs: bool,
@@ -231,6 +238,8 @@ impl Default for Task {
             keep_days: 30,
             delete_before: false,
             reuse_previous: false,
+            verify_content: false,
+            verify_every: 1,
             delete_empty_incrementals: true,
             copy_empty_dirs: false,
             vss_open_files: false,
@@ -306,6 +315,18 @@ impl Task {
     pub fn settle_retention(&mut self) {
         self.reuse_previous &= self.keeps_one_full();
         self.delete_before &= !self.reuse_previous;
+        self.verify_every = self.verify_every.max(1);
+    }
+
+    /// The previous full backup is updated in place (`backup::reuses_previous_full`).
+    pub fn reuses_previous_full(&self) -> bool {
+        self.reuse_previous && self.keeps_one_full()
+    }
+
+    /// Whether the next quick full backup compares the backup's content with the source, given how
+    /// many quick full backups ran since the last check.
+    pub fn verifies_next(&self, since_last: u32) -> bool {
+        self.verify_content && self.reuses_previous_full() && since_last.saturating_add(1) >= self.verify_every.max(1)
     }
 }
 
@@ -354,6 +375,8 @@ pub struct TaskState {
     /// The user asked for the next automatic run (scheduled, catch-up, drive connected) to be a
     /// full backup instead of the task's own mode. Cleared once a full backup completes.
     pub full_next: bool,
+    /// Quick full backups since the last one that checked the backup's content (`Task.verify_every`).
+    pub quick_fulls_since_verify: u32,
 }
 
 /// Size of a task's newest backup, shown in the task list.
@@ -473,6 +496,27 @@ pub struct SourceRun {
     /// How the source was copied (engine command line, exit code, volumes, files that were saved
     /// by a second try...), for debugging: shown only in the copied error text.
     pub debug: Vec<String>,
+    /// The content check of a quick full backup (`Task.verify_content`), when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyReport>,
+}
+
+/// What the content check of a quick full backup found (`verify.rs`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VerifyReport {
+    /// Files compared with the source, and their size.
+    pub files: u64,
+    pub bytes: u64,
+    /// Files that weren't checked: the source couldn't be read (in use by another program...), or
+    /// it changed while being read (it gets copied anyway).
+    pub skipped: u64,
+    /// Copies whose content differed from the source or couldn't be read: replaced in this run.
+    pub mismatched: u64,
+    /// Of those, copies that couldn't be removed or marked, so they stay as they were.
+    pub unfixed: u64,
+    /// Source paths of the first mismatched files.
+    pub paths: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -644,7 +688,7 @@ pub struct Progress {
     pub task_id: String,
     pub task_name: String,
     pub mode: BackupMode,
-    /// "scanning" | "deleting" | "pruning" | "copying"
+    /// "scanning" | "deleting" | "pruning" | "verifying" | "vss" | "copying"
     pub phase: String,
     pub started_at: DateTime<Local>,
     /// 1-based index of the source being backed up, out of source_count.
@@ -705,6 +749,18 @@ pub struct FullSpace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn content_check_every_nth_quick_full() {
+        let mut t = Task { reuse_previous: true, verify_content: true, verify_every: 3, ..Task::default() };
+        assert_eq!([0, 1, 2, 3].map(|n| t.verifies_next(n)), [false, false, true, true]);
+        t.verify_every = 0; // read from an older or hand-edited file: every time
+        assert!(t.verifies_next(0));
+        t.keep_count = 2; // no quick full backup: nothing to check
+        assert!(!t.verifies_next(5));
+        t.settle_retention();
+        assert_eq!(t.verify_every, 1);
+    }
+
     use super::*;
 
     #[test]
